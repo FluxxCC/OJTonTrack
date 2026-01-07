@@ -18,10 +18,13 @@ export const metadata: Metadata = {
   title: "OJTonTrack",
   description: "OJT Management System",
   manifest: "/manifest.json",
-  themeColor: "#F97316",
   icons: {
     apple: "/icons-192.png",
   },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#F97316",
 };
 
 export default function RootLayout({
