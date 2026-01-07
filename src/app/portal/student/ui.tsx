@@ -7,9 +7,16 @@ import citeLogo from "../../../../assets/CITE.png";
 import { AttendanceDetailsModal } from "@/components/AttendanceDetailsModal";
 
 export type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved"; approvedAt?: number };
-export type ReportEntry = { id?: number; title: string; body?: string; fileName?: string; fileType?: string; submittedAt: number; instructorComment?: string };
+export type ReportEntry = { id?: number; title: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string };
 type ServerAttendanceEntry = { type: "in" | "out"; ts: number; photourl: string; status?: string; approvedby?: string | null };
 const DUE_DATE_TEXT = new Date(Date.now() + 86400000).toLocaleDateString();
+
+const toBase64 = (file: File) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.readAsDataURL(file);
+  reader.onload = () => resolve(reader.result);
+  reader.onerror = error => reject(error);
+});
 
 export type User = {
   id: number;
@@ -857,7 +864,7 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
     try {
       const payload: any = {
         idnumber,
-        title: title.trim(),
+        title: (file || existingFile) ? (file?.name || existingFile?.name) : title.trim(),
         body: body.trim(),
         fileName: file?.name || existingFile?.name,
         fileType: file?.type || existingFile?.type,
@@ -982,12 +989,18 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
     
     setSubmitting(true);
     try {
+      let fileData = null;
+      if (file) {
+        fileData = await toBase64(file);
+      }
+
       const payload: any = {
         idnumber,
-        title: t || file?.name || existingFile?.name,
+        title: (file || existingFile) ? (file?.name || existingFile?.name) : t,
         body: b,
         fileName: file?.name || existingFile?.name,
         fileType: file?.type || existingFile?.type,
+        fileData: fileData, // Send base64 data
         isDraft: false
       };
       if (draftId) payload.id = draftId;
@@ -1064,19 +1077,21 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
                  <input 
                    value={title} 
                    onChange={e => setTitle(e.target.value)}
-                   placeholder="e.g. Week 5 Accomplishment Report"
-                   className="w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all shadow-sm"
+                   disabled={!!file}
+                   placeholder={!!file ? "Title will be the filename" : "e.g. Week 5 Accomplishment Report"}
+                   className={`w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all shadow-sm ${!!file ? "bg-gray-100 cursor-not-allowed opacity-70" : ""}`}
                  />
                </div>
                
                <div>
                  <label className="block text-sm font-bold text-gray-700 mb-1.5">Content</label>
                  <textarea 
-                   value={body}
-                   onChange={e => setBody(e.target.value)}
-                   placeholder="Describe your activities, learnings, and accomplishments this week..."
-                   className="w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all min-h-[300px] resize-y shadow-sm"
-                 />
+                  value={body}
+                  onChange={e => setBody(e.target.value)}
+                  disabled={!!file}
+                  placeholder={!!file ? "Text editing is disabled when a file is attached." : "Describe your activities, learnings, and accomplishments this week..."}
+                  className={`w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all min-h-[300px] resize-y shadow-sm ${!!file ? "bg-gray-100 cursor-not-allowed opacity-70" : ""}`}
+                />
                </div>
 
                <div>
@@ -1298,15 +1313,21 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
                                 </div>
                                 <span className="text-[10px] text-gray-400 whitespace-nowrap font-medium">{new Date(r.submittedAt).toLocaleDateString(undefined, {month:'short', day:'numeric'})}</span>
                              </div>
-                             <p className="text-xs text-gray-500 line-clamp-2 mb-2 leading-relaxed">{r.body || "No text content."}</p>
+                             {r.fileName ? (
+                                <div className="flex items-center gap-3 p-3 rounded-lg bg-orange-50 border border-orange-100 mb-2">
+                                   <div className="h-8 w-8 rounded-lg bg-orange-100 flex items-center justify-center text-orange-600 flex-shrink-0">
+                                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                                   </div>
+                                   <div className="min-w-0">
+                                      <div className="text-xs font-bold text-gray-900 truncate">{r.fileName}</div>
+                                      <div className="text-[10px] text-gray-500">Attached Document</div>
+                                   </div>
+                                </div>
+                             ) : (
+                                <p className="text-xs text-gray-500 line-clamp-2 mb-2 leading-relaxed">{r.body || "No text content."}</p>
+                             )}
                              <div className="flex items-center gap-2">
                                 <div className="text-[10px] px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-semibold">Submitted</div>
-                                {r.fileName && (
-                                   <div className="flex items-center gap-1 text-[10px] text-gray-400">
-                                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                                      <span className="truncate max-w-[80px]">{r.fileName}</span>
-                                   </div>
-                                )}
                              </div>
                              <div className="absolute right-3 bottom-3 opacity-0 group-hover:opacity-100 transition-opacity">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F97316" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
@@ -1404,9 +1425,21 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
                           )}
                         </div>
                         
-                        <p className="text-sm text-gray-500 line-clamp-2 mb-3 leading-relaxed">
-                          {r.body || "No text content provided."}
-                        </p>
+                        {r.fileName ? (
+                           <div className="flex items-center gap-3 p-3 rounded-lg bg-orange-50 border border-orange-100 mb-3">
+                              <div className="h-10 w-10 rounded-lg bg-orange-100 flex items-center justify-center text-orange-600 flex-shrink-0">
+                                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                              </div>
+                              <div className="min-w-0">
+                                 <div className="text-sm font-bold text-gray-900 truncate">{r.fileName}</div>
+                                 <div className="text-xs text-gray-500">Attached Document</div>
+                              </div>
+                           </div>
+                        ) : (
+                           <p className="text-sm text-gray-500 line-clamp-2 mb-3 leading-relaxed">
+                             {r.body || "No text content provided."}
+                           </p>
+                        )}
 
                         <div className="flex flex-wrap items-center gap-3 text-xs">
                           <span className="px-2 py-1 rounded-md bg-green-50 text-green-700 font-bold border border-green-100 uppercase tracking-wide text-[10px]">
@@ -1497,9 +1530,20 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
                       <div className="text-xs text-gray-500">Attached Document</div>
                    </div>
                 </div>
-                <button className="px-4 py-2 text-sm font-semibold text-[#F97316] bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-[#F97316] hover:text-white hover:border-[#F97316] transition-all">
-                   Download
-                </button>
+                <a 
+                   href={viewing.fileUrl || "#"} 
+                   target="_blank" 
+                   rel="noopener noreferrer"
+                   className={`px-4 py-2 text-sm font-semibold border rounded-lg shadow-sm transition-all flex items-center gap-2 ${
+                     viewing.fileUrl 
+                       ? "text-[#F97316] bg-white border-gray-200 hover:bg-[#F97316] hover:text-white hover:border-[#F97316]" 
+                       : "text-gray-400 bg-gray-50 border-gray-200 cursor-not-allowed"
+                   }`}
+                   onClick={(e) => !viewing.fileUrl && e.preventDefault()}
+                >
+                   <span>Download</span>
+                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                </a>
               </div>
             )}
 

@@ -23,6 +23,7 @@ export const metadata: Metadata = {
   },
 };
 
+import type { Viewport } from "next";
 export const viewport: Viewport = {
   themeColor: "#F97316",
 };

@@ -1,7 +1,24 @@
 import { NextResponse } from "next/server";
+import { v2 as cloudinary } from "cloudinary";
 import { getSupabaseAdmin } from "../../../lib/supabaseClient";
 
-type ReportFile = { name?: string; type?: string } | null;
+function configureCloudinary() {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME || "";
+  const apiKey = process.env.CLOUDINARY_API_KEY || "";
+  const apiSecret = process.env.CLOUDINARY_API_SECRET || "";
+  if (!cloudName || !apiKey || !apiSecret) {
+    console.error("Cloudinary credentials missing");
+    throw new Error("Cloudinary credentials missing");
+  }
+  cloudinary.config({
+    cloud_name: cloudName,
+    api_key: apiKey,
+    api_secret: apiSecret,
+  });
+  return true;
+}
+
+type ReportFile = { name?: string; type?: string; url?: string } | null;
 type ReportFiles = ReportFile[] | ReportFile | undefined;
 type ReportRow = {
   id: number;
@@ -59,14 +76,17 @@ export async function GET(req: Request) {
       // Parse files jsonb
       let fileName = undefined;
       let fileType = undefined;
+      let fileUrl = undefined;
       if (row.files && Array.isArray(row.files) && row.files.length > 0) {
         const f = row.files[0] as ReportFile;
         fileName = f?.name;
         fileType = f?.type;
+        fileUrl = f?.url;
       } else if (row.files && typeof row.files === "object") {
         const f = row.files as ReportFile;
         fileName = f?.name;
         fileType = f?.type;
+        fileUrl = f?.url;
       }
 
       return {
@@ -75,6 +95,7 @@ export async function GET(req: Request) {
         body: row.text,
         fileName,
         fileType,
+        fileUrl,
         instructorComment: commentsMap[String(row.id)] || null,
         submittedAt: row.ts ? Number(row.ts) : (row.submittedat ? new Date(row.submittedat).getTime() : Date.now()),
         status: (row as any).status,
@@ -166,11 +187,31 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => ({}));
     console.log("Received report submission:", JSON.stringify(body, null, 2));
 
-    const { id, idnumber, title, body: text, fileName, fileType, isDraft } = body;
+    const { id, idnumber, title, body: text, fileName, fileType, fileData, isDraft } = body;
 
     if (!idnumber) {
       console.error("Missing idnumber in report submission");
       return NextResponse.json({ error: "idnumber is required" }, { status: 400 });
+    }
+
+    // Handle File Upload
+    let fileUrl = undefined;
+    if (fileData && fileName) {
+        configureCloudinary(); // Will throw if missing credentials
+        
+        try {
+            console.log("Uploading file to Cloudinary...");
+            const uploadRes = await cloudinary.uploader.upload(fileData, {
+                folder: "ojt_reports",
+                resource_type: "auto",
+                public_id: `report_${idnumber}_${Date.now()}_${fileName.replace(/\s+/g, '_')}`
+            });
+            fileUrl = uploadRes.secure_url;
+            console.log("File uploaded:", fileUrl);
+        } catch (err) {
+            console.error("Cloudinary upload failed:", err);
+            return NextResponse.json({ error: "Failed to upload file" }, { status: 500 });
+        }
     }
 
     // Fetch user to get course
@@ -182,7 +223,7 @@ export async function POST(req: Request) {
 
     if (userError) console.warn("Could not fetch user course:", userError);
 
-    const files = fileName ? [{ name: fileName, type: fileType }] : [];
+    const files = fileName ? [{ name: fileName, type: fileType, url: fileUrl }] : [];
     const ts = Date.now();
     const submittedat = new Date().toISOString();
     const status = isDraft ? "draft" : "submitted";

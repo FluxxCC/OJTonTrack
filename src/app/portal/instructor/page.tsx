@@ -38,7 +38,7 @@ import { UsersView, AddUserForm, EditUserForm, ViewUserDetails, Modal, Confirmat
 
 type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved"; approvedAt?: number; approvedBy?: string };
 type ServerAttendanceEntry = { type: "in" | "out"; ts: number; photourl: string; status?: string; approvedby?: string | null; approvedat?: string | null };
-type ReportEntry = { id: number; title?: string; body?: string; fileName?: string; fileType?: string; submittedAt: number; instructorComment?: string };
+type ReportEntry = { id: number; title?: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string };
 type ReportFile = { name?: string; type?: string } | null;
 type ReportFiles = ReportFile[] | ReportFile | undefined;
 type User = {
@@ -61,7 +61,7 @@ type Course = { id: number; name: string; name_key: string };
 type Section = { id: number; name: string; code: string; course_id: number };
 type TabId = "dashboard" | "students" | "users" | "profile";
 type ReportRow = { id: number; idnumber: string; title?: string | null; text?: string | null; files?: ReportFiles; ts?: number | null; submittedat?: string | null; instructor_comment?: string | null; status?: string | null };
-type ApiReport = { id: number; title?: string; body?: string; fileName?: string; fileType?: string; submittedAt: number; instructorComment?: string | null; status?: string };
+type ApiReport = { id: number; title?: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string | null; status?: string };
 type EvaluationDetail = { createdAt: number; supervisorId?: string; comment?: string; interpretation?: string; criteria: Record<string, number>; overallScore?: number };
 
 function formatCourseSection(courseStr?: string, sectionStr?: string): string {
@@ -723,14 +723,20 @@ const StudentDetailsPanel = ({
                         <h4 className="font-semibold text-gray-900 text-sm group-hover:text-orange-700 transition-colors">{r.title || "Untitled Report"}</h4>
                         <span className="text-xs text-gray-400">{new Date(r.submittedAt).toLocaleDateString()}</span>
                         </div>
-                        <p className="text-xs text-gray-600 line-clamp-2 mb-2">{r.body || "No content"}</p>
+                        {r.fileName ? (
+                           <div className="flex items-center gap-2 p-2 rounded-lg bg-orange-50 border border-orange-100 mb-2">
+                              <div className="h-8 w-8 rounded-lg bg-orange-100 flex items-center justify-center text-orange-600 flex-shrink-0">
+                                 <FileText size={16} />
+                              </div>
+                              <div className="min-w-0">
+                                 <div className="text-xs font-bold text-gray-900 truncate">{r.fileName}</div>
+                                 <div className="text-[10px] text-gray-500">Attached Document</div>
+                              </div>
+                           </div>
+                        ) : (
+                           <p className="text-xs text-gray-600 line-clamp-2 mb-2">{r.body || "No content"}</p>
+                        )}
                         <div className="flex items-center gap-2">
-                            {r.fileName && (
-                            <div className="flex items-center gap-2 text-xs text-orange-600 bg-orange-50 px-2 py-1 rounded-md w-fit">
-                                <FileText size={12} />
-                                <span className="truncate max-w-[150px]">{r.fileName}</span>
-                            </div>
-                            )}
                             {r.instructorComment && (
                             <div className="flex items-center gap-1.5 text-xs text-blue-600 bg-blue-50 px-2 py-1 rounded-md">
                                 <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
@@ -1149,10 +1155,15 @@ const StudentsView = ({
                                 <div className="text-xs text-gray-500 uppercase">{viewingReport.fileType?.split('/')[1] || 'FILE'}</div>
                             </div>
                             <a 
-                                href={`/api/files/${viewingReport.fileName}`} 
+                                href={viewingReport.fileUrl || "#"} 
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="px-4 py-2 text-sm font-medium text-orange-700 bg-orange-100 hover:bg-orange-200 rounded-lg transition-colors"
+                                className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+                                    viewingReport.fileUrl 
+                                    ? "text-orange-700 bg-orange-100 hover:bg-orange-200" 
+                                    : "text-gray-400 bg-gray-100 cursor-not-allowed"
+                                }`}
+                                onClick={(e) => !viewingReport.fileUrl && e.preventDefault()}
                             >
                                 Download
                             </a>
@@ -1350,14 +1361,20 @@ const StudentsView = ({
                         <h4 className="font-semibold text-gray-900 text-sm group-hover:text-orange-700 transition-colors">{r.title || "Untitled Report"}</h4>
                         <span className="text-xs text-gray-900 font-medium">{new Date(r.submittedAt).toLocaleDateString()}</span>
                       </div>
-                      <p className="text-xs text-gray-600 line-clamp-2 mb-2">{r.body || "No content"}</p>
+                      {r.fileName ? (
+                         <div className="flex items-center gap-2 p-2 rounded-lg bg-orange-50 border border-orange-100 mb-2">
+                            <div className="h-8 w-8 rounded-lg bg-orange-100 flex items-center justify-center text-orange-600 flex-shrink-0">
+                               <FileText size={16} />
+                            </div>
+                            <div className="min-w-0">
+                               <div className="text-xs font-bold text-gray-900 truncate">{r.fileName}</div>
+                               <div className="text-[10px] text-gray-500">Attached Document</div>
+                            </div>
+                         </div>
+                      ) : (
+                         <p className="text-xs text-gray-600 line-clamp-2 mb-2">{r.body || "No content"}</p>
+                      )}
                       <div className="flex items-center gap-2">
-                        {r.fileName && (
-                          <div className="flex items-center gap-2 text-xs text-orange-600 bg-orange-50 px-2 py-1 rounded-md w-fit">
-                            <FileText size={12} />
-                            <span className="truncate max-w-[200px]">{r.fileName}</span>
-                          </div>
-                        )}
                         {r.instructorComment && (
                           <div className="flex items-center gap-1.5 text-xs text-blue-600 bg-blue-50 px-2 py-1 rounded-md">
                             <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
@@ -1837,6 +1854,7 @@ export default function InstructorPage() {
               body: r.body,
               fileName: r.fileName,
               fileType: r.fileType,
+              fileUrl: r.fileUrl,
               submittedAt: Number(r.submittedAt),
               instructorComment: r.instructorComment || undefined,
             }))
