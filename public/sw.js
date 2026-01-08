@@ -74,14 +74,17 @@ self.addEventListener('activate', (event) => {
    const targetUrl = raw.startsWith('http') ? raw : (self.location.origin + raw);
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
-      const supervisorTab = clientList.find(c => c.url && c.url.includes('/portal/supervisor'));
-      const chosen = supervisorTab || clientList[0];
-      if (chosen && 'focus' in chosen) {
-        try { chosen.postMessage({ type: 'notification-click', url: targetUrl }); } catch {}
-        return chosen.focus();
+      // Try to find an existing tab to focus
+      for (const client of clientList) {
+        if (client.url && client.url.includes(self.location.origin) && 'focus' in client) {
+          try { client.postMessage({ type: 'notification-click', url: targetUrl }); } catch {}
+          return client.focus();
+        }
       }
-       // No existing client found; do not open a new tab to respect current session rule
-       return Promise.resolve();
+      // If no client is found, open a new window
+      if (clients.openWindow) {
+        return clients.openWindow(targetUrl);
+      }
     })
   );
 });

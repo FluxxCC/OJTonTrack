@@ -18,6 +18,7 @@ import {
   Calendar,
   LogIn,
   Zap,
+  BellRing,
 } from 'lucide-react';
 import { 
   AttendanceView as LegacyAttendanceView, 
@@ -83,20 +84,76 @@ export default function StudentPage() {
   
   // PWA Install
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
 
   useEffect(() => {
-    const isReload = (() => {
-      try {
-        const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming;
-        return !!nav && nav.type === 'reload';
-      } catch {
-        const t = (performance as unknown as { navigation?: { type?: number } })?.navigation?.type;
-        return t === 1;
-      }
-    })();
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      setNotificationPermission(Notification.permission);
+    }
+  }, []);
+
+  const requestNotificationPermission = async () => {
+    if (!('Notification' in window)) return;
+    const permission = await Notification.requestPermission();
+    setNotificationPermission(permission);
+    if (permission === 'granted') {
+       try {
+         if ('serviceWorker' in navigator) {
+           const reg = await navigator.serviceWorker.ready;
+           const res = await fetch('/api/push/public-key');
+           const { publicKey } = await res.json();
+           const existing = await reg.pushManager.getSubscription();
+           const sub = existing || await reg.pushManager.subscribe({
+             userVisibleOnly: true,
+             applicationServerKey: (() => {
+               const padding = '='.repeat((4 - (publicKey.length % 4)) % 4);
+               const base64Safe = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
+               const rawData = atob(base64Safe);
+               const outputArray = new Uint8Array(rawData.length);
+               for (let i = 0; i < rawData.length; ++i) {
+                 outputArray[i] = rawData.charCodeAt(i);
+               }
+               return outputArray;
+             })()
+           });
+           
+           if (idnumber) {
+             await fetch('/api/push/subscribe', {
+               method: 'POST',
+               headers: { 'Content-Type': 'application/json' },
+               body: JSON.stringify({ idnumber, subscription: sub })
+             });
+             
+             if (!existing) {
+                try {
+                  reg.showNotification("Notifications Enabled", {
+                    body: "You will now receive updates even when the app is closed.",
+                    icon: '/icons-192.png'
+                  });
+                } catch {
+                  new Notification("Notifications Enabled", {
+                    body: "You will now receive updates even when the app is closed.",
+                    icon: '/icons-192.png'
+                  });
+                }
+             }
+           }
+         }
+       } catch (e) {
+         console.error("Push subscription failed", e);
+       }
+    }
+  };
+
+  useEffect(() => {
+    if (notificationPermission === 'granted' && idnumber) {
+      requestNotificationPermission();
+    }
+  }, [notificationPermission, idnumber]);
+
+  useEffect(() => {
     const handler = (e: Event) => {
       e.preventDefault();
-      if (!isReload) return;
       setDeferredPrompt(e);
     };
     window.addEventListener("beforeinstallprompt", handler);
@@ -531,6 +588,17 @@ export default function StudentPage() {
                       >
                         Submit Report
                       </Link>
+                      {notificationPermission === 'default' && (
+                        <button
+                          onClick={requestNotificationPermission}
+                          className="w-full rounded-xl font-bold py-3 px-6 text-sm transition-all active:scale-95 shadow bg-blue-600 text-white hover:bg-blue-700 border border-transparent"
+                        >
+                          <span className="inline-flex items-center justify-center gap-2">
+                            <BellRing size={16} />
+                            Enable Notifications
+                          </span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>

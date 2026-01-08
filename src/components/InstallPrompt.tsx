@@ -1,5 +1,6 @@
 "use client";
 import React, { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import { Download, X } from "lucide-react";
 
 type BeforeInstallPromptEvent = {
@@ -8,57 +9,57 @@ type BeforeInstallPromptEvent = {
 };
 
 export default function InstallPrompt() {
+  const pathname = usePathname();
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [show, setShow] = useState(false);
   const [isIOS] = useState(() => /iPad|iPhone|iPod/.test(navigator.userAgent));
-  const allowRef = React.useRef<boolean>(false);
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
-    const isReload = (() => {
-      try {
-        const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming;
-        return !!nav && nav.type === "reload";
-      } catch {
-        const t = (performance as unknown as { navigation?: { type?: number } })?.navigation?.type;
-        return t === 1;
-      }
-    })();
-
-    const alreadyShown = (() => {
-      try { return sessionStorage.getItem("install_prompt_done") === "1"; } catch { return false; }
-    })();
-    allowRef.current = isReload && !alreadyShown;
-
     const handler = (e: unknown) => {
       const ev = e as Event & BeforeInstallPromptEvent;
       ev.preventDefault?.();
-      // Only show during a reload session, and only once per session
-      if (allowRef.current) {
-        setDeferredPrompt(ev as BeforeInstallPromptEvent);
-        setShow(true);
-        try { sessionStorage.setItem("install_prompt_done", "1"); } catch {}
-        allowRef.current = false;
-      }
+      setDeferredPrompt(ev as BeforeInstallPromptEvent);
     };
 
+    if (pathname !== "/") return;
+
+    let alreadyShown = false;
+    try {
+      alreadyShown = sessionStorage.getItem("install_prompt_done") === "1";
+    } catch {}
+
+    if (alreadyShown) {
+      setDismissed(true);
+      return;
+    }
+
+    setShow(true);
     window.addEventListener("beforeinstallprompt", handler as EventListener);
-    return () => {
-      window.removeEventListener("beforeinstallprompt", handler as EventListener);
-    };
-  }, []);
+    return () => window.removeEventListener("beforeinstallprompt", handler as EventListener);
+  }, [pathname]);
 
   const handleInstallClick = async () => {
-    if (!deferredPrompt) return;
+    if (!deferredPrompt) {
+      handleDismiss();
+      return;
+    }
     deferredPrompt.prompt();
     await deferredPrompt.userChoice;
     setDeferredPrompt(null);
     setShow(false);
   };
 
+  const handleDismiss = () => {
+    setShow(false);
+    setDismissed(true);
+    try { sessionStorage.setItem("install_prompt_done", "1"); } catch {}
+  };
+
   const isStandalone = typeof window !== "undefined" && window.matchMedia("(display-mode: standalone)").matches;
+  if (pathname !== "/") return null;
   if (isStandalone) return null;
-  if (!show && !isIOS) return null;
-  if (isIOS && !show) return null;
+  if (dismissed) return null;
   if (!show) return null;
 
   return (
@@ -72,7 +73,7 @@ export default function InstallPrompt() {
           <p className="text-xs text-gray-500">Add to home screen for quick access</p>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setShow(false)} className="p-2 text-gray-400 hover:text-gray-600 transition-colors">
+          <button onClick={handleDismiss} className="p-2 text-gray-400 hover:text-gray-600 transition-colors">
             <X size={20} />
           </button>
           <button
