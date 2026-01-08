@@ -55,11 +55,22 @@ export async function POST(req: Request) {
     if (keepSignedIn) {
       try {
         const payload = encodeURIComponent(JSON.stringify({ idnumber: data.idnumber, role: normalizedRole }));
+        // Determine if we should use secure cookies (HTTPS only)
+        // For local development on IP addresses (e.g. 192.168.x.x), we must NOT use secure cookies.
+        // On Vercel (Production), we SHOULD use secure cookies.
+        // We can check the protocol or specific env vars.
+        const isProduction = process.env.NODE_ENV === "production";
+        const isVercel = !!process.env.VERCEL; // Vercel sets this
+        
+        // Only enforce Secure if we are strictly on Vercel or explicitly HTTPS.
+        // For local 'npm start' (production build) on HTTP, we want Secure: false.
+        const useSecure = isVercel; 
+
         res.cookies.set("ojt_session", payload, { 
           path: "/", 
           maxAge: 60 * 60 * 24 * 30, 
           sameSite: "lax",
-          secure: process.env.NODE_ENV === "production"
+          secure: useSecure
         });
       } catch {}
     }
