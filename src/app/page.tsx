@@ -18,6 +18,39 @@ export default function Home() {
   const [selected, setSelected] = useState<Role>("student");
   const [loading, setLoading] = useState(false);
 
+  React.useEffect(() => {
+    // Check for existing session to auto-redirect
+    const checkSession = async () => {
+      let role = "";
+      let idnumber = "";
+      try {
+        role = localStorage.getItem("role") || "";
+        idnumber = localStorage.getItem("idnumber") || "";
+      } catch {}
+
+      // If missing locally, check server (PWA persistence)
+      if ((!role || !idnumber) && typeof navigator !== 'undefined' && navigator.onLine) {
+        try {
+           const res = await fetch("/api/auth/check-session");
+           if (res.ok) {
+             const data = await res.json();
+             if (data.role && data.idnumber) {
+               role = data.role;
+               idnumber = data.idnumber;
+               localStorage.setItem("role", role);
+               localStorage.setItem("idnumber", idnumber);
+             }
+           }
+        } catch {}
+      }
+
+      if (role && idnumber) {
+        router.replace(`/portal/${role}`);
+      }
+    };
+    checkSession();
+  }, [router]);
+
   const onSubmit = () => {
     setLoading(true);
     try {
