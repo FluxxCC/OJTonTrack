@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
 import { getSupabaseAdmin } from "../../../lib/supabaseClient";
-import webPush from "web-push";
+const webPush: any = require("web-push");
 
 function configureCloudinary() {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME || "";

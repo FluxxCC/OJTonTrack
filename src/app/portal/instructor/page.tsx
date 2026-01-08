@@ -975,7 +975,7 @@ const StudentsView = ({
     const getLastViewedTs = (key: string) => {
       try { return Number(localStorage.getItem(key) || "0"); } catch { return 0; }
     };
-    const markViewedNow = (category: "att" | "rep", id?: string) => {
+    const markViewedNow = (category: "att" | "rep" | "eval", id?: string) => {
       if (!id) return;
       try { localStorage.setItem(`instructorViewed:${category}:${id}`, String(Date.now())); } catch {}
       setViewedVersion(v => v + 1);
@@ -1058,7 +1058,7 @@ const StudentsView = ({
                 return (
                   <button
                     key={s.idnumber}
-                    onClick={() => { markViewedNow("att", s.idnumber); markViewedNow("rep", s.idnumber); markViewedNow("eval", s.idnumber); setSelected(prev => (prev?.idnumber === s.idnumber ? null : s)); }}
+                    onClick={() => { markViewedNow("att", s.idnumber); markViewedNow("rep", s.idnumber); setSelected(prev => (prev?.idnumber === s.idnumber ? null : s)); }}
                     className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all border ${
                       isActive 
                         ? "bg-orange-50 border-orange-200 ring-1 ring-orange-200" 
@@ -1116,7 +1116,7 @@ const StudentsView = ({
               openReportsModal={() => { if (selected?.idnumber) markViewedNow("rep", selected.idnumber); setReportsModalOpen(true); }}
               onViewAttendanceEntry={setSelectedAttendanceEntry}
               evaluation={evaluation}
-              openEvaluationModal={() => { if (selected?.idnumber) markViewedNow("eval", selected.idnumber); setEvaluationModalOpen(true); }}
+              openEvaluationModal={() => { if (selected?.idnumber) { markViewedNow("att", selected.idnumber); markViewedNow("rep", selected.idnumber); } setEvaluationModalOpen(true); }}
             />
           </div>
         </div>

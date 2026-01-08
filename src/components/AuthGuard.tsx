@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 
 export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const [authorized, setAuthorized] = useState(false);
 
   useEffect(() => {
     let role = "";
@@ -49,8 +48,37 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
         return;
     }
 
-    setAuthorized(true);
   }, [router, pathname]);
+
+  const computeAuthorized = () => {
+    let role = "";
+    let idnumber = "";
+    try {
+      role = localStorage.getItem("role") || "";
+      idnumber = localStorage.getItem("idnumber") || "";
+      if ((!role || !idnumber) && typeof document !== "undefined") {
+        const cookie = document.cookie.split("; ").find((c) => c.startsWith("ojt_session="));
+        if (cookie) {
+          const raw = cookie.substring("ojt_session=".length);
+          const decoded = decodeURIComponent(raw);
+          try {
+            const obj = JSON.parse(decoded);
+            if (obj?.role && obj?.idnumber) {
+              role = String(obj.role);
+              idnumber = String(obj.idnumber);
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+    if (!role || !idnumber) return false;
+    const segments = pathname.split("/");
+    const urlRole = segments[2];
+    if (!urlRole) return false;
+    return urlRole.toLowerCase() === role;
+  };
+
+  const authorized = computeAuthorized();
 
   if (!authorized) {
     return (

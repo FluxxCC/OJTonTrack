@@ -267,22 +267,24 @@ function SupervisorContent() {
                   if ('serviceWorker' in navigator) {
                     navigator.serviceWorker.ready.then(reg => {
                       try {
+                        // @ts-ignore
                         reg.showNotification("Evaluation Available", {
                           body: msg,
                           icon: '/icons-192.png',
                           tag: `evaluation-available-${String(newRow.idnumber).trim()}-${Date.now()}`,
-                          renotify: true,
+                          // renotify is not supported in the Notification constructor; omit it here
                           data: { url: '/portal/supervisor?tab=evaluation' }
                         });
                       } catch {}
                     });
                   } else {
                     try {
+                      // @ts-ignore
                       new Notification("Evaluation Available", {
                         body: msg,
                         icon: '/icons-192.png',
                         tag: `evaluation-available-${String(newRow.idnumber).trim()}-${Date.now()}`,
-                        renotify: true
+                        // renotify is not supported in the Notification constructor
                       });
                     } catch {}
                   }
@@ -318,22 +320,24 @@ function SupervisorContent() {
                   if ('serviceWorker' in navigator) {
                     navigator.serviceWorker.ready.then(reg => {
                       try {
+                        // @ts-ignore
                         reg.showNotification("Evaluation Available", {
                           body: msg,
                           icon: '/icons-192.png',
                           tag: `evaluation-available-${String(idnumber).trim()}-${Date.now()}`,
-                          renotify: true,
+// renotify is not supported in the Notification constructor; omit it here
                           data: { url: '/portal/supervisor?tab=evaluation' }
                         });
                       } catch {}
                     });
                   } else {
                     try {
+                      // @ts-ignore
                       new Notification("Evaluation Available", {
                         body: msg,
                         icon: '/icons-192.png',
                         tag: `evaluation-available-${String(idnumber).trim()}-${Date.now()}`,
-                        renotify: true
+                        // renotify is not supported in the Notification constructor; omit it here
                       });
                     } catch {}
                   }

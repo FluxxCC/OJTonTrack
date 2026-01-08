@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "../../../../lib/supabaseClient";
-import webPush from "web-push";
+const webPush: any = require("web-push");
 
 export async function POST(req: Request) {
   try {
