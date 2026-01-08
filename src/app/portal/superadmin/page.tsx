@@ -249,15 +249,13 @@ export default function SuperAdminPage() {
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
     try {
-      localStorage.removeItem("userId");
-      localStorage.removeItem("idnumber");
-      localStorage.removeItem("role");
-      localStorage.removeItem("name");
-      localStorage.removeItem("firstname");
-      localStorage.removeItem("lastname");
-    } catch {}
+      await fetch("/api/auth/logout", { method: "POST" });
+      localStorage.clear();
+    } catch (e) {
+      console.error("Logout failed", e);
+    }
     router.replace("/");
   };
 

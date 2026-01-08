@@ -1515,7 +1515,13 @@ export default function InstructorPage() {
   const [viewingReport, setViewingReport] = useState<ReportEntry | null>(null);
   const [isAttendanceModalOpen, setAttendanceModalOpen] = useState(false);
   const [isReportsModalOpen, setReportsModalOpen] = useState(false);
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+      localStorage.clear();
+    } catch (e) {
+      console.error("Logout failed", e);
+    }
     router.replace("/");
   };
   

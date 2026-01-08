@@ -120,13 +120,13 @@ export default function CoordinatorPage() {
     } catch {}
   }, []);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     try {
+      await fetch("/api/auth/logout", { method: "POST" });
       localStorage.clear();
-      document.cookie.split(";").forEach((c) => {
-        document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/");
-      });
-    } catch {}
+    } catch (e) {
+      console.error("Logout failed", e);
+    }
     router.replace("/");
   };
 

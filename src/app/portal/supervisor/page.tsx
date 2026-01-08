@@ -611,15 +611,13 @@ function SupervisorContent() {
   }, [myIdnumber]);
 
   // Logout
-  const handleLogout = () => {
+  const handleLogout = async () => {
     try {
-      localStorage.removeItem("userId");
-      localStorage.removeItem("idnumber");
-      localStorage.removeItem("role");
-      localStorage.removeItem("firstname");
-      localStorage.removeItem("lastname");
-      document.cookie = "ojt_session=; Max-Age=0; Path=/; SameSite=Lax";
-    } catch {}
+      await fetch("/api/auth/logout", { method: "POST" });
+      localStorage.clear();
+    } catch (e) {
+      console.error("Logout failed", e);
+    }
     router.replace("/");
   };
 
