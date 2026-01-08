@@ -992,7 +992,7 @@ export function DashboardView({
 }
 
 // --- Attendance View ---
-export function AttendanceView({ students, myIdnumber, onPendingChange }: { students: User[], myIdnumber: string, onPendingChange?: (count: number) => void }) {
+export function AttendanceView({ students, myIdnumber, onPendingChange, refreshKey }: { students: User[], myIdnumber: string, onPendingChange?: (count: number) => void, refreshKey?: number }) {
   const [rows, setRows] = useState<ApprovalRow[]>([]);
   const [recent, setRecent] = useState<ApprovalRow[]>([]);
   const [selectedAttendanceEntry, setSelectedAttendanceEntry] = useState<AttendanceEntry | null>(null);
