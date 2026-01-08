@@ -195,8 +195,41 @@ export async function PATCH(req: Request) {
           is_read: false,
           created_at: new Date().toISOString()
         });
+
+        // Send Push to Student
+        const pub = process.env.VAPID_PUBLIC_KEY || "";
+        const priv = process.env.VAPID_PRIVATE_KEY || "";
+        if (pub && priv) {
+          const { data: subs } = await admin
+            .from("push_subscriptions")
+            .select("endpoint,p256dh,auth")
+            .eq("idnumber", attendanceData.idnumber);
+
+          if (subs && subs.length > 0) {
+            webPush.setVapidDetails("mailto:admin@ojtontrack.local", pub, priv);
+            const pushPayload = JSON.stringify({
+              title: "Attendance Approved",
+              body: `Your ${typeStr} for ${dateStr} has been approved.`,
+              icon: "/icons-192.png",
+              url: "/portal/student/attendance"
+            });
+
+            for (const s of subs) {
+              try {
+                await webPush.sendNotification({
+                  endpoint: s.endpoint,
+                  keys: { p256dh: s.p256dh, auth: s.auth }
+                }, pushPayload);
+              } catch (e: any) {
+                if (e?.statusCode === 410 || e?.statusCode === 404) {
+                  await admin.from("push_subscriptions").delete().eq("endpoint", s.endpoint);
+                }
+              }
+            }
+          }
+        }
       } catch (err) {
-        console.error("Failed to create notification:", err);
+        console.error("Failed to create notification or send push:", err);
       }
     }
 

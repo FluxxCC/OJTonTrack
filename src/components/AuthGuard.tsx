@@ -14,19 +14,23 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
       role = localStorage.getItem("role") || "";
       idnumber = localStorage.getItem("idnumber") || "";
       if ((!role || !idnumber) && typeof document !== "undefined") {
-        const cookie = document.cookie.split("; ").find((c) => c.startsWith("ojt_session="));
-        if (cookie) {
-          const raw = cookie.substring("ojt_session=".length);
-          const decoded = decodeURIComponent(raw);
+        // More robust cookie parsing using regex
+        const match = document.cookie.match(/(^|;)\s*ojt_session=([^;]+)/);
+        if (match) {
+          const raw = match[2];
           try {
+            const decoded = decodeURIComponent(raw);
             const obj = JSON.parse(decoded);
             if (obj?.role && obj?.idnumber) {
               role = String(obj.role);
               idnumber = String(obj.idnumber);
+              // Restore to localStorage so subsequent checks are faster
               localStorage.setItem("role", role);
               localStorage.setItem("idnumber", idnumber);
             }
-          } catch {}
+          } catch (e) {
+            console.error("Failed to restore session from cookie:", e);
+          }
         }
       }
     } catch {}

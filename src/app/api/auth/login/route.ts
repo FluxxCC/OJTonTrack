@@ -55,7 +55,12 @@ export async function POST(req: Request) {
     if (keepSignedIn) {
       try {
         const payload = encodeURIComponent(JSON.stringify({ idnumber: data.idnumber, role: normalizedRole }));
-        res.cookies.set("ojt_session", payload, { path: "/", maxAge: 60 * 60 * 24 * 30, sameSite: "lax" });
+        res.cookies.set("ojt_session", payload, { 
+          path: "/", 
+          maxAge: 60 * 60 * 24 * 30, 
+          sameSite: "lax",
+          secure: process.env.NODE_ENV === "production"
+        });
       } catch {}
     }
     return res;
