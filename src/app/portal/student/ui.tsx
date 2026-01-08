@@ -203,7 +203,7 @@ export function DashboardView({
     return [totalHours, `${remaining} hrs left`, pct];
   }, [totalHours, targetHours]);
 
-  const lastReport = reports.slice().reverse()[0];
+  const lastReport = reports[0];
   const dueDateText = DUE_DATE_TEXT;
 
   const isCheckedIn = useMemo(() => {
@@ -284,7 +284,7 @@ export function DashboardView({
             </div>
             <button 
                 onClick={isCheckedIn ? onTimeOut : onTimeIn} 
-                className={`w-full rounded-xl font-bold py-3 px-4 text-sm transition-all active:scale-95 shadow-lg flex items-center justify-center gap-2 ${isCheckedIn ? "bg-white text-red-600 hover:bg-gray-100" : "bg-[#F97316] text-white hover:bg-[#EA580C]"}`}
+                className={`w-full rounded-xl font-bold py-2.5 px-4 text-sm transition-all active:scale-95 shadow-lg flex items-center justify-center gap-2 ${isCheckedIn ? "bg-white text-red-600 hover:bg-gray-100" : "bg-[#F97316] text-white hover:bg-[#EA580C]"}`}
               >
                 {isCheckedIn ? (
                    <>
@@ -447,6 +447,7 @@ export function DashboardView({
 
 export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: string; attendance: AttendanceEntry[]; onUpdate: (next: AttendanceEntry[]) => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const [photo, setPhoto] = useState<string | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [nowText, setNowText] = useState<string>("");
@@ -455,6 +456,12 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
   const [filterDate, setFilterDate] = useState("");
   const [selectedAttendanceEntry, setSelectedAttendanceEntry] = useState<AttendanceEntry | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [hasDesktopCamera, setHasDesktopCamera] = useState<boolean>(false);
+  const [isMobile, setIsMobile] = useState<boolean>(false);
+  const [videoReady, setVideoReady] = useState<boolean>(false);
+  const readinessIntervalRef = useRef<number | null>(null);
+  const [isFrontCam, setIsFrontCam] = useState<boolean>(false);
 
   const filteredAttendance = useMemo(() => {
     let result = attendance;
@@ -487,6 +494,57 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => {
+    try {
+      const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      setIsMobile(mobile);
+    } catch {}
+    (async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const hasVideoInput = devices.some(d => d.kind === 'videoinput');
+        setHasDesktopCamera(hasVideoInput);
+      } catch {
+        setHasDesktopCamera(false);
+      }
+    })();
+    return () => {
+      stream?.getTracks()?.forEach(t => t.stop());
+    };
+  }, [stream]);
+
+  useEffect(() => {
+    if (!stream) return;
+    const v = videoRef.current;
+    if (!v) return;
+    try {
+      v.srcObject = stream;
+    } catch {}
+    setVideoReady(false);
+    const onLoadedMetadata = async () => {
+      setVideoReady(true);
+      try { await v.play(); } catch {}
+    };
+    const onCanPlay = () => setVideoReady(true);
+    v.onloadedmetadata = onLoadedMetadata;
+    v.oncanplay = onCanPlay;
+    try { v.play(); setVideoReady(true); } catch {}
+    if (readinessIntervalRef.current) { clearInterval(readinessIntervalRef.current); readinessIntervalRef.current = null; }
+    readinessIntervalRef.current = window.setInterval(() => {
+      const track = stream.getVideoTracks()[0];
+      const live = track && track.readyState === "live";
+      if (v.videoWidth > 0 && v.videoHeight > 0 && live) {
+        setVideoReady(true);
+        if (readinessIntervalRef.current) { clearInterval(readinessIntervalRef.current); readinessIntervalRef.current = null; }
+      }
+    }, 200);
+    return () => {
+      if (readinessIntervalRef.current) { clearInterval(readinessIntervalRef.current); readinessIntervalRef.current = null; }
+    };
+  }, [stream]);
+
+  // Camera starts only when user taps "Start Camera"
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -497,6 +555,107 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
       reader.readAsDataURL(file);
     }
   };
+
+  const startCamera = async () => {
+    setCameraError(null);
+    if (isMobile) {
+      fileInputRef.current?.click();
+      return;
+    }
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setCameraError("Camera API not supported");
+        return;
+      }
+      if (location.protocol !== "https:" && location.hostname !== "localhost") {
+        setCameraError("Camera requires a secure connection");
+        return;
+      }
+      let s: MediaStream | null = null;
+      try {
+        s = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: "user", 
+            width: { ideal: 1280 }, 
+            height: { ideal: 720 } 
+          },
+          audio: false 
+        });
+      } catch {
+        s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
+      if (!s) throw new Error("Unable to start camera");
+      setStream(s);
+      try {
+        const track = s.getVideoTracks()[0];
+        const settings = track.getSettings();
+        setIsFrontCam(String(settings.facingMode).toLowerCase() === "user");
+      } catch { setIsFrontCam(true); }
+      if (videoRef.current) {
+        videoRef.current.srcObject = s;
+        setVideoReady(false);
+        videoRef.current.onloadedmetadata = async () => {
+          setVideoReady(true);
+          try { await videoRef.current?.play(); } catch {}
+        };
+        videoRef.current.oncanplay = () => setVideoReady(true);
+        try { await videoRef.current.play(); setVideoReady(true); } catch {}
+        if (readinessIntervalRef.current) { clearInterval(readinessIntervalRef.current); readinessIntervalRef.current = null; }
+        readinessIntervalRef.current = window.setInterval(() => {
+          const v = videoRef.current;
+          const track = s.getVideoTracks()[0];
+          const live = track && track.readyState === "live";
+          if (v && v.videoWidth > 0 && v.videoHeight > 0 && live) {
+            setVideoReady(true);
+            if (readinessIntervalRef.current) { clearInterval(readinessIntervalRef.current); readinessIntervalRef.current = null; }
+          }
+        }, 200);
+        // Fallback: mark ready after 1500ms if stream is active
+        window.setTimeout(() => {
+          const track = s.getVideoTracks()[0];
+          if (track && track.readyState === "live") setVideoReady(true);
+        }, 1500);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unable to access camera";
+      setCameraError(msg);
+      setStream(null);
+    }
+  };
+
+  const stopCamera = () => {
+    try {
+      stream?.getTracks()?.forEach(t => t.stop());
+    } catch {}
+    setStream(null);
+    setVideoReady(false);
+    if (readinessIntervalRef.current) { clearInterval(readinessIntervalRef.current); readinessIntervalRef.current = null; }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  const takePhoto = () => {
+    if (!videoRef.current) return;
+    const video = videoRef.current;
+    const w = video.videoWidth || 640;
+    const h = video.videoHeight || 480;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    if (isFrontCam) {
+      ctx.translate(w, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(video, 0, 0, w, h);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+    setPhoto(dataUrl);
+    stopCamera();
+  };
+
+  // Mobile uses file input capture via startCamera()
 
   const addEntry = async (type: "in" | "out") => {
     if (!photo || submitting) return;
@@ -513,7 +672,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
 
       if (!res.ok) throw new Error(json?.error || "Failed to submit attendance");
       const entry: AttendanceEntry = { type, timestamp: json.ts, photoDataUrl: json.photourl };
-      onUpdate([...attendance, entry]);
+      onUpdate([entry, ...attendance]);
       try {
         const refresh = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=50`);
         const rjson = await refresh.json();
@@ -527,6 +686,8 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
         }
       } catch {}
       setPhoto(null);
+      try { if (fileInputRef.current) fileInputRef.current.value = ""; } catch {}
+      stopCamera();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to submit attendance";
       setCameraError(msg);
@@ -581,7 +742,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
                 />
                 
                 <div className="relative w-full rounded-2xl bg-slate-900 border border-gray-200 shadow-inner flex items-center justify-center group h-[60vh] max-h-[700px] min-h-[280px] overflow-hidden">
-                  {!photo && (
+                  {!photo && !stream && (
                     <div className="flex flex-col items-center gap-3 text-gray-500">
                        <div className="p-4 rounded-full bg-slate-800 text-slate-400 group-hover:text-white transition-colors">
                           <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
@@ -589,20 +750,51 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
                        <span className="text-sm font-medium">Tap Start Camera to take a photo</span>
                     </div>
                   )}
+                  {!photo && stream && (
+                    <video 
+                      ref={videoRef} 
+                      autoPlay 
+                      playsInline 
+                      muted 
+                      className={`w-full h-full object-contain ${isFrontCam ? "transform scale-x-[-1]" : ""}`} 
+                    />
+                  )}
                   {photo && (
-                    <img src={photo} alt="Captured photo" className="w-full h-full object-contain transform scale-x-[-1]" />
+                    <img src={photo} alt="Captured photo" className="w-full h-full object-contain" />
                   )}
                 </div>
 
                 <div className="mt-8 w-full max-w-md flex flex-col items-center gap-4">
                   {!photo && (
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      className="w-full rounded-xl px-8 py-4 text-white font-bold text-lg bg-[#F97316] hover:bg-[#EA580C] transition-all active:scale-95 shadow-md hover:shadow-lg flex items-center justify-center gap-2"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
-                      Start Camera
-                    </button>
+                    <>
+                      {(!stream) && (
+                        <button
+                          onClick={startCamera}
+                          className="w-full rounded-xl px-8 py-4 text-white font-bold text-lg bg-[#F97316] hover:bg-[#EA580C] transition-all active:scale-95 shadow-md hover:shadow-lg flex items-center justify-center gap-2"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                          Start Camera
+                        </button>
+                      )}
+                      {!isMobile && stream && (
+                        <div className="flex gap-3 w-full">
+                          <button
+                            onClick={takePhoto}
+                            disabled={!videoReady}
+                            className={`flex-1 rounded-xl px-6 py-3 text-white font-bold transition-all active:scale-95 shadow-md flex items-center justify-center gap-2 ${videoReady ? "bg-[#F97316] hover:bg-[#EA580C]" : "bg-gray-400 cursor-not-allowed"}`}
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="3"></circle></svg>
+                            Take Photo
+                          </button>
+                          <button
+                            onClick={stopCamera}
+                            className="flex-1 rounded-xl px-6 py-3 text-gray-700 font-bold bg-gray-100 hover:bg-gray-200 transition-all active:scale-95 shadow-md"
+                          >
+                            Stop Camera
+                          </button>
+                        </div>
+                      )}
+                    </>
                   )}
 
                   {photo && (
@@ -635,7 +827,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
                         )}
                       </button>
                       <button
-                        onClick={() => setPhoto(null)}
+                        onClick={() => { setPhoto(null); try { if (fileInputRef.current) fileInputRef.current.value = ""; } catch {} }}
                         disabled={submitting}
                         className={`w-full rounded-xl px-4 py-3 text-gray-600 font-semibold bg-gray-100 hover:bg-gray-200 transition-all active:scale-95 ${submitting ? "opacity-50 cursor-not-allowed" : ""}`}
                       >
@@ -664,7 +856,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
                      <p className="text-sm font-medium">No records yet</p>
                   </div>
                 ) : (
-                  attendance.slice().sort((a,b) => b.timestamp - a.timestamp).map((entry, idx) => (
+                  attendance.slice().sort((a,b) => Number(b.timestamp) - Number(a.timestamp)).map((entry, idx) => (
                     <button 
                         key={idx} 
                         onClick={() => setSelectedAttendanceEntry(entry)}
@@ -672,7 +864,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
                     >
                       <div className="h-10 w-10 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 border border-gray-100 relative">
                         {entry.photoDataUrl && (
-                          <img src={entry.photoDataUrl} alt="Log" className="h-full w-full object-cover transform scale-x-[-1]" />
+                          <img src={entry.photoDataUrl} alt="Log" className="h-full w-full object-cover" />
                         )}
                       </div>
                       <div className="flex-1 min-w-0">
@@ -752,7 +944,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
             <div className="flex-1 overflow-y-auto min-h-0 custom-scrollbar">
               {filteredAttendance.length > 0 ? (
                 <div className="space-y-3">
-                  {filteredAttendance.slice().sort((a,b) => b.timestamp - a.timestamp).map((entry, idx) => (
+                  {filteredAttendance.slice().sort((a,b) => Number(b.timestamp) - Number(a.timestamp)).map((entry, idx) => (
                     <button 
                         key={idx} 
                         onClick={() => setSelectedAttendanceEntry(entry)}
@@ -761,7 +953,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
                       <div className="flex items-center gap-4 min-w-0">
                          <div className="h-12 w-12 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 border border-gray-100 relative">
                            {entry.photoDataUrl ? (
-                             <img src={entry.photoDataUrl} alt="Log" className="h-full w-full object-cover transform scale-x-[-1]" />
+                             <img src={entry.photoDataUrl} alt="Log" className="h-full w-full object-cover" />
                            ) : (
                              <div className="w-full h-full flex items-center justify-center text-gray-400">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
@@ -955,7 +1147,7 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
         const json = await res.json();
         if (!res.ok) throw new Error(json.error || "Failed to submit draft");
         
-        onUpdate([...reports, json.report]);
+        onUpdate([json.report, ...reports]);
         const newDrafts = drafts.filter(x => x.id !== d.id);
         onDraftUpdate(newDrafts);
         
@@ -1015,7 +1207,7 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
       console.log("Report submit response:", json);
       if (!res.ok) throw new Error(json.error || "Failed to submit report");
       
-      onUpdate([...reports, json.report]);
+      onUpdate([json.report, ...reports]);
       if (draftId) {
         onDraftUpdate(safeDrafts.filter(d => d.id !== draftId));
       }
@@ -1135,24 +1327,24 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
                 <button
                   onClick={saveDraft}
                   disabled={submitting}
-                  className="flex-1 sm:flex-none rounded-xl bg-white text-[#F97316] font-semibold py-3 px-6 border border-[#F97316] hover:bg-orange-50 transition-all active:scale-95 disabled:opacity-70 shadow-sm hover:shadow-md flex items-center justify-center gap-2"
+                  className="flex-1 sm:flex-none rounded-xl bg-white text-[#F97316] font-semibold text-sm py-2.5 px-5 border border-[#F97316] hover:bg-orange-50 transition-all active:scale-95 disabled:opacity-70 shadow-sm hover:shadow-md flex items-center justify-center gap-2"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3v4a1 1 0 0 1-1 1H7l-4 4V5a2 2 0 0 1 2-2z"/><path d="M12 22a8 8 0 0 0 8-8"/></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3v4a1 1 0 0 1-1 1H7l-4 4V5a2 2 0 0 1 2-2z"/><path d="M12 22a8 8 0 0 0 8-8"/></svg>
                   <span>Save Draft</span>
                 </button>
                 <button
                   onClick={clearForm}
                   disabled={submitting}
-                  className="flex-1 sm:flex-none rounded-xl bg-gray-100 text-gray-700 font-semibold py-3 px-6 border border-gray-200 hover:bg-gray-200 transition-all active:scale-95 disabled:opacity-70 shadow-sm flex items-center justify-center gap-2"
+                  className="flex-1 sm:flex-none rounded-xl bg-gray-100 text-gray-700 font-semibold text-sm py-2.5 px-5 border border-gray-200 hover:bg-gray-200 transition-all active:scale-95 disabled:opacity-70 shadow-sm flex items-center justify-center gap-2"
                 >
                   {draftId ? (
                     <>
-                      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
                       <span>Cancel Edit</span>
                     </>
                   ) : (
                     <>
-                      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                       <span>Clear</span>
                     </>
                   )}
@@ -1161,7 +1353,7 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
               <button 
                 onClick={submit}
                 disabled={submitting}
-                className="w-full sm:w-auto rounded-xl bg-[#F97316] text-white font-semibold py-3 px-8 hover:bg-[#EA580C] transition-all active:scale-95 disabled:opacity-70 disabled:cursor-wait shadow-sm hover:shadow-md flex items-center justify-center gap-2"
+                className="w-full sm:w-auto rounded-xl bg-[#F97316] text-white font-semibold text-sm py-2.5 px-6 hover:bg-[#EA580C] transition-all active:scale-95 disabled:opacity-70 disabled:cursor-wait shadow-sm hover:shadow-md flex items-center justify-center gap-2"
               >
                 {submitting ? (
                   <>
@@ -1170,7 +1362,7 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
                   </>
                 ) : (
                   <>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
                     <span>Submit Report</span>
                   </>
                 )}
@@ -1296,8 +1488,8 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
                     </div>
                  ) : (
                     <div className="space-y-2">
-                       {safeReports.slice().reverse().slice(0, 5).map((r, idx) => (
-                          <div key={idx} onClick={() => setViewing(r)} className="p-3 rounded-xl hover:bg-orange-50 cursor-pointer group transition-all border border-transparent hover:border-orange-100 relative">
+                      {safeReports.slice(0, 5).map((r, idx) => (
+                         <div key={idx} onClick={() => setViewing(r)} className="p-3 rounded-xl hover:bg-orange-50 cursor-pointer group transition-all border border-transparent hover:border-orange-100 relative">
                              <div className="flex justify-between items-start mb-1">
                                 <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
                                    {r.instructorComment && (

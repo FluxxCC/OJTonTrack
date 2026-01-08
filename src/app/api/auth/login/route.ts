@@ -11,6 +11,7 @@ export async function POST(req: Request) {
     const idnumber = String(body?.idnumber || "").trim();
     const password = String(body?.password || "");
     const expectedRole = String(body?.expectedRole || "").trim().toLowerCase();
+    const keepSignedIn = !!body?.keepSignedIn;
 
     if (!idnumber || !password) {
       return NextResponse.json({ error: "ID number and password are required" }, { status: 400 });
@@ -40,7 +41,7 @@ export async function POST(req: Request) {
       }, { status: 403 });
     }
 
-    return NextResponse.json({
+    const res = NextResponse.json({
       user: {
         id: data.id,
         idnumber: data.idnumber,
@@ -51,9 +52,15 @@ export async function POST(req: Request) {
         email_verified: !!data.email_verified,
       },
     });
+    if (keepSignedIn) {
+      try {
+        const payload = encodeURIComponent(JSON.stringify({ idnumber: data.idnumber, role: normalizedRole }));
+        res.cookies.set("ojt_session", payload, { path: "/", maxAge: 60 * 60 * 24 * 30, sameSite: "lax" });
+      } catch {}
+    }
+    return res;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unexpected error";
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
-

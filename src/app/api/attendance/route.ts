@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
 import { getSupabaseAdmin } from "../../../lib/supabaseClient";
+import webPush from "web-push";
 
 function configureCloudinary() {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME || "";
@@ -54,7 +55,7 @@ export async function POST(req: Request) {
     }
     const userRes = await admin
       .from("users")
-      .select("idnumber, role, course")
+      .select("idnumber, role, course, supervisorid, firstname, lastname")
       .eq("idnumber", idnumber)
       .limit(1)
       .maybeSingle();
@@ -90,6 +91,65 @@ export async function POST(req: Request) {
 
     const insertRes = await admin.from("attendance").insert(payload).select("id").maybeSingle();
     if (insertRes.error) return NextResponse.json({ error: insertRes.error.message }, { status: 500 });
+
+    // Send Push Notification to Supervisor
+        const supervisorId = String(user.supervisorid || "").trim();
+        console.log(`[Attendance] Processing Push for Supervisor ID: '${supervisorId}'`);
+
+    if (supervisorId) {
+      try {
+        const pub = process.env.VAPID_PUBLIC_KEY || "";
+        const priv = process.env.VAPID_PRIVATE_KEY || "";
+        if (pub && priv) {
+          const { data: subs, error: subError } = await admin
+            .from("push_subscriptions")
+            .select("endpoint,p256dh,auth")
+            .eq("idnumber", supervisorId);
+
+          if (subError) console.error(`[Attendance] Sub fetch error:`, subError);
+          console.log(`[Attendance] Found ${subs?.length || 0} subscriptions for ${supervisorId}`);
+
+          if (subs && subs.length > 0) {
+            webPush.setVapidDetails("mailto:admin@ojtontrack.local", pub, priv);
+            const studentName = `${user.firstname || ""} ${user.lastname || ""}`.trim() || idnumber;
+            const typeLabel = type === "in" ? "Times in" : "Times out";
+            const appUrl = process.env.NEXT_PUBLIC_APP_URL || "";
+            const absoluteUrl = appUrl ? `${appUrl.replace(/\/$/, "")}/portal/supervisor?tab=attendance` : "/portal/supervisor?tab=attendance";
+            const pushPayload = JSON.stringify({
+              title: "Attendance Update",
+              body: `${studentName} ${typeLabel}`,
+              icon: "/icons-192.png",
+              tag: `attendance-${idnumber}-${ts}`,
+              url: absoluteUrl,
+            });
+
+            for (const s of subs) {
+              try {
+                await webPush.sendNotification(
+                  {
+                    endpoint: s.endpoint,
+                    keys: { p256dh: s.p256dh, auth: s.auth },
+                  } as any,
+                  pushPayload
+                );
+                console.log(`[Attendance] Push sent to ${s.endpoint.slice(0, 20)}...`);
+              } catch (err: any) {
+                console.error(`[Attendance] Push failed:`, err);
+                if (err?.statusCode === 410 || err?.statusCode === 404) {
+                  await admin.from("push_subscriptions").delete().eq("endpoint", s.endpoint);
+                }
+              }
+            }
+          }
+        } else {
+          console.warn("[Attendance] VAPID keys missing");
+        }
+      } catch (e) {
+        console.error("Failed to send push notification", e);
+      }
+    } else {
+      console.log("[Attendance] No Supervisor ID found for user");
+    }
 
     return NextResponse.json({ ok: true, ts, photourl, id: insertRes.data?.id }, { status: 201 });
   } catch (e) {

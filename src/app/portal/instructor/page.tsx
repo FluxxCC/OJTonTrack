@@ -1058,7 +1058,7 @@ const StudentsView = ({
                 return (
                   <button
                     key={s.idnumber}
-                    onClick={() => { markViewedNow("att", s.idnumber); markViewedNow("rep", s.idnumber); setSelected(prev => (prev?.idnumber === s.idnumber ? null : s)); }}
+                    onClick={() => { markViewedNow("att", s.idnumber); markViewedNow("rep", s.idnumber); markViewedNow("eval", s.idnumber); setSelected(prev => (prev?.idnumber === s.idnumber ? null : s)); }}
                     className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all border ${
                       isActive 
                         ? "bg-orange-50 border-orange-200 ring-1 ring-orange-200" 
@@ -1074,14 +1074,9 @@ const StudentsView = ({
                       {isEvalEnabled && (
                         <span className="absolute -bottom-1 -right-1 h-3 w-3 bg-blue-500 rounded-full border-2 border-white" title="Evaluation Enabled" />
                       )}
-                      {attCount > 0 && (
-                        <span className="absolute -top-1 -right-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold border bg-red-50 text-red-700 border-red-200">
-                          {attCount > 9 ? "9+" : attCount}
-                        </span>
-                      )}
-                      {repCount > 0 && (
-                        <span className="absolute -top-1 -left-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold border bg-red-50 text-red-700 border-red-200">
-                          {repCount > 9 ? "9+" : repCount}
+                      {(attCount + repCount) > 0 && (
+                        <span className="absolute -top-1 -right-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold border bg-red-50 text-red-700 border-red-200 shadow-sm z-10">
+                          {(attCount + repCount) > 9 ? "9+" : (attCount + repCount)}
                         </span>
                       )}
                     </div>
@@ -1121,7 +1116,7 @@ const StudentsView = ({
               openReportsModal={() => { if (selected?.idnumber) markViewedNow("rep", selected.idnumber); setReportsModalOpen(true); }}
               onViewAttendanceEntry={setSelectedAttendanceEntry}
               evaluation={evaluation}
-              openEvaluationModal={() => setEvaluationModalOpen(true)}
+              openEvaluationModal={() => { if (selected?.idnumber) markViewedNow("eval", selected.idnumber); setEvaluationModalOpen(true); }}
             />
           </div>
         </div>
@@ -1496,8 +1491,18 @@ export default function InstructorPage() {
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
 
   useEffect(() => {
-    const handler = (e: any) => {
+    const isReload = (() => {
+      try {
+        const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming;
+        return !!nav && nav.type === 'reload';
+      } catch {
+        const t = (performance as unknown as { navigation?: { type?: number } })?.navigation?.type;
+        return t === 1;
+      }
+    })();
+    const handler = (e: Event) => {
       e.preventDefault();
+      if (!isReload) return;
       setDeferredPrompt(e);
     };
     window.addEventListener("beforeinstallprompt", handler);
@@ -1537,8 +1542,8 @@ export default function InstructorPage() {
   const [recentAttendance, setRecentAttendance] = useState<{ idnumber: string; type: "in" | "out"; ts: number }[]>([]);
   const [recentReports, setRecentReports] = useState<{ id: number; idnumber: string; title: string; body: string; ts: number }[]>([]);
   const [evaluation, setEvaluation] = useState<EvaluationDetail | null>(null);
-  const [pendingAttCount, setPendingAttCount] = useState(0);
-  const [submittedReportsCount, setSubmittedReportsCount] = useState(0);
+  // Removed unused badge counts
+  const [submittedEvaluationsCount, setSubmittedEvaluationsCount] = useState(0);
   const [badgeVersion, setBadgeVersion] = useState(0);
 
   // Remove global 1s ticker to prevent entire page re-rendering
@@ -1654,25 +1659,23 @@ export default function InstructorPage() {
     try {
       const ids = students.map(s => s.idnumber).filter(Boolean);
       if (!supabase || ids.length === 0) {
-        setPendingAttCount(0);
-        setSubmittedReportsCount(0);
+        setSubmittedEvaluationsCount(0);
         return;
       }
-      const { data: att } = await supabase
-        .from('attendance')
-        .select('id, idnumber, status')
-        .in('idnumber', ids)
-        .eq('status', 'Pending');
-      setPendingAttCount((att || []).length);
-      const { data: reps } = await supabase
-        .from('reports')
-        .select('id, idnumber, status')
-        .in('idnumber', ids)
-        .eq('status', 'submitted');
-      setSubmittedReportsCount((reps || []).length);
+      const { data: evals } = await supabase
+        .from('evaluation_forms')
+        .select('id, student_id, created_at')
+        .in('student_id', ids);
+      const viewedTsById: Record<string, number> = {};
+      ids.forEach(id => { viewedTsById[id] = getLastViewedTs(`instructorViewed:eval:${id}`); });
+      const unseenCount = (evals || []).filter((e: { student_id: string; created_at?: string }) => {
+        const sid = String(e.student_id);
+        const created = e.created_at ? Number(new Date(e.created_at).getTime()) : 0;
+        return created > (viewedTsById[sid] || 0);
+      }).length;
+      setSubmittedEvaluationsCount(unseenCount);
     } catch {
-      setPendingAttCount(0);
-      setSubmittedReportsCount(0);
+      setSubmittedEvaluationsCount(0);
     }
   };
 
@@ -1685,48 +1688,26 @@ export default function InstructorPage() {
   };
 
   const combinedBadgeCount = useMemo(() => {
-    const ids = new Set(students.map(s => s.idnumber).filter(Boolean));
-    let attTotal = 0;
-    let repTotal = 0;
-    recentAttendance.forEach(e => {
-      if (!ids.has(e.idnumber)) return;
-      const v = getLastViewedTs(`instructorViewed:att:${e.idnumber}`);
-      if (Number(e.ts) > v) attTotal += 1;
-    });
-    recentReports.forEach(r => {
-      if (!ids.has(r.idnumber)) return;
-      const v = getLastViewedTs(`instructorViewed:rep:${r.idnumber}`);
-      if (Number(r.ts) > v) repTotal += 1;
-    });
-    return attTotal + repTotal;
-  }, [students, recentAttendance, recentReports, badgeVersion]);
-  const evaluationEnabledCount = useMemo(() => {
-    const ids = new Set(students.map(s => s.idnumber));
-    let count = 0;
-    Object.entries(evaluationStatuses).forEach(([id, enabled]) => {
-      if (ids.has(id) && enabled) count += 1;
-    });
+    let count = submittedEvaluationsCount;
+    // Attendance
+    if (recentAttendance && recentAttendance.length > 0) {
+      count += recentAttendance.filter(a => {
+        const lastViewed = getLastViewedTs(`instructorViewed:att:${a.idnumber}`);
+        return a.ts > lastViewed;
+      }).length;
+    }
+    // Reports
+    if (recentReports && recentReports.length > 0) {
+      count += recentReports.filter(r => {
+        const lastViewed = getLastViewedTs(`instructorViewed:rep:${r.idnumber}`);
+        return r.ts > lastViewed;
+      }).length;
+    }
     return count;
-  }, [students, evaluationStatuses]);
+  }, [submittedEvaluationsCount, recentAttendance, recentReports, badgeVersion]);
 
   useEffect(() => {
-    if (!supabase) return;
-    const ch1 = supabase
-      .channel('instructor-badges-attendance')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, () => {
-        fetchBadgeCounts();
-      })
-      .subscribe();
-    const ch2 = supabase
-      .channel('instructor-badges-reports')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'reports' }, () => {
-        fetchBadgeCounts();
-      })
-      .subscribe();
-    return () => {
-      try { supabase?.removeChannel(ch1); } catch {}
-      try { supabase?.removeChannel(ch2); } catch {}
-    };
+    // Removed attendance and reports badge listeners as requested
   }, []);
   useEffect(() => {
     if (!supabase) return;
@@ -2436,11 +2417,6 @@ export default function InstructorPage() {
                               {total > 9 ? "9+" : total}
                             </span>
                           )}
-                          {evaluationEnabledCount > 0 && (
-                            <span className="px-2 py-0.5 rounded-full text-[11px] font-bold border bg-blue-50 text-blue-700 border-blue-200">
-                              {evaluationEnabledCount > 9 ? "9+" : evaluationEnabledCount}
-                            </span>
-                          )}
                         </>
                       );
                     })()
@@ -2508,11 +2484,6 @@ export default function InstructorPage() {
                     </span>
                   ) : null;
                 })()}
-                {evaluationEnabledCount > 0 && (
-                  <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold border bg-blue-50 text-blue-700 border-blue-200 shadow-sm">
-                    {evaluationEnabledCount > 9 ? "9+" : evaluationEnabledCount}
-                  </span>
-                )}
               </div>
             </div>
             <div className="hidden lg:block text-sm text-gray-400 font-medium">

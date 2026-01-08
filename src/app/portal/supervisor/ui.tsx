@@ -909,6 +909,8 @@ export function DashboardView({
 export function AttendanceView({ students, myIdnumber, onPendingChange }: { students: User[], myIdnumber: string, onPendingChange?: (count: number) => void }) {
   const [rows, setRows] = useState<ApprovalRow[]>([]);
   const [recent, setRecent] = useState<ApprovalRow[]>([]);
+  const [selectedAttendanceEntry, setSelectedAttendanceEntry] = useState<AttendanceEntry | null>(null);
+  const [selectedEntryName, setSelectedEntryName] = useState<string | undefined>(undefined);
   
   // Synchronize pending count with parent state
   useEffect(() => {
@@ -1071,6 +1073,7 @@ export function AttendanceView({ students, myIdnumber, onPendingChange }: { stud
   };
 
   return (
+    <>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Pending Approvals */}
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
@@ -1097,9 +1100,27 @@ export function AttendanceView({ students, myIdnumber, onPendingChange }: { stud
             rows.map((r, idx) => (
               <div key={idx} className="flex flex-col sm:flex-row sm:items-center justify-between p-4 rounded-xl bg-white border border-gray-100 shadow-sm hover:border-orange-200 transition-all gap-4">
                 <div className="flex items-center gap-4">
-                   <div className="h-12 w-12 rounded-full bg-orange-100 text-orange-600 flex items-center justify-center font-bold text-lg flex-shrink-0">
-                      {r.name.charAt(0).toUpperCase()}
-                   </div>
+                   <button
+                     onClick={() => {
+                       setSelectedAttendanceEntry({
+                         type: r.type,
+                         timestamp: Number(r.ts),
+                         photoDataUrl: r.photourl || "",
+                         status: r.approved ? "Approved" : "Pending"
+                       });
+                       setSelectedEntryName(r.name);
+                     }}
+                     className="h-12 w-16 rounded-lg overflow-hidden bg-gray-200 border border-gray-200 flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-orange-300"
+                     title="View attendance photo"
+                   >
+                     {r.photourl ? (
+                       <img src={r.photourl} alt="Student" className="h-full w-full object-cover" />
+                     ) : (
+                       <div className="h-full w-full flex items-center justify-center text-orange-600 font-bold text-lg bg-orange-100">
+                         {r.name.charAt(0).toUpperCase()}
+                       </div>
+                     )}
+                   </button>
                    <div className="min-w-0">
                       <div className="text-sm font-bold text-gray-900 truncate">{r.name}</div>
                       <div className="text-xs text-gray-500 font-medium mt-0.5">{r.dateLabel} • {r.timeLabel}</div>
@@ -1138,7 +1159,28 @@ export function AttendanceView({ students, myIdnumber, onPendingChange }: { stud
             recentLast7.map((r, idx) => (
               <div key={idx} className="flex items-center justify-between p-3 rounded-xl bg-gray-50 border border-gray-100 opacity-75 hover:opacity-100 transition-opacity">
                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
+                    <button
+                      onClick={() => {
+                        setSelectedAttendanceEntry({
+                          type: r.type,
+                          timestamp: Number(r.ts),
+                          photoDataUrl: r.photourl || "",
+                          status: "Approved",
+                          approvedAt: Number(r.ts)
+                        });
+                        setSelectedEntryName(r.name);
+                      }}
+                      className="h-10 w-14 rounded-md overflow-hidden bg-gray-200 border border-gray-200 flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-green-300"
+                      title="View attendance photo"
+                    >
+                      {r.photourl ? (
+                        <img src={r.photourl} alt="Student" className="h-full w-full object-cover" />
+                      ) : (
+                        <div className="h-full w-full flex items-center justify-center text-green-700 font-bold text-sm bg-green-100">
+                          {r.name.charAt(0).toUpperCase()}
+                        </div>
+                      )}
+                    </button>
                     <div className="min-w-0">
                        <div className="text-sm font-semibold text-gray-700 truncate">{r.name}</div>
                        <div className="text-xs text-gray-500">{r.dateLabel} • {r.timeLabel}</div>
@@ -1153,6 +1195,14 @@ export function AttendanceView({ students, myIdnumber, onPendingChange }: { stud
         </div>
       </div>
     </div>
+    {selectedAttendanceEntry && (
+      <AttendanceDetailsModal
+        entry={selectedAttendanceEntry}
+        onClose={() => { setSelectedAttendanceEntry(null); setSelectedEntryName(undefined); }}
+        userName={selectedEntryName}
+      />
+    )}
+    </>
   );
 }
 

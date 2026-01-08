@@ -11,7 +11,8 @@ import {
   Menu,
   ChevronRight,
   Users,
-  ClipboardCheck
+  ClipboardCheck,
+  BellRing
 } from 'lucide-react';
 import { supabase } from "../../../lib/supabaseClient";
 import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
@@ -24,6 +25,7 @@ import {
   EvaluationModal,
   User
 } from "./ui";
+import ServiceWorkerRegister from "../../../components/ServiceWorkerRegister";
 
 const DashboardView = dynamic(() => import('./ui').then(mod => mod.DashboardView), {
   ssr: false,
@@ -33,10 +35,83 @@ const DashboardView = dynamic(() => import('./ui').then(mod => mod.DashboardView
 function SupervisorContent() {
   const router = useRouter();
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
 
   useEffect(() => {
-    const handler = (e: any) => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      setNotificationPermission(Notification.permission);
+    }
+  }, []);
+
+  const requestNotificationPermission = async () => {
+    if (!('Notification' in window)) return;
+    const permission = await Notification.requestPermission();
+    setNotificationPermission(permission);
+    if (permission === 'granted') {
+       try {
+         if ('serviceWorker' in navigator) {
+           const reg = await navigator.serviceWorker.ready;
+           const res = await fetch('/api/push/public-key');
+           const { publicKey } = await res.json();
+           const existing = await reg.pushManager.getSubscription();
+           const sub = existing || await reg.pushManager.subscribe({
+             userVisibleOnly: true,
+             applicationServerKey: (() => {
+               const padding = '='.repeat((4 - (publicKey.length % 4)) % 4);
+               const base64Safe = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
+               const rawData = atob(base64Safe);
+               const outputArray = new Uint8Array(rawData.length);
+               for (let i = 0; i < rawData.length; ++i) {
+                 outputArray[i] = rawData.charCodeAt(i);
+               }
+               return outputArray;
+             })()
+           });
+           let idnum = myIdnumber;
+           if (!idnum) {
+             try { idnum = localStorage.getItem("idnumber") || ""; } catch {}
+           }
+           if (!idnum) {
+             reg.showNotification("Notifications Enabled", {
+               body: "Sign in detected. Please reload to finalize subscription.",
+               icon: '/icons-192.png'
+             });
+           } else {
+             await fetch('/api/push/subscribe', {
+               method: 'POST',
+               headers: { 'Content-Type': 'application/json' },
+               body: JSON.stringify({ idnumber: idnum, subscription: sub })
+             });
+             reg.showNotification("Notifications Enabled", {
+               body: "You will now receive updates across devices.",
+               icon: '/icons-192.png'
+             });
+           }
+         } else {
+           new Notification("Notifications Enabled", {
+             body: "You will now receive updates across devices.",
+             icon: '/icons-192.png'
+           });
+         }
+       } catch {}
+    }
+  };
+
+  
+
+  useEffect(() => {
+    const isReload = (() => {
+      try {
+        const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming;
+        return !!nav && nav.type === 'reload';
+      } catch {
+        const t = (performance as unknown as { navigation?: { type?: number } })?.navigation?.type;
+        return t === 1;
+      }
+    })();
+    const handler = (e: Event) => {
       e.preventDefault();
+      if (!isReload) return;
       setDeferredPrompt(e);
     };
     window.addEventListener("beforeinstallprompt", handler);
@@ -82,14 +157,60 @@ function SupervisorContent() {
   const [evalComments, setEvalComments] = useState("");
   const [evalScore, setEvalScore] = useState(5);
   const [isSubmittingEval, setIsSubmittingEval] = useState(false);
+  const [toasts, setToasts] = useState<{ id: string; title: string; message: string }[]>([]);
+  const pushToast = (title: string, message: string) => {
+    const id = String(Date.now() + Math.random());
+    setToasts((prev) => [...prev, { id, title, message }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 6000);
+  };
 
   // User Info - Client Side Only to avoid Hydration Mismatch
   useEffect(() => {
     try {
       const stored = localStorage.getItem("idnumber");
-      if (stored) setMyIdnumber(stored);
+      if (stored) setMyIdnumber(stored.trim());
     } catch {}
   }, []);
+  
+  useEffect(() => {
+    const ensurePushSubscription = async () => {
+      if (!('serviceWorker' in navigator)) return;
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const res = await fetch('/api/push/public-key');
+        const { publicKey } = await res.json();
+        const existing = await reg.pushManager.getSubscription();
+        const sub = existing || await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: (() => {
+            const padding = '='.repeat((4 - (publicKey.length % 4)) % 4);
+            const base64Safe = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
+            const rawData = atob(base64Safe);
+            const outputArray = new Uint8Array(rawData.length);
+            for (let i = 0; i < rawData.length; ++i) {
+              outputArray[i] = rawData.charCodeAt(i);
+            }
+            return outputArray;
+          })()
+        });
+        let idnum = myIdnumber;
+        if (!idnum) {
+          try { idnum = localStorage.getItem("idnumber") || ""; } catch {}
+        }
+        if (!idnum) return;
+        await fetch('/api/push/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idnumber: idnum, subscription: sub })
+        });
+      } catch {}
+    };
+    if (notificationPermission === 'granted') {
+      ensurePushSubscription();
+    }
+  }, [notificationPermission, myIdnumber]);
 
   // Evaluation Status (Realtime Subscription)
   useEffect(() => {
@@ -130,6 +251,43 @@ function SupervisorContent() {
                 ...prev,
                 [String(newRow.idnumber).trim()]: newRow.enabled
               }));
+              if (newRow.enabled) {
+                const student = students.find(s => String(s.idnumber).trim() === String(newRow.idnumber).trim());
+                const fullName = student ? `${student.firstname} ${student.lastname}` : String(newRow.idnumber);
+                const msg = `Available evaluation for ${fullName}`;
+                pushToast("Evaluation Available", msg);
+                try {
+                  fetch('/api/push/send-eval', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ idnumber: myIdnumber, message: msg })
+                  }).catch(() => {});
+                } catch {}
+                if (Notification.permission === 'granted') {
+                  if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.ready.then(reg => {
+                      try {
+                        reg.showNotification("Evaluation Available", {
+                          body: msg,
+                          icon: '/icons-192.png',
+                          tag: `evaluation-available-${String(newRow.idnumber).trim()}-${Date.now()}`,
+                          renotify: true,
+                          data: { url: '/portal/supervisor?tab=evaluation' }
+                        });
+                      } catch {}
+                    });
+                  } else {
+                    try {
+                      new Notification("Evaluation Available", {
+                        body: msg,
+                        icon: '/icons-192.png',
+                        tag: `evaluation-available-${String(newRow.idnumber).trim()}-${Date.now()}`,
+                        renotify: true
+                      });
+                    } catch {}
+                  }
+                }
+              }
             }
           }
         }
@@ -137,13 +295,50 @@ function SupervisorContent() {
       .on(
         'broadcast',
         { event: 'toggle' },
-        (payload) => {
+        async (payload) => {
            const { idnumber, enabled } = payload.payload;
            if (idnumber) {
              setEvalStatuses((prev) => ({
                ...prev,
                [String(idnumber).trim()]: enabled
              }));
+              if (enabled) {
+                const student = students.find(s => String(s.idnumber).trim() === String(idnumber).trim());
+                const fullName = student ? `${student.firstname} ${student.lastname}` : String(idnumber);
+                const msg = `Available evaluation for ${fullName}`;
+                pushToast("Evaluation Available", msg);
+                try {
+                  await fetch('/api/push/send-eval', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ idnumber: myIdnumber, message: msg })
+                  });
+                } catch {}
+                if (Notification.permission === 'granted') {
+                  if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.ready.then(reg => {
+                      try {
+                        reg.showNotification("Evaluation Available", {
+                          body: msg,
+                          icon: '/icons-192.png',
+                          tag: `evaluation-available-${String(idnumber).trim()}-${Date.now()}`,
+                          renotify: true,
+                          data: { url: '/portal/supervisor?tab=evaluation' }
+                        });
+                      } catch {}
+                    });
+                  } else {
+                    try {
+                      new Notification("Evaluation Available", {
+                        body: msg,
+                        icon: '/icons-192.png',
+                        tag: `evaluation-available-${String(idnumber).trim()}-${Date.now()}`,
+                        renotify: true
+                      });
+                    } catch {}
+                  }
+                }
+              }
            }
         }
       )
@@ -168,6 +363,25 @@ function SupervisorContent() {
       }
     })();
   }, [myIdnumber]);
+  
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const handler = (event: MessageEvent) => {
+      const data = event.data as any;
+      if (data && data.type === 'notification-click' && data.url) {
+        try {
+          const u = new URL(String(data.url), window.location.origin);
+          const tab = (u.searchParams.get("tab") || "").toLowerCase();
+          if (tab) setActiveTab(tab as any);
+          router.replace(u.pathname + (u.search || ""), { scroll: false });
+        } catch {}
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', handler);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handler);
+    };
+  }, [router]);
 
   const fetchBadgeCounts = async () => {
     try {
@@ -193,17 +407,64 @@ function SupervisorContent() {
 
   useEffect(() => {
     if (!supabase) return;
-    const idsSet = new Set(students.map(s => String(s.idnumber)));
+    const idsSet = new Set(students.map(s => String(s.idnumber).trim()));
     const ch = supabase
       .channel('supervisor-badges-attendance')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, (payload: RealtimePostgresChangesPayload<any>) => {
-        const row = payload.new as { idnumber?: string; status?: string } | null;
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, async (payload: RealtimePostgresChangesPayload<any>) => {
+        const row = payload.new as { idnumber?: string; status?: string; type?: string; createdat?: string; ts?: string } | null;
         const oldRow = payload.old as { idnumber?: string; status?: string } | null;
-        const inScopeNew = row && row.idnumber && idsSet.has(String(row.idnumber));
-        const inScopeOld = oldRow && oldRow.idnumber && idsSet.has(String(oldRow.idnumber));
+        
+        const rowId = row?.idnumber ? String(row.idnumber).trim() : "";
+        const oldRowId = oldRow?.idnumber ? String(oldRow.idnumber).trim() : "";
+
+        const inScopeNew = rowId && idsSet.has(rowId);
+        const inScopeOld = oldRowId && idsSet.has(oldRowId);
+
         if (payload.eventType === 'INSERT') {
-          if (inScopeNew && String(row!.status).trim() === 'Pending') {
-            setPendingApprovalsCount(c => c + 1);
+          if (inScopeNew) {
+             const student = students.find(s => String(s.idnumber).trim() === rowId);
+             const name = student ? `${student.firstname} ${student.lastname}` : (rowId || 'Student');
+             const type = row!.type === 'in' ? "Times in" : "Times out";
+             // Use ts (timestamp) if createdat is missing
+             const timeMs = row!.ts ? Number(row!.ts) : (row!.createdat ? new Date(row!.createdat).getTime() : Date.now());
+             const message = `${name} ${type}`;
+
+             // 1. In-App Toast (Always show)
+             pushToast("Attendance Update", message);
+
+             try {
+                fetch('/api/push/send-attendance', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ idnumber: myIdnumber, message, origin: window.location.origin })
+                }).catch(() => {});
+             } catch {}
+
+             // 2. Browser Notification Logic
+             if (Notification.permission === 'granted') {
+                 if ('serviceWorker' in navigator) {
+                    try {
+                      const reg = await navigator.serviceWorker.ready;
+                      reg.showNotification(`Attendance Update`, {
+                         body: message,
+                         icon: '/icons-192.png',
+                         tag: 'attendance-update',
+                         data: { url: '/portal/supervisor?tab=attendance' }
+                      });
+                    } catch (e) { console.error(e); }
+                 } else {
+                    try {
+                      new Notification(`Attendance Update`, {
+                         body: message,
+                         icon: '/icons-192.png'
+                      });
+                    } catch (e) { console.error(e); }
+                 }
+             }
+
+             if (String(row!.status).trim() === 'Pending') {
+               setPendingApprovalsCount(c => c + 1);
+             }
           }
         } else if (payload.eventType === 'UPDATE') {
           const wasPending = inScopeOld && String(oldRow!.status).trim() === 'Pending';
@@ -228,6 +489,10 @@ function SupervisorContent() {
   // Handle Selection Persistence
   useEffect(() => {
     if (students.length === 0) return;
+    const tab = (searchParams.get("tab") || "").toLowerCase();
+    if (tab === "attendance" || tab === "evaluation" || tab === "profile" || tab === "dashboard") {
+      setActiveTab(tab as any);
+    }
     const id = searchParams.get("studentId");
     if (id) {
       const s = students.find(x => x.idnumber === id);
@@ -257,6 +522,9 @@ function SupervisorContent() {
     const params = new URLSearchParams(searchParams.toString());
     if (s) {
       params.set("studentId", s.idnumber);
+      if (activeTab === "dashboard") {
+        params.delete("tab");
+      }
     } else {
       params.delete("studentId");
     }
@@ -340,7 +608,8 @@ function SupervisorContent() {
           }
 
           // Get Assigned Students
-          const assigned = json.users.filter((u: User) => String(u.role).toLowerCase() === "student" && String(u.supervisorid || "") === String(myIdnumber));
+          const assigned = json.users.filter((u: User) => String(u.role).toLowerCase() === "student" && String(u.supervisorid || "").trim() === String(myIdnumber).trim());
+          console.log(`[Supervisor] Loaded ${assigned.length} students for supervisor ${myIdnumber}`);
           setStudents(assigned);
         }
       } catch (e) { console.error(e); }
@@ -349,6 +618,14 @@ function SupervisorContent() {
 
   // Logout
   const handleLogout = () => {
+    try {
+      localStorage.removeItem("userId");
+      localStorage.removeItem("idnumber");
+      localStorage.removeItem("role");
+      localStorage.removeItem("firstname");
+      localStorage.removeItem("lastname");
+      document.cookie = "ojt_session=; Max-Age=0; Path=/; SameSite=Lax";
+    } catch {}
     router.replace("/");
   };
 
@@ -492,7 +769,18 @@ function SupervisorContent() {
               </h2>
             </div>
           </div>
-          <div className="hidden lg:block" />
+          <div className="flex items-center gap-2">
+            {notificationPermission === 'default' && (
+              <button
+                onClick={requestNotificationPermission}
+                className="flex items-center gap-2 px-3 py-1.5 bg-orange-100 text-[#F97316] rounded-lg text-sm font-semibold hover:bg-orange-200 transition-colors"
+              >
+                <BellRing size={16} />
+                <span className="hidden sm:inline">Enable Notifications</span>
+              </button>
+            )}
+            <div className="hidden lg:block" />
+          </div>
         </header>
 
         {/* Content */}
@@ -539,6 +827,28 @@ function SupervisorContent() {
           isSubmitting={isSubmittingEval}
           onSubmit={handleSubmitEvaluation}
         />
+        {toasts.length > 0 && (
+          <div className="fixed top-24 right-4 z-50 space-y-3">
+            {toasts.map(t => (
+              <div key={t.id} className="w-80 bg-white border border-gray-200 shadow-xl rounded-xl p-4 flex items-start gap-3">
+                <div className="h-10 w-10 rounded-lg bg-orange-100 text-[#F97316] flex items-center justify-center">
+                  <BellRing size={18} />
+                </div>
+                <div className="flex-1">
+                  <p className="text-sm font-bold text-gray-900">{t.title}</p>
+                  <p className="text-xs text-gray-600 mt-0.5">{t.message}</p>
+                </div>
+                <button
+                  aria-label="Close"
+                  onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -547,7 +857,10 @@ function SupervisorContent() {
 export default function SupervisorPage() {
   return (
     <Suspense fallback={<div className="p-8 text-center text-gray-500">Loading supervisor portal...</div>}>
-      <SupervisorContent />
+      <>
+        <ServiceWorkerRegister />
+        <SupervisorContent />
+      </>
     </Suspense>
   );
 }

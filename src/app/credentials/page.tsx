@@ -16,6 +16,7 @@ function CredentialsForm() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [keepSignedIn, setKeepSignedIn] = useState<boolean>(true);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,7 +31,8 @@ function CredentialsForm() {
           body: JSON.stringify({ 
             idnumber: idTrim, 
             password,
-            expectedRole: role.toLowerCase() 
+            expectedRole: role.toLowerCase(),
+            keepSignedIn
           }),
         });
         const json = await res.json();
@@ -42,6 +44,7 @@ function CredentialsForm() {
         try {
           localStorage.setItem("idnumber", user.idnumber);
           localStorage.setItem("role", normalizedRole);
+          localStorage.setItem("keepSignedIn", keepSignedIn ? "1" : "0");
           if (user.id) localStorage.setItem("userId", String(user.id));
           if (user.firstname) localStorage.setItem("firstname", user.firstname);
           if (user.lastname) localStorage.setItem("lastname", user.lastname);
@@ -122,6 +125,15 @@ function CredentialsForm() {
         </form>
 
         <div className="mt-8 text-center">
+            <div className="mb-4 flex items-center justify-center gap-2">
+              <input
+                id="keep-signed-in"
+                type="checkbox"
+                checked={keepSignedIn}
+                onChange={(e) => setKeepSignedIn(e.target.checked)}
+              />
+              <label htmlFor="keep-signed-in" className="text-sm text-[#1F2937] font-medium">Keep me signed in</label>
+            </div>
             <button 
                 type="button"
                 onClick={() => router.push("/")}

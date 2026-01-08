@@ -57,7 +57,7 @@ export default function StudentHistoryPage() {
               {attendance.length === 0 ? (
                 <div className="text-center py-8 text-gray-500 text-sm">No attendance records found.</div>
               ) : (
-                attendance.slice().sort((a,b) => b.timestamp - a.timestamp).map((entry, idx) => (
+                attendance.slice().sort((a,b) => Number(b.timestamp) - Number(a.timestamp)).map((entry, idx) => (
                   <div key={idx} className="flex items-center gap-4 p-3 rounded-xl bg-gray-50 border border-gray-100">
                     <div className="h-12 w-20 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200">
                       {entry.photoDataUrl && (

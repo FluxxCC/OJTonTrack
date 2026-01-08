@@ -91,13 +91,45 @@ export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceD
               </div>
             </div>
 
-            <div className="col-span-2 p-3 bg-green-50 rounded-xl border border-green-100 flex items-center justify-between">
+            <div
+              className={`col-span-2 p-3 rounded-xl border flex items-center justify-between ${
+                entry.status === 'Approved'
+                  ? 'bg-green-50 border-green-100'
+                  : entry.status === 'Rejected'
+                  ? 'bg-red-50 border-red-100'
+                  : 'bg-yellow-50 border-yellow-100'
+              }`}
+            >
               <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-green-600"></span>
-                <span className="text-[11px] font-bold text-green-700">Approved by Supervisor</span>
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    entry.status === 'Approved'
+                      ? 'bg-green-600'
+                      : entry.status === 'Rejected'
+                      ? 'bg-red-600'
+                      : 'bg-yellow-600'
+                  }`}
+                ></span>
+                <span
+                  className={`text-[11px] font-bold ${
+                    entry.status === 'Approved'
+                      ? 'text-green-700'
+                      : entry.status === 'Rejected'
+                      ? 'text-red-700'
+                      : 'text-yellow-700'
+                  }`}
+                >
+                  {entry.status === 'Approved'
+                    ? 'Approved by Supervisor'
+                    : entry.status === 'Rejected'
+                    ? 'Rejected by Supervisor'
+                    : 'Pending approval'}
+                </span>
               </div>
-              {entry.approvedAt && (
-                <span className="text-[11px] text-green-700">{new Date(entry.approvedAt).toLocaleString()}</span>
+              {entry.approvedAt && entry.status === 'Approved' && (
+                <span className="text-[11px] text-green-700">
+                  {new Date(entry.approvedAt).toLocaleString()}
+                </span>
               )}
             </div>
 

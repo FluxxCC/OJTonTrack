@@ -90,8 +90,7 @@ export async function GET() {
     .select("id, idnumber, title, text, ts, status")
     .gte("ts", sevenDaysAgo)
     .neq("status", "draft")
-    .order("ts", { ascending: false })
-    .limit(20);
+    .order("ts", { ascending: false });
 
   const recentReports = (reportsData || []).map((r: { id: number; idnumber: string; title?: string | null; text?: string | null; ts?: number | string | null; status?: string | null }) => ({
     id: r.id,
@@ -102,8 +101,8 @@ export async function GET() {
     status: r.status || "submitted"
   }));
 
-  // Sort recent attendance by latest first and limit
+  // Sort recent attendance by latest first (no limit to ensure badges work for all students)
   recentAttendance.sort((a, b) => b.ts - a.ts);
 
-  return NextResponse.json({ summary, activeSessions, recentAttendance: recentAttendance.slice(0, 20), recentReports });
+  return NextResponse.json({ summary, activeSessions, recentAttendance, recentReports });
 }

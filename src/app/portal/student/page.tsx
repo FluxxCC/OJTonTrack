@@ -85,8 +85,18 @@ export default function StudentPage() {
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
 
   useEffect(() => {
-    const handler = (e: any) => {
+    const isReload = (() => {
+      try {
+        const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming;
+        return !!nav && nav.type === 'reload';
+      } catch {
+        const t = (performance as unknown as { navigation?: { type?: number } })?.navigation?.type;
+        return t === 1;
+      }
+    })();
+    const handler = (e: Event) => {
       e.preventDefault();
+      if (!isReload) return;
       setDeferredPrompt(e);
     };
     window.addEventListener("beforeinstallprompt", handler);

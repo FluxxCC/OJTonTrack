@@ -557,7 +557,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
   );
 }
 
-export function EditUserForm({ user, onSuccess, onClose }: { user: User; onSuccess: () => void; onClose: () => void }) {
+export function EditUserForm({ user, onSuccess, onClose, availableCourses, availableSections }: { user: User; onSuccess: () => void; onClose: () => void; availableCourses: Course[]; availableSections: Section[] }) {
   const [form, setForm] = useState({
     idnumber: user.idnumber || "",
     firstname: user.firstname || "",
@@ -567,9 +567,21 @@ export function EditUserForm({ user, onSuccess, onClose }: { user: User; onSucce
     company: user.company || "",
     location: user.location || "",
     password: "",
+    courseIds: Array.isArray(user.courseIds) ? user.courseIds : [],
+    sectionIds: Array.isArray(user.sectionIds) ? user.sectionIds : [],
   });
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const combinedCourseSections = useMemo(() => {
+    return availableSections.map(s => {
+      const c = availableCourses.find(c => c.id === s.course_id);
+      return {
+        id: s.id, 
+        name: `${c?.name || "Unknown"} ${s.name}`,
+        courseId: s.course_id
+      };
+    }).sort((a, b) => a.name.localeCompare(b.name));
+  }, [availableCourses, availableSections]);
 
   const submit = async () => {
     setLoading(true);
@@ -585,6 +597,8 @@ export function EditUserForm({ user, onSuccess, onClose }: { user: User; onSucce
         location: form.location || undefined,
       };
       if (form.password) payload.password = form.password;
+      if (form.courseIds && form.courseIds.length > 0) payload.courseIds = form.courseIds;
+      if (form.sectionIds && form.sectionIds.length > 0) payload.sectionIds = form.sectionIds;
 
       const res = await fetch(`/api/users/${user.id}`, {
         method: "PUT",
@@ -644,27 +658,71 @@ export function EditUserForm({ user, onSuccess, onClose }: { user: User; onSucce
             placeholder="Last name"
           />
         </label>
-        {(user.role === "student" || user.role === "instructor") && (
+        {user.role === "student" && (
           <>
             <label className="grid gap-1.5">
               <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Course</span>
-              <input
-                value={form.course}
-                onChange={(e) => setForm({ ...form, course: e.target.value })}
-                className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
-                placeholder="BSIT"
-              />
+              <div className="relative">
+                <select
+                  value={form.course}
+                  onChange={(e) => {
+                    const newCourse = e.target.value;
+                    setForm({ ...form, course: newCourse, section: "" });
+                  }}
+                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all appearance-none bg-white"
+                >
+                  <option value="">Select Course</option>
+                  {availableCourses.map(c => (
+                    <option key={c.id} value={c.name}>{c.name}</option>
+                  ))}
+                </select>
+                <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                </div>
+              </div>
             </label>
             <label className="grid gap-1.5">
               <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Section</span>
-              <input
-                value={form.section}
-                onChange={(e) => setForm({ ...form, section: e.target.value })}
-                className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
-                placeholder="4A"
-              />
+              <div className="relative">
+                <select
+                  value={form.section}
+                  onChange={(e) => setForm({ ...form, section: e.target.value })}
+                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all appearance-none bg-white"
+                  disabled={!form.course}
+                >
+                  <option value="">Select Section</option>
+                  {availableSections
+                    .filter(s => {
+                      const course = availableCourses.find(c => c.name === form.course);
+                      return course && s.course_id === course.id;
+                    })
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map(s => (
+                      <option key={s.id} value={s.name}>{s.name}</option>
+                    ))
+                  }
+                </select>
+                <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                </div>
+              </div>
             </label>
           </>
+        )}
+        {user.role === "instructor" && (
+          <label className="grid gap-1.5 md:col-span-2">
+            <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Course & Section</span>
+            <MultiSelect
+              options={combinedCourseSections}
+              value={form.sectionIds}
+              onChange={(sectionIds) => {
+                const selectedSections = combinedCourseSections.filter(opt => sectionIds.includes(opt.id));
+                const courseIds = Array.from(new Set(selectedSections.map(opt => opt.courseId)));
+                setForm({ ...form, sectionIds, courseIds });
+              }}
+              placeholder="Select course & section"
+            />
+          </label>
         )}
         {user.role === "supervisor" && (
           <>
@@ -684,6 +742,19 @@ export function EditUserForm({ user, onSuccess, onClose }: { user: User; onSucce
                 onChange={(e) => setForm({ ...form, location: e.target.value })}
                 className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
                 placeholder="Location"
+              />
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Course & Section</span>
+              <MultiSelect
+                options={combinedCourseSections}
+                value={form.sectionIds}
+                onChange={(sectionIds) => {
+                  const selectedSections = combinedCourseSections.filter(opt => sectionIds.includes(opt.id));
+                  const courseIds = Array.from(new Set(selectedSections.map(opt => opt.courseId)));
+                  setForm({ ...form, sectionIds, courseIds });
+                }}
+                placeholder="Select course & section"
               />
             </label>
           </>

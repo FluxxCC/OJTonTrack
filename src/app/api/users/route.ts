@@ -52,7 +52,7 @@ export async function GET() {
           }
         }
       });
-      if (!course && names.length > 0) {
+      if (names.length > 0) {
         course = names.join(", ");
       }
     }
@@ -80,7 +80,7 @@ export async function GET() {
           }
         }
       });
-      if (!section && names.length > 0) {
+      if (names.length > 0) {
         section = names.join(", ");
       }
     }

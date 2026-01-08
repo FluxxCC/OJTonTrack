@@ -9,32 +9,41 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const [authorized, setAuthorized] = useState(false);
 
   useEffect(() => {
-    // 1. Check if user is logged in
-    const role = localStorage.getItem("role");
-    const idnumber = localStorage.getItem("idnumber");
-    
+    let role = "";
+    let idnumber = "";
+    try {
+      role = localStorage.getItem("role") || "";
+      idnumber = localStorage.getItem("idnumber") || "";
+      if ((!role || !idnumber) && typeof document !== "undefined") {
+        const cookie = document.cookie.split("; ").find((c) => c.startsWith("ojt_session="));
+        if (cookie) {
+          const raw = cookie.substring("ojt_session=".length);
+          const decoded = decodeURIComponent(raw);
+          try {
+            const obj = JSON.parse(decoded);
+            if (obj?.role && obj?.idnumber) {
+              role = String(obj.role);
+              idnumber = String(obj.idnumber);
+              localStorage.setItem("role", role);
+              localStorage.setItem("idnumber", idnumber);
+            }
+          } catch {}
+        }
+      }
+    } catch {}
     if (!role || !idnumber) {
-      // Not logged in
       router.replace("/"); 
       return;
     }
 
-    // 2. Check Role Access
-    // Extract the role segment from the URL: /portal/student/... -> student
-    // pathname starts with /
     const segments = pathname.split("/");
-    // segments[0] is empty, segments[1] is portal, segments[2] is the role
     const urlRole = segments[2];
 
-    // If urlRole exists and differs from logged-in role
-    // Note: Some routes might not follow /portal/[role] exactly, but in this structure they do.
-    // If urlRole is missing (e.g. /portal), we might want to redirect to the correct role dashboard too.
     if (urlRole && urlRole.toLowerCase() !== role) {
       router.replace(`/portal/${role}`);
       return;
     }
     
-    // If accessing just /portal, redirect to specific role dashboard
     if (!urlRole) {
         router.replace(`/portal/${role}`);
         return;
