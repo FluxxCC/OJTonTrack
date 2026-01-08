@@ -19,7 +19,9 @@ export const metadata: Metadata = {
   description: "OJT Management System",
   manifest: "/manifest.json",
   icons: {
-    apple: "/icons-192.png",
+    icon: "/icons-512.png",
+    shortcut: "/icons-512.png",
+    apple: "/icons-512.png",
   },
 };
 
