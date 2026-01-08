@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import { supabase } from "../../../lib/supabaseClient";
 import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import { ProfileView as StudentProfileView } from "../student/ui";
@@ -352,13 +352,23 @@ export function EvaluationView({
   onOpenModal: (student: User) => void;
 }) {
   const [searchQuery, setSearchQuery] = useState("");
+  const [filterCourse, setFilterCourse] = useState("");
+  const [filterSection, setFilterSection] = useState("");
 
-  const filteredStudents = students.filter(student => {
-    const query = searchQuery.toLowerCase();
-    const fullName = `${student.firstname || ""} ${student.lastname || ""}`.toLowerCase();
-    const id = (student.idnumber || "").toLowerCase();
-    return fullName.includes(query) || id.includes(query);
-  });
+  const uniqueCourses = useMemo(() => Array.from(new Set(students.map(s => s.course).filter(Boolean))), [students]);
+  const uniqueSections = useMemo(() => Array.from(new Set(students.map(s => s.section).filter(Boolean))), [students]);
+
+  const filteredStudents = useMemo(() => {
+    return students.filter(student => {
+      const query = searchQuery.toLowerCase();
+      const fullName = `${student.firstname || ""} ${student.lastname || ""}`.toLowerCase();
+      const id = (student.idnumber || "").toLowerCase();
+      const matchesSearch = fullName.includes(query) || id.includes(query);
+      const matchesCourse = filterCourse ? student.course === filterCourse : true;
+      const matchesSection = filterSection ? student.section === filterSection : true;
+      return matchesSearch && matchesCourse && matchesSection;
+    });
+  }, [students, searchQuery, filterCourse, filterSection]);
 
   return (
     <div className="max-w-7xl mx-auto animate-in fade-in duration-500 space-y-6">
@@ -374,17 +384,37 @@ export function EvaluationView({
             </div>
          </div>
          
-         <div className="relative w-full md:w-72 group">
-            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-               <svg className="h-4 w-4 text-gray-400 group-focus-within:text-orange-500 transition-colors" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+         <div className="flex flex-col md:flex-row gap-3 w-full md:w-auto items-center">
+            <div className="relative w-full md:w-64 group">
+               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                  <svg className="h-4 w-4 text-gray-400 group-focus-within:text-orange-500 transition-colors" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+               </div>
+               <input
+                 type="text"
+                 placeholder="Search student..."
+                 value={searchQuery}
+                 onChange={(e) => setSearchQuery(e.target.value)}
+                 className="block w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm placeholder-gray-500 font-medium focus:outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10 focus:bg-white transition-all duration-200"
+               />
             </div>
-            <input
-              type="text"
-              placeholder="Search student..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="block w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm placeholder-gray-400 focus:outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10 focus:bg-white transition-all duration-200"
-            />
+            
+            <select 
+               value={filterCourse} 
+               onChange={(e) => setFilterCourse(e.target.value)}
+               className="w-full md:w-40 px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 cursor-pointer"
+            >
+               <option value="">All Courses</option>
+               {uniqueCourses.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+            
+            <select 
+               value={filterSection} 
+               onChange={(e) => setFilterSection(e.target.value)}
+               className="w-full md:w-40 px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 cursor-pointer"
+            >
+               <option value="">All Sections</option>
+               {uniqueSections.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
          </div>
       </div>
 
@@ -517,6 +547,7 @@ export function DashboardView({
   selected: User | null,
   onSelect: (s: User | null) => void
 }) {
+  const detailsRef = useRef<HTMLDivElement>(null);
   const [attendance, setAttendance] = useState<AttendanceEntry[]>([]);
   const [targetHours, setTargetHours] = useState<number>(() => {
     try {
@@ -534,6 +565,34 @@ export function DashboardView({
   const [filterDate, setFilterDate] = useState("");
   const [selectedAttendanceEntry, setSelectedAttendanceEntry] = useState<AttendanceEntry | null>(null);
   const searchParams = useSearchParams();
+
+  const [assignedSearch, setAssignedSearch] = useState("");
+  const [filterCourse, setFilterCourse] = useState("");
+  const [filterSection, setFilterSection] = useState("");
+
+  const uniqueCourses = useMemo(() => Array.from(new Set(students.map(s => s.course).filter(Boolean))).sort(), [students]);
+  const uniqueSections = useMemo(() => Array.from(new Set(students.map(s => s.section).filter(Boolean))).sort(), [students]);
+
+  const filteredStudents = useMemo(() => {
+    return students.filter(s => {
+      const searchLower = assignedSearch.toLowerCase();
+      const matchesSearch = 
+        (s.firstname?.toLowerCase() || "").includes(searchLower) ||
+        (s.lastname?.toLowerCase() || "").includes(searchLower) ||
+        (s.idnumber?.toLowerCase() || "").includes(searchLower);
+      const matchesCourse = filterCourse ? s.course === filterCourse : true;
+      const matchesSection = filterSection ? s.section === filterSection : true;
+      return matchesSearch && matchesCourse && matchesSection;
+    });
+  }, [students, assignedSearch, filterCourse, filterSection]);
+
+  useEffect(() => {
+    if (selected && window.innerWidth < 768) {
+      setTimeout(() => {
+        detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 300);
+    }
+  }, [selected]);
 
   
 
@@ -614,7 +673,7 @@ export function DashboardView({
       const map: Record<string, { baseMs: number; activeStart: number | null }> = {};
       for (const s of students) {
         try {
-          const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(s.idnumber)}&limit=200`);
+          const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(s.idnumber)}&limit=200`, { cache: "no-store" });
           const json = await res.json();
           if (res.ok && Array.isArray(json.entries)) {
             const mapped = json.entries.map((e: ServerAttendanceEntry) => ({
@@ -664,13 +723,40 @@ export function DashboardView({
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
       {/* Student List */}
-      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 lg:col-span-1 h-[calc(100vh-200px)] flex flex-col">
-        <div className="text-sm font-bold text-gray-900 uppercase tracking-wide mb-4">Assigned Students</div>
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 lg:col-span-1 h-auto max-h-[400px] lg:h-[calc(100vh-200px)] lg:max-h-none flex flex-col">
+        <div className="mb-4 space-y-3">
+           <div className="text-sm font-bold text-gray-900 uppercase tracking-wide">Assigned Students</div>
+           <input 
+             type="text" 
+             placeholder="Search student..." 
+             value={assignedSearch}
+             onChange={(e) => setAssignedSearch(e.target.value)}
+             className="w-full text-sm px-4 py-2.5 bg-gray-50 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 placeholder:text-gray-500 font-medium"
+           />
+           <div className="flex gap-2">
+             <select 
+               value={filterCourse} 
+               onChange={(e) => setFilterCourse(e.target.value)}
+               className="flex-1 text-xs px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 font-medium text-gray-700"
+             >
+               <option value="">All Courses</option>
+               {uniqueCourses.map(c => <option key={c} value={c}>{c}</option>)}
+             </select>
+             <select 
+               value={filterSection} 
+               onChange={(e) => setFilterSection(e.target.value)}
+               className="flex-1 text-xs px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 font-medium text-gray-700"
+             >
+               <option value="">All Sections</option>
+               {uniqueSections.map(s => <option key={s} value={s}>{s}</option>)}
+             </select>
+           </div>
+        </div>
         <div className="flex-1 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-          {students.length === 0 ? (
-            <div className="text-center py-8 text-gray-400 text-sm">No assigned students.</div>
+          {filteredStudents.length === 0 ? (
+            <div className="text-center py-8 text-gray-400 text-sm">No students found.</div>
           ) : (
-            students.map((s) => {
+            filteredStudents.map((s) => {
               const name = `${s.firstname || ""} ${s.lastname || ""}`.trim() || s.idnumber;
               const isActive = selected?.idnumber === s.idnumber;
               const pData = progressMap[s.idnumber] || { baseMs: 0, activeStart: null };
@@ -697,7 +783,7 @@ export function DashboardView({
       </div>
 
       {/* Detail View */}
-      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 lg:col-span-2 h-auto lg:h-[calc(100vh-200px)] flex flex-col">
+      <div ref={detailsRef} className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 lg:col-span-2 h-auto lg:h-[calc(100vh-200px)] flex flex-col">
         {/* Persistent Header */}
         <div className="flex items-center justify-between pb-6 border-b border-gray-100 mb-6 flex-shrink-0">
           <div>
@@ -955,7 +1041,7 @@ export function AttendanceView({ students, myIdnumber, onPendingChange }: { stud
       setRows(pending.slice(0, 100));
       setRecent(approved.slice(0, 100));
     })();
-  }, [students, myIdnumber]);
+  }, [students, myIdnumber, refreshKey]);
 
   useEffect(() => {
     if (!supabase || students.length === 0) return;

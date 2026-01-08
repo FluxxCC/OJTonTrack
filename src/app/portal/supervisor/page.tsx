@@ -97,7 +97,12 @@ function SupervisorContent() {
     }
   };
 
-  
+  useEffect(() => {
+    // Auto-request permission on mount
+    if ('Notification' in window && Notification.permission === 'default') {
+      requestNotificationPermission();
+    }
+  }, []);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -131,6 +136,7 @@ function SupervisorContent() {
   const [evalStatuses, setEvalStatuses] = useState<Record<string, boolean>>({});
   const [completedIds, setCompletedIds] = useState<Set<string>>(new Set());
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
+  const [refreshKey, setRefreshKey] = useState(0);
   const evaluationOpenCount = useMemo(() => {
     const ids = new Set(students.map(s => String(s.idnumber).trim()));
     let count = 0;
@@ -585,13 +591,10 @@ function SupervisorContent() {
   }, [isMobile]);
 
   // Fetch Data
-  useEffect(() => {
-    // Wait for myIdnumber to be populated from localStorage
-    if (!myIdnumber) return;
-
-    (async () => {
+  const fetchSupervisorData = async () => {
+      if (!myIdnumber) return;
       try {
-        const res = await fetch("/api/users");
+        const res = await fetch("/api/users", { cache: "no-store" });
         const json = await res.json();
         if (Array.isArray(json.users)) {
           // Get Me
@@ -607,7 +610,28 @@ function SupervisorContent() {
           setStudents(assigned);
         }
       } catch (e) { console.error(e); }
-    })();
+  };
+
+  useEffect(() => {
+    fetchSupervisorData();
+  }, [myIdnumber]);
+
+  // Visibility Change Listener
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        console.log('[Supervisor] App foregrounded, refreshing data...');
+        fetchSupervisorData();
+        fetchBadgeCounts();
+        setRefreshKey(prev => prev + 1);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleVisibilityChange);
+    };
   }, [myIdnumber]);
 
   // Logout
@@ -762,15 +786,6 @@ function SupervisorContent() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {notificationPermission === 'default' && (
-              <button
-                onClick={requestNotificationPermission}
-                className="flex items-center gap-2 px-3 py-1.5 bg-orange-100 text-[#F97316] rounded-lg text-sm font-semibold hover:bg-orange-200 transition-colors"
-              >
-                <BellRing size={16} />
-                <span className="hidden sm:inline">Enable Notifications</span>
-              </button>
-            )}
             <div className="hidden lg:block" />
           </div>
         </header>
@@ -802,7 +817,7 @@ function SupervisorContent() {
                 }}
               />
             )}
-            {activeTab === 'attendance' && <AttendanceView students={students} myIdnumber={myIdnumber} onPendingChange={setPendingApprovalsCount} />}
+            {activeTab === 'attendance' && <AttendanceView students={students} myIdnumber={myIdnumber} onPendingChange={setPendingApprovalsCount} refreshKey={refreshKey} />}
             {activeTab === 'profile' && <ProfileView user={me} />}
           </div>
         </main>

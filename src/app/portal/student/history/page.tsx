@@ -17,7 +17,7 @@ export default function StudentHistoryPage() {
     let active = true;
     const load = async () => {
       try {
-        const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=200`);
+        const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=200`, { cache: "no-store" });
         const json = await res.json();
         if (active && res.ok && Array.isArray(json.entries)) {
           const mapped = json.entries.map((e: ServerAttendanceEntry) => {

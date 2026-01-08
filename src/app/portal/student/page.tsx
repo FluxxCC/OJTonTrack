@@ -18,7 +18,6 @@ import {
   Calendar,
   LogIn,
   Zap,
-  BellRing,
 } from 'lucide-react';
 import { 
   AttendanceView as LegacyAttendanceView, 
@@ -594,17 +593,7 @@ export default function StudentPage() {
                       >
                         Submit Report
                       </Link>
-                      {notificationPermission === 'default' && (
-                        <button
-                          onClick={requestNotificationPermission}
-                          className="w-full rounded-xl font-bold py-3 px-6 text-sm transition-all active:scale-95 shadow bg-blue-600 text-white hover:bg-blue-700 border border-transparent"
-                        >
-                          <span className="inline-flex items-center justify-center gap-2">
-                            <BellRing size={16} />
-                            Enable Notifications
-                          </span>
-                        </button>
-                      )}
+
                     </div>
                   </div>
                 </div>
@@ -621,6 +610,8 @@ export default function StudentPage() {
                     idnumber={idnumber} 
                     attendance={attendance} 
                     onUpdate={setAttendance} 
+                    supervisorId={student?.supervisorid}
+                    studentName={student ? `${student.firstname} ${student.lastname}` : undefined}
                   />
                </div>
             )}

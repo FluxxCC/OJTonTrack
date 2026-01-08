@@ -42,6 +42,7 @@ export default function RootLayout({
         suppressHydrationWarning={true}
       >
         <ServiceWorkerRegister />
+        <PushNotificationManager />
         <InstallPrompt />
         {children}
       </body>

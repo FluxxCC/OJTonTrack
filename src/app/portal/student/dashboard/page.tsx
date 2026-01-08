@@ -59,7 +59,7 @@ export default function StudentDashboardPage() {
     };
     const loadReportsAndTarget = async () => {
       try {
-        const res = await fetch(`/api/reports?idnumber=${encodeURIComponent(idnumber)}`);
+        const res = await fetch(`/api/reports?idnumber=${encodeURIComponent(idnumber)}`, { cache: "no-store" });
         const json = await res.json();
         if (active && res.ok && Array.isArray(json.reports)) {
           setReports(json.reports);

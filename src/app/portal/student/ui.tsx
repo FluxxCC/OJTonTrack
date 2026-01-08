@@ -719,6 +719,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate }: { idnumber: s
       console.log("Submit response:", json);
 
       if (!res.ok) throw new Error(json?.error || "Failed to submit attendance");
+      
       const entry: AttendanceEntry = { type, timestamp: json.ts, photoDataUrl: json.photourl };
       onUpdate([entry, ...attendance]);
       try {

@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import citeLogo from "../../../../assets/CITE.png";
@@ -837,9 +837,18 @@ const StudentsView = ({
     const [reportsDateFilter, setReportsDateFilter] = useState("");
     const [selectedAttendanceEntry, setSelectedAttendanceEntry] = useState<AttendanceEntry | null>(null);
     const [isEvaluationModalOpen, setEvaluationModalOpen] = useState(false);
+    const detailsRef = useRef<HTMLDivElement>(null);
 
     // Persistent Broadcast Channel
     const [broadcastChannel, setBroadcastChannel] = useState<RealtimeChannel | null>(null);
+
+    useEffect(() => {
+        if (selected && window.innerWidth < 1024) {
+             setTimeout(() => {
+                 detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+             }, 100);
+        }
+    }, [selected]);
 
     useEffect(() => {
         if (!supabase) return;
@@ -993,7 +1002,7 @@ const StudentsView = ({
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* List */}
-          <div className="lg:col-span-4 flex flex-col bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="lg:col-span-4 flex flex-col bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden h-auto max-h-[500px] lg:h-[calc(100vh-200px)] lg:max-h-none">
             <div className="p-4 border-b border-gray-100 space-y-3">
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-700" size={18} />
@@ -1040,7 +1049,7 @@ const StudentsView = ({
                   </select>
               </div>
             </div>
-            <div className="p-2 space-y-1">
+            <div className="p-2 space-y-1 flex-1 overflow-y-auto custom-scrollbar">
               {filteredList.map(s => {
                 const isActive = selected?.idnumber === s.idnumber;
                 const baseMs = attendanceSummary[s.idnumber] || 0;
@@ -1102,7 +1111,7 @@ const StudentsView = ({
           </div>
 
           {/* Details */}
-          <div className="lg:col-span-8 flex flex-col gap-6">
+          <div ref={detailsRef} className="lg:col-span-8 flex flex-col gap-6">
             <StudentDetailsPanel 
               selected={selected}
               attendance={attendance}
@@ -1562,7 +1571,7 @@ export default function InstructorPage() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch("/api/users");
+        const res = await fetch("/api/users", { cache: "no-store" });
         const json = await res.json();
         if (Array.isArray(json.users)) {
           const me = (json.users as User[]).find(u => String(u.idnumber) === String(myIdnumber) && String(u.role).toLowerCase() === "instructor");
@@ -1626,7 +1635,7 @@ export default function InstructorPage() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch("/api/attendance/summary");
+        const res = await fetch("/api/attendance/summary", { cache: "no-store" });
         const json = await res.json();
         if (json.summary) setAttendanceSummary(json.summary);
         if (json.activeSessions) setActiveSessions(json.activeSessions);
@@ -1678,6 +1687,23 @@ export default function InstructorPage() {
   useEffect(() => {
     fetchBadgeCounts();
   }, [students]);
+
+  // Visibility Change Listener
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        console.log('[Instructor] App foregrounded, refreshing data...');
+        setRefreshTrigger(prev => prev + 1);
+        fetchBadgeCounts();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleVisibilityChange);
+    };
+  }, []);
 
   const getLastViewedTs = (key: string) => {
     try { return Number(localStorage.getItem(key) || "0"); } catch { return 0; }
@@ -1855,7 +1881,7 @@ export default function InstructorPage() {
 
     const fetchEval = async () => {
       try {
-        const res = await fetch(`/api/evaluation?idnumber=${encodeURIComponent(selected.idnumber)}`);
+        const res = await fetch(`/api/evaluation?idnumber=${encodeURIComponent(selected.idnumber)}`, { cache: "no-store" });
         const json = await res.json();
         if (res.ok && json.evaluation) {
           const ev = json.evaluation;

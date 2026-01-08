@@ -93,11 +93,25 @@ export async function POST(req: Request) {
     if (insertRes.error) return NextResponse.json({ error: insertRes.error.message }, { status: 500 });
 
     // Send Push Notification to Supervisor
-        const supervisorId = String(user.supervisorid || "").trim();
-        console.log(`[Attendance] Processing Push for Supervisor ID: '${supervisorId}'`);
+    let supervisorId = String(user.supervisorid || "").trim();
+    console.log(`[Attendance] Processing Push for Supervisor ID (UUID): '${supervisorId}'`);
 
     if (supervisorId) {
       try {
+        // Resolve UUID to ID Number if needed
+        const { data: supUser } = await admin
+          .from("users")
+          .select("idnumber")
+          .eq("id", supervisorId) // Assuming supervisorId is the UUID
+          .maybeSingle();
+        
+        if (supUser && supUser.idnumber) {
+            console.log(`[Attendance] Resolved Supervisor UUID ${supervisorId} to ID Number ${supUser.idnumber}`);
+            supervisorId = supUser.idnumber;
+        } else {
+            console.log(`[Attendance] Could not resolve Supervisor UUID ${supervisorId} to ID Number. Using as is.`);
+        }
+
         const pub = process.env.VAPID_PUBLIC_KEY || "";
         const priv = process.env.VAPID_PRIVATE_KEY || "";
         if (pub && priv) {

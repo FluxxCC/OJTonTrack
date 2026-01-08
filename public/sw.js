@@ -70,21 +70,36 @@ self.addEventListener('activate', (event) => {
  
  self.addEventListener('notificationclick', function(event) {
    event.notification.close();
-   const raw = (event.notification && event.notification.data && event.notification.data.url) || '/';
+   const raw = (event.notification.data && event.notification.data.url) || '/';
    const targetUrl = raw.startsWith('http') ? raw : (self.location.origin + raw);
-  event.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
-      // Try to find an existing tab to focus
-      for (const client of clientList) {
-        if (client.url && client.url.includes(self.location.origin) && 'focus' in client) {
-          try { client.postMessage({ type: 'notification-click', url: targetUrl }); } catch {}
-          return client.focus();
-        }
-      }
-      // If no client is found, open a new window
-      if (clients.openWindow) {
-        return clients.openWindow(targetUrl);
-      }
-    })
-  );
+
+   event.waitUntil(
+     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
+       // 1. Try to find a client that is already open to the app origin
+       for (const client of clientList) {
+         if (client.url && client.url.startsWith(self.location.origin) && 'focus' in client) {
+            // Focus first
+            return client.focus().then((focusedClient) => {
+               // Then navigate or message
+               if (focusedClient) {
+                   // If it's the exact same URL, maybe just message. If different, navigate.
+                   // Ideally we postMessage and let the client handle navigation (SPA style)
+                   // But if it fails, we can navigate.
+                   try { 
+                       focusedClient.postMessage({ type: 'notification-click', url: targetUrl });
+                   } catch (e) {
+                       // Fallback navigation if messaging fails
+                       return focusedClient.navigate(targetUrl);
+                   }
+               }
+               return focusedClient;
+            });
+         }
+       }
+       // 2. If no client found, open new window
+       if (clients.openWindow) {
+         return clients.openWindow(targetUrl);
+       }
+     })
+   );
 });
