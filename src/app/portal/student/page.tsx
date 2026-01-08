@@ -599,16 +599,6 @@ export default function StudentPage() {
                           </span>
                         </button>
                       )}
-                      {notificationPermission === 'granted' && (
-                         <div className="text-center mt-2">
-                           <button 
-                             onClick={() => alert("If you are not receiving notifications:\n1. Check your phone's Settings > Apps > OJTonTrack > Notifications.\n2. Ensure 'Allow Notifications' is on.\n3. Disable 'Battery Saver' for this app if possible.")}
-                             className="text-xs text-gray-400 underline hover:text-orange-500"
-                           >
-                             Not receiving alerts?
-                           </button>
-                         </div>
-                      )}
                     </div>
                   </div>
                 </div>
