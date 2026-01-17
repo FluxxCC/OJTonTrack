@@ -345,10 +345,9 @@ export default function CoordinatorPage() {
            <div className="h-full max-w-7xl mx-auto w-full animate-in fade-in zoom-in-95 duration-300">
             {activeTab === 'approval' ? (
               <ApprovalsView 
-                users={users} 
-                onApprove={handleApprove} 
-                onDelete={setDeletingUser} 
+                users={users}
                 onView={setViewingUser}
+                onRefresh={fetchUsers}
               />
             ) : activeTab === 'assign' ? (
               <AssignSupervisorView 

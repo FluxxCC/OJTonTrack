@@ -145,6 +145,7 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
     pmOut: string;
   } | null>(null);
   const [noChangeModal, setNoChangeModal] = useState(false);
+  const [successModal, setSuccessModal] = useState(false);
 
   // Load global settings
   useEffect(() => {
@@ -283,7 +284,7 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
         }
       }
 
-      alert("Schedule saved successfully for all students!");
+      setSuccessModal(true);
     } finally {
       setIsSaving(false);
     }
@@ -314,6 +315,23 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
               className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
             >
               Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {successModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-2">Schedule Saved</h2>
+            <p className="text-gray-700 mb-4">
+              Schedule saved successfully for all students.
+            </p>
+            <button
+              onClick={() => setSuccessModal(false)}
+              className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
+            >
+              OK
             </button>
           </div>
         </div>

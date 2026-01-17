@@ -94,6 +94,13 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 
       if (email && role === "student") {
         if (prevStatus !== newStatus && newStatus === "APPROVED") {
+          if (!afterData?.email_verified) {
+            try {
+              await admin.from("users").update({ email_verified: true }).eq("id", id);
+            } catch (e) {
+              console.error("Failed to set email_verified on approval:", e);
+            }
+          }
           const html = `
             <p>Hi ${studentName || "Student"},</p>
             <p>Your OJTonTrack account has been approved.</p>

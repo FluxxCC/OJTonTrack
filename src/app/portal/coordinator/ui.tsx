@@ -39,11 +39,11 @@ function formatCourseSection(courseStr?: string, sectionStr?: string): string {
   if (!courseStr) return "";
   if (!sectionStr) return courseStr;
   
-  const courses = courseStr.split(',').map(s => s.trim());
-  const sections = sectionStr.split(',').map(s => s.trim());
+  const courses = courseStr.split(",").map(s => s.trim());
+  const sections = sectionStr.split(",").map(s => s.trim());
   
   if (courses.length > 0 && courses.length === sections.length) {
-    return courses.map((c, i) => `${c}-${sections[i]}`).join(', ');
+    return courses.map((c, i) => `${c}-${sections[i]}`).join(", ");
   }
   return `${courseStr} - ${sectionStr}`;
 }
@@ -66,11 +66,101 @@ export function Modal({ children, onClose, className }: { children: React.ReactN
   );
 }
 
-export const ApprovalsView = ({ users, onApprove, onDelete, onView }: { 
-  users: User[], 
-  onApprove: (user: User) => void,
-  onDelete: (user: User) => void,
-  onView: (user: User) => void
+function ConfirmationModal({ 
+  message, 
+  onConfirm, 
+  onCancel,
+  title = "Are you sure?",
+  confirmLabel = "Yes, Continue",
+  variant = "warning",
+  noteLabel,
+  noteRequired,
+  noteValue,
+  onNoteChange
+}: { 
+  message: string; 
+  onConfirm: () => void; 
+  onCancel: () => void;
+  title?: string;
+  confirmLabel?: string;
+  variant?: "warning" | "danger" | "success";
+  noteLabel?: string;
+  noteRequired?: boolean;
+  noteValue?: string;
+  onNoteChange?: (value: string) => void;
+}) {
+  const styles = {
+    warning: {
+      bg: "bg-orange-50",
+      text: "text-orange-500",
+      ring: "ring-orange-50/50",
+      btn: "bg-[#F97316] hover:bg-[#ea6a12] shadow-orange-500/20",
+    },
+    danger: {
+      bg: "bg-red-50",
+      text: "text-red-500",
+      ring: "ring-red-50/50",
+      btn: "bg-red-600 hover:bg-red-700 shadow-red-500/20",
+    },
+    success: {
+      bg: "bg-green-50",
+      text: "text-green-500",
+      ring: "ring-green-50/50",
+      btn: "bg-green-600 hover:bg-green-700 shadow-green-500/20",
+    },
+  };
+
+  const currentStyle = styles[variant] || styles.warning;
+
+  const showNoteField = Boolean(noteLabel);
+  const canConfirm = !noteRequired || (noteValue && noteValue.trim().length > 0);
+
+  return (
+    <Modal onClose={onCancel}>
+      <div className="flex flex-col items-center justify-center p-8 text-center">
+        <div className={`w-20 h-20 ${currentStyle.bg} ${currentStyle.text} rounded-full flex items-center justify-center mb-6 ring-8 ${currentStyle.ring}`}>
+          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+        </div>
+        <h3 className="text-2xl font-bold text-gray-900 mb-2">{title}</h3>
+        <p className="text-gray-500 mb-6 max-w-sm mx-auto leading-relaxed">{message}</p>
+        {showNoteField && (
+          <div className="w-full max-w-md mx-auto mb-6 text-left">
+            <label className="block text-sm font-semibold text-gray-700 mb-1">
+              {noteLabel}
+              {noteRequired ? " *" : ""}
+            </label>
+            <textarea
+              value={noteValue || ""}
+              onChange={e => onNoteChange && onNoteChange(e.target.value)}
+              className="w-full min-h-[90px] rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all resize-none"
+              placeholder={noteRequired ? "Required. Explain the reason for rejection..." : "Optional note..."}
+            />
+          </div>
+        )}
+        <div className="flex gap-4">
+          <button
+            onClick={onCancel}
+            className="min-w-[120px] py-3 px-6 bg-white border border-gray-200 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-all"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={!canConfirm}
+            className={`min-w-[120px] py-3 px-6 text-white font-bold rounded-xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg ${currentStyle.btn} ${!canConfirm ? "opacity-60 cursor-not-allowed hover:scale-100" : ""}`}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+export const ApprovalsView = ({ users, onView, onRefresh }: { 
+  users: User[]; 
+  onView: (user: User) => void;
+  onRefresh: () => void;
 }) => {
   const students = useMemo(() => users.filter(u => u.role === "student"), [users]);
   const [searchTerm, setSearchTerm] = useState("");
@@ -78,6 +168,14 @@ export const ApprovalsView = ({ users, onApprove, onDelete, onView }: {
   const [filterSection, setFilterSection] = useState("");
   const [filterStatus, setFilterStatus] = useState("PENDING");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [isBulkApproving, setIsBulkApproving] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<{
+    type: "single" | "bulk";
+    id?: number;
+    action: "approve" | "reject";
+  } | null>(null);
+  const [rejectionNote, setRejectionNote] = useState("");
 
   const uniqueCourses = useMemo(
     () =>
@@ -125,18 +223,59 @@ export const ApprovalsView = ({ users, onApprove, onDelete, onView }: {
   };
 
   const toggleAll = () => {
-    const pendingFiltered = filteredStudents.filter(
-      s => (s.signup_status || "APPROVED") === "PENDING"
+    const pendingStudents = filteredStudents.filter(
+      s => (s.signup_status || "APPROVED") !== "APPROVED"
     );
-    if (pendingFiltered.length === 0) {
+    if (pendingStudents.length === 0) {
       setSelectedIds(new Set());
       return;
     }
-    const allSelected = pendingFiltered.every(s => selectedIds.has(s.id));
+    const allSelected =
+      selectedIds.size === pendingStudents.length && pendingStudents.length > 0;
     if (allSelected) {
       setSelectedIds(new Set());
     } else {
-      setSelectedIds(new Set(pendingFiltered.map(s => s.id)));
+      setSelectedIds(new Set(pendingStudents.map(s => s.id)));
+    }
+  };
+
+  const performAction = async (ids: number[], action: "approve" | "reject", note?: string) => {
+    try {
+      const actorId =
+        typeof window !== "undefined"
+          ? localStorage.getItem("idnumber") || "SYSTEM"
+          : "SYSTEM";
+
+      if (ids.length === 1) setActionLoading(ids[0]);
+      else setIsBulkApproving(true);
+
+      await Promise.all(
+        ids.map(id =>
+          fetch(`/api/users/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              signup_status: action === "approve" ? "APPROVED" : "REJECTED",
+              actorId,
+              actorRole: "coordinator",
+              reason: `Coordinator ${action}`,
+              rejectionNote: action === "reject" ? note || "" : undefined,
+            }),
+          }).then(res => {
+            if (!res.ok) throw new Error(`Failed to ${action} ${id}`);
+            return res;
+          })
+        )
+      );
+
+      onRefresh();
+      setSelectedIds(new Set());
+    } catch (e) {
+      alert(`Failed to ${action} one or more students`);
+    } finally {
+      setActionLoading(null);
+      setIsBulkApproving(false);
+      setConfirmAction(null);
     }
   };
 
@@ -199,10 +338,29 @@ export const ApprovalsView = ({ users, onApprove, onDelete, onView }: {
             <option value="APPROVED">Approved</option>
             <option value="REJECTED">Rejected</option>
           </select>
+
+          {selectedIds.size > 0 && (
+            <div className="flex items-center gap-2 animate-in fade-in zoom-in duration-200">
+              <button
+                onClick={() => setConfirmAction({ type: "bulk", action: "approve" })}
+                disabled={isBulkApproving}
+                className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-sm font-bold shadow-sm transition-colors disabled:opacity-50 whitespace-nowrap"
+              >
+                {isBulkApproving ? "Processing..." : `Approve (${selectedIds.size})`}
+              </button>
+              <button
+                onClick={() => setConfirmAction({ type: "bulk", action: "reject" })}
+                disabled={isBulkApproving}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-bold shadow-sm transition-colors disabled:opacity-50 whitespace-nowrap"
+              >
+                {isBulkApproving ? "Processing..." : `Reject (${selectedIds.size})`}
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex-1">
-          <div className="overflow-x-auto h-full">
+          <div className="overflow-x-auto h-full hidden md:block">
             <table className="w-full text-sm text-left">
               <thead className="bg-gray-50 text-gray-500 font-medium border-b border-gray-100 sticky top-0 z-10">
                 <tr>
@@ -212,10 +370,10 @@ export const ApprovalsView = ({ users, onApprove, onDelete, onView }: {
                       className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
                       onChange={toggleAll}
                       checked={
-                        filteredStudents.some(s => (s.signup_status || "APPROVED") === "PENDING") &&
-                        filteredStudents
-                          .filter(s => (s.signup_status || "APPROVED") === "PENDING")
-                          .every(s => selectedIds.has(s.id))
+                        filteredStudents.some(s => (s.signup_status || "APPROVED") !== "APPROVED") &&
+                        selectedIds.size ===
+                          filteredStudents.filter(s => (s.signup_status || "APPROVED") !== "APPROVED").length &&
+                        filteredStudents.filter(s => (s.signup_status || "APPROVED") !== "APPROVED").length > 0
                       }
                     />
                   </th>
@@ -235,14 +393,12 @@ export const ApprovalsView = ({ users, onApprove, onDelete, onView }: {
                   </tr>
                 ) : (
                   filteredStudents.map(s => {
-                    const isPending = (s.signup_status || "APPROVED") === "PENDING";
+                    const isPending = (s.signup_status || "APPROVED") !== "APPROVED";
                     const isSelected = selectedIds.has(s.id);
                     return (
                       <tr
                         key={s.id}
-                        className={`hover:bg-gray-50/50 ${
-                          isSelected ? "bg-orange-50/30" : ""
-                        }`}
+                        className={`hover:bg-gray-50/50 ${isSelected ? "bg-orange-50/30" : ""}`}
                       >
                         <td className="px-6 py-3">
                           {isPending && (
@@ -270,11 +426,11 @@ export const ApprovalsView = ({ users, onApprove, onDelete, onView }: {
                         <td className="px-6 py-3">
                           <span
                             className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium border ${
-                              s.signup_status === "PENDING"
-                                ? "bg-yellow-50 text-yellow-700 border-yellow-200"
+                              !isPending
+                                ? "bg-green-50 text-green-700 border-green-200"
                                 : s.signup_status === "REJECTED"
                                 ? "bg-red-50 text-red-700 border-red-200"
-                                : "bg-green-50 text-green-700 border-green-200"
+                                : "bg-yellow-50 text-yellow-700 border-yellow-200"
                             }`}
                           >
                             {s.signup_status || "APPROVED"}
@@ -284,16 +440,30 @@ export const ApprovalsView = ({ users, onApprove, onDelete, onView }: {
                           {isPending && (
                             <div className="flex gap-2">
                               <button
-                                onClick={() => onApprove(s)}
-                                className="px-3 py-1.5 bg-[#F97316] text-white rounded-lg text-xs font-bold shadow-sm hover:bg-[#EA580C] transition-colors"
+                                onClick={() =>
+                                  setConfirmAction({
+                                    type: "single",
+                                    id: s.id,
+                                    action: "approve",
+                                  })
+                                }
+                                disabled={actionLoading === s.id}
+                                className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
                               >
-                                Approve
+                                {actionLoading === s.id ? "..." : "Approve"}
                               </button>
                               <button
-                                onClick={() => onDelete(s)}
-                                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors"
+                                onClick={() =>
+                                  setConfirmAction({
+                                    type: "single",
+                                    id: s.id,
+                                    action: "reject",
+                                  })
+                                }
+                                disabled={actionLoading === s.id}
+                                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
                               >
-                                Reject
+                                {actionLoading === s.id ? "..." : "Reject"}
                               </button>
                             </div>
                           )}
@@ -305,7 +475,144 @@ export const ApprovalsView = ({ users, onApprove, onDelete, onView }: {
               </tbody>
             </table>
           </div>
+
+          <div className="md:hidden">
+            {filteredStudents.length === 0 ? (
+              <div className="px-4 py-8 text-center text-gray-500 text-sm">
+                No students found
+              </div>
+            ) : (
+              <div className="divide-y divide-gray-100">
+                {filteredStudents.map(s => {
+                  const isPending = (s.signup_status || "APPROVED") !== "APPROVED";
+                  const isSelected = selectedIds.has(s.id);
+                  return (
+                    <div
+                      key={s.id}
+                      className={`p-4 ${isSelected ? "bg-orange-50/30" : ""}`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1">
+                          <button
+                            onClick={() => onView(s)}
+                            className="text-sm font-bold text-gray-900 hover:text-orange-600 hover:underline text-left"
+                          >
+                            {s.firstname} {s.lastname}
+                          </button>
+                          <div className="text-xs text-gray-600 mt-0.5">
+                            {s.idnumber}
+                          </div>
+                          <div className="text-xs text-gray-500 mt-0.5">
+                            {formatCourseSection(s.course, s.section)}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border ${
+                              !isPending
+                                ? "bg-green-50 text-green-700 border-green-200"
+                                : s.signup_status === "REJECTED"
+                                ? "bg-red-50 text-red-700 border-red-200"
+                                : "bg-yellow-50 text-yellow-700 border-yellow-200"
+                            }`}
+                          >
+                            {s.signup_status || "APPROVED"}
+                          </span>
+                          {isPending && (
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleSelection(s.id)}
+                              className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                              aria-label="Select for bulk action"
+                            />
+                          )}
+                        </div>
+                      </div>
+                      {isPending && (
+                        <div className="mt-3 flex items-center gap-2">
+                          <button
+                            onClick={() =>
+                              setConfirmAction({
+                                type: "single",
+                                id: s.id,
+                                action: "approve",
+                              })
+                            }
+                            disabled={actionLoading === s.id}
+                            className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
+                          >
+                            {actionLoading === s.id ? "..." : "Approve"}
+                          </button>
+                          <button
+                            onClick={() =>
+                              setConfirmAction({
+                                type: "single",
+                                id: s.id,
+                                action: "reject",
+                              })
+                            }
+                            disabled={actionLoading === s.id}
+                            className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
+                          >
+                            {actionLoading === s.id ? "..." : "Reject"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
+
+        {confirmAction && (
+          <ConfirmationModal
+            title={
+              confirmAction.action === "approve"
+                ? "Approve Student Account(s)?"
+                : "Reject Student Account(s)?"
+            }
+            message={
+              confirmAction.type === "bulk"
+                ? `Are you sure you want to ${confirmAction.action} ${selectedIds.size} selected student(s)?`
+                : `Are you sure you want to ${confirmAction.action} this student account?`
+            }
+            confirmLabel={`Yes, ${
+              confirmAction.action === "approve" ? "Approve" : "Reject"
+            }`}
+            variant={confirmAction.action === "approve" ? "warning" : "danger"}
+            noteLabel={confirmAction.action === "reject" ? "Rejection note" : undefined}
+            noteRequired={confirmAction.action === "reject"}
+            noteValue={confirmAction.action === "reject" ? rejectionNote : ""}
+            onNoteChange={value => {
+              if (confirmAction.action === "reject") {
+                setRejectionNote(value);
+              }
+            }}
+            onConfirm={() => {
+              if (
+                confirmAction.action === "reject" &&
+                (!rejectionNote || !rejectionNote.trim())
+              ) {
+                return;
+              }
+              if (confirmAction.type === "bulk") {
+                performAction(Array.from(selectedIds), confirmAction.action, rejectionNote);
+              } else if (confirmAction.id) {
+                performAction([confirmAction.id], confirmAction.action, rejectionNote);
+              }
+              if (confirmAction.action === "reject") {
+                setRejectionNote("");
+              }
+            }}
+            onCancel={() => {
+              setConfirmAction(null);
+              setRejectionNote("");
+            }}
+          />
+        )}
       </div>
     </div>
   );
