@@ -1,7 +1,6 @@
 "use client";
 import React, { useState } from "react";
 import Image from "next/image";
-import citeLogo from "../../assets/CITE.png";
 import { useRouter } from "next/navigation";
 
 type Role = "student" | "instructor" | "coordinator" | "supervisor";
@@ -19,7 +18,6 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
 
   React.useEffect(() => {
-    // Check for existing session to auto-redirect
     const checkSession = async () => {
       let role = "";
       let idnumber = "";
@@ -28,19 +26,18 @@ export default function Home() {
         idnumber = localStorage.getItem("idnumber") || "";
       } catch {}
 
-      // If missing locally, check server (PWA persistence)
-      if ((!role || !idnumber) && typeof navigator !== 'undefined' && navigator.onLine) {
+      if ((!role || !idnumber) && typeof navigator !== "undefined" && navigator.onLine) {
         try {
-           const res = await fetch("/api/auth/check-session");
-           if (res.ok) {
-             const data = await res.json();
-             if (data.role && data.idnumber) {
-               role = data.role;
-               idnumber = data.idnumber;
-               localStorage.setItem("role", role);
-               localStorage.setItem("idnumber", idnumber);
-             }
-           }
+          const res = await fetch("/api/auth/check-session");
+          if (res.ok) {
+            const data = await res.json();
+            if (data.role && data.idnumber) {
+              role = data.role;
+              idnumber = data.idnumber;
+              localStorage.setItem("role", role);
+              localStorage.setItem("idnumber", idnumber);
+            }
+          }
         } catch {}
       }
 
@@ -68,7 +65,13 @@ export default function Home() {
         style={{ borderColor: "#E5E7EB", boxShadow: "0 8px 28px rgba(0,0,0,0.06)" }}
       >
         <div className="px-6 py-5 border-b flex items-center gap-3" style={{ borderColor: "#E5E7EB" }}>
-          <Image src={citeLogo} alt="CITE" width={42} height={42} className="h-10.5 w-10.5 rounded-md object-cover" />
+          <Image
+            src="/icons-512.png"
+            alt="OJTonTrack"
+            width={42}
+            height={42}
+            className="h-10.5 w-10.5 rounded-md object-cover"
+          />
           <div className="text-[#1F2937] font-extrabold text-[1.25rem] tracking-wide">OJTonTrack</div>
         </div>
         <div className="h-[2px] bg-[#F97316]/30" />
