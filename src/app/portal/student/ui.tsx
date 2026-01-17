@@ -3010,7 +3010,7 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
               </div>
             </div>
 
-             <div className="border-t border-gray-100 pt-8 mt-8">
+            <div className="border-t border-gray-100 pt-8 mt-8">
               <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide mb-6 flex items-center gap-2">
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><path d="M22 10v6M2 10l10-5 10 5-10 5z"></path><path d="M6 12v5c3 3 9 3 12 0v-5"></path></svg>
                 Academic Details
@@ -3023,6 +3023,12 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
                 <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
                   <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Section</label>
                   <div className="text-gray-900 font-semibold">{student?.section || "N/A"}</div>
+                </div>
+                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100 sm:col-span-2">
+                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Supervisor</label>
+                  <div className="text-gray-900 font-semibold">
+                    {supervisor ? `${(supervisor.firstname || "").trim()} ${(supervisor.lastname || "").trim()}`.trim() || supervisor.idnumber : "N/A"}
+                  </div>
                 </div>
               </div>
             </div>

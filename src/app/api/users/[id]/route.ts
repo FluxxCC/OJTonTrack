@@ -94,12 +94,10 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 
       if (email && role === "student") {
         if (prevStatus !== newStatus && newStatus === "APPROVED") {
-          const loginUrl = `${appUrl}/auth/login`;
           const html = `
             <p>Hi ${studentName || "Student"},</p>
             <p>Your OJTonTrack account has been approved.</p>
-            <p>You can now sign in using your ID number and password at the link below:</p>
-            <p><a href="${loginUrl}">${loginUrl}</a></p>
+            <p>You can now sign in using your ID number and password.</p>
             <p>Approved by: ${actorName}</p>
           `;
           await sendTransactionalEmail({
