@@ -5,11 +5,40 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import citeLogo from "../../../../assets/CITE.png";
 import { AttendanceDetailsModal } from "@/components/AttendanceDetailsModal";
+import { supabase } from "@/lib/supabaseClient";
 
-export type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved"; approvedAt?: number };
-export type ReportEntry = { id?: number; title: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string };
-type ServerAttendanceEntry = { type: "in" | "out"; ts: number; photourl: string; status?: string; approvedby?: string | null };
+export type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; approvedAt?: number };
+export type ReportEntry = { id?: number; title: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string; isViewedByInstructor?: boolean };
+type ServerAttendanceEntry = { 
+  type: "in" | "out"; 
+  ts: number; 
+  photourl: string; 
+  status?: string; 
+  validated_by?: string | null;
+  validated_at?: string | null;
+};
 const DUE_DATE_TEXT = new Date(Date.now() + 86400000).toLocaleDateString();
+
+function getAttendanceStatus(entry?: AttendanceEntry | null): "Pending" | "Approved" | "Rejected" {
+  if (!entry || !entry.status) return "Pending";
+  if (entry.status === "Approved") return "Approved";
+  if (entry.status === "Rejected") return "Rejected";
+  return "Pending";
+}
+
+function formatStatusLabel(entry: AttendanceEntry): string {
+  const status = getAttendanceStatus(entry);
+  if (status === "Approved") return "Validated";
+  if (status === "Rejected") return "Unvalidated";
+  return "Pending";
+}
+
+function getStatusColorClass(entry?: AttendanceEntry | null): string {
+  const status = getAttendanceStatus(entry);
+  if (status === "Approved") return "text-green-600";
+  if (status === "Rejected") return "text-red-600";
+  return "text-yellow-600";
+}
 
 const toBase64 = (file: File) => new Promise((resolve, reject) => {
   const reader = new FileReader();
@@ -17,6 +46,36 @@ const toBase64 = (file: File) => new Promise((resolve, reject) => {
   reader.onload = () => resolve(reader.result);
   reader.onerror = error => reject(error);
 });
+
+function normalizeTimeString(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const parts = raw.split(":");
+  if (parts.length < 2) return null;
+  const h = parts[0]?.padStart(2, "0");
+  const m = parts[1]?.padStart(2, "0");
+  if (!h || !m) return null;
+  return `${h}:${m}`;
+}
+
+function timeStringToMinutes(raw: string | null | undefined): number {
+  const t = normalizeTimeString(raw);
+  if (!t) return 0;
+  const [h, m] = t.split(":").map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
+function formatDisplayTime(raw: string | null | undefined): string {
+  const t = normalizeTimeString(raw);
+  if (!t) return "";
+  const [hStr, mStr] = t.split(":");
+  let h = Number(hStr || 0);
+  const m = Number(mStr || 0);
+  const suffix = h >= 12 ? "PM" : "AM";
+  if (h === 0) h = 12;
+  else if (h > 12) h -= 12;
+  const mm = String(m).padStart(2, "0");
+  return `${h}:${mm} ${suffix}`;
+}
 
 export type User = {
   id: number;
@@ -129,6 +188,7 @@ export function DashboardView({
   attendance,
   reports,
   totalHours,
+  totalValidatedHours,
   targetHours,
   onTimeIn,
   onTimeOut,
@@ -140,6 +200,7 @@ export function DashboardView({
   attendance: AttendanceEntry[]; 
   reports: ReportEntry[]; 
   totalHours: string; 
+  totalValidatedHours: string;
   targetHours: number;
   onTimeIn: () => void;
   onTimeOut: () => void;
@@ -215,16 +276,27 @@ export function DashboardView({
   return (
     <div className="flex flex-col gap-8 animate-in fade-in duration-500">
       {/* Welcome & Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
          {/* Total Hours Card */}
-         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 relative overflow-hidden group">
-            <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-               <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 relative overflow-hidden group">
+            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
+               <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
             </div>
-            <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Total Hours</div>
-            <div className="text-3xl font-extrabold text-[#F97316] tracking-tight mb-2">{hoursText}</div>
-            <div className="text-xs font-medium text-gray-500">
+            <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1">Total Hours</div>
+            <div className="text-2xl font-bold text-[#F97316] tracking-tight mb-1">{hoursText}</div>
+            <div className="text-[11px] font-medium text-gray-500">
                Target: {targetHours} hrs
+            </div>
+         </div>
+
+         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 relative overflow-hidden group">
+            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
+               <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-500"><circle cx="12" cy="12" r="10"></circle><polyline points="20 6 9 17 4 12"></polyline></svg>
+            </div>
+            <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1">Total Validated Hours</div>
+            <div className="text-xl font-bold text-green-600 tracking-tight mb-1">{totalValidatedHours}</div>
+            <div className="text-[11px] font-medium text-gray-500">
+               Only approved logs are counted here.
             </div>
          </div>
 
@@ -406,7 +478,7 @@ export function DashboardView({
                        <div className="inline-flex items-center justify-center h-12 w-12 rounded-full bg-red-100 text-red-600 mb-3">
                           <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
                        </div>
-                       <h4 className="text-sm font-bold text-gray-900 mb-1">Submission Pending</h4>
+                       <h4 className="text-sm font-bold text-red-700 mb-1">Not submitted yet</h4>
                        <p className="text-xs text-gray-500 mb-4">You haven't submitted a report for this week yet.</p>
                        <div className="p-3 bg-red-50 rounded-xl border border-red-100 text-left mb-4">
                           <div className="text-xs font-semibold text-red-700 uppercase tracking-wider mb-1">Deadline</div>
@@ -421,7 +493,7 @@ export function DashboardView({
                        <div className="inline-flex items-center justify-center h-12 w-12 rounded-full bg-green-100 text-green-600 mb-3">
                           <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
                        </div>
-                       <h4 className="text-sm font-bold text-gray-900 mb-1">All Caught Up!</h4>
+                       <h4 className="text-sm font-bold text-green-700 mb-1">Submitted</h4>
                        <p className="text-xs text-gray-500 mb-4">Your last report was submitted successfully.</p>
                        <div className="p-3 bg-green-50 rounded-xl border border-green-100 text-left">
                           <div className="text-xs font-semibold text-green-700 uppercase tracking-wider mb-1">Last Submission</div>
@@ -445,15 +517,42 @@ export function DashboardView({
   );
 }
 
+export type CameraAnalysis = {
+  faceDetected: boolean;
+  faceSize?: "small" | "medium" | "large";
+  facePosition?: "centered" | "partially_out";
+  lighting: "too_dark" | "too_bright" | "okay";
+  numFaces?: number;
+};
+
+export function getCameraAssistantMessage(input: CameraAnalysis): string {
+  const { faceDetected, faceSize, facePosition, lighting, numFaces } = input;
+  if (!faceDetected || (numFaces !== undefined && numFaces === 0)) {
+    return "Put your face in the frame.";
+  }
+  const msgs: string[] = [];
+  if (facePosition === "partially_out") msgs.push("Center your face in the frame.");
+  if (faceSize === "small") msgs.push("Move closer to the camera.");
+  else if (faceSize === "large") msgs.push("Move back a little.");
+  if (lighting === "too_dark") msgs.push("Too dark, try moving to a brighter spot.");
+  else if (lighting === "too_bright") msgs.push("Too light, adjust your lighting.");
+
+  if (msgs.length === 0) return "Perfect! Hold still.";
+  if (msgs.length === 1) return msgs[0];
+  if (msgs.length === 2) return `${msgs[0].replace(/\.$/, "")} and ${msgs[1].toLowerCase()}`;
+  return `${msgs[0].replace(/\.$/, "")}, ${msgs[1].toLowerCase()}, and ${msgs[2].toLowerCase()}`;
+}
+
 export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, studentName }: { idnumber: string; attendance: AttendanceEntry[]; onUpdate: (next: AttendanceEntry[]) => void; supervisorId?: string; studentName?: string }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [photo, setPhoto] = useState<string | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [dbSchedule, setDbSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
   const [nowText, setNowText] = useState<string>("");
-  const [showAllAttendance, setShowAllAttendance] = useState(false);
   const [attendanceSearchQuery, setAttendanceSearchQuery] = useState("");
   const [filterDate, setFilterDate] = useState("");
+  const [monthFilter, setMonthFilter] = useState("");
   const [selectedAttendanceEntry, setSelectedAttendanceEntry] = useState<AttendanceEntry | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -462,12 +561,44 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   const [videoReady, setVideoReady] = useState<boolean>(false);
   const readinessIntervalRef = useRef<number | null>(null);
   const [isFrontCam, setIsFrontCam] = useState<boolean>(false);
+  const [showBreakModal, setShowBreakModal] = useState(false);
+  const [breakPmInText, setBreakPmInText] = useState<string>("");
+  const [showLateInModal, setShowLateInModal] = useState(false);
+  const [lateInPmOutText, setLateInPmOutText] = useState<string>("");
+  const [showEarlyOutModal, setShowEarlyOutModal] = useState(false);
+  const [earlyOutShiftEndText, setEarlyOutShiftEndText] = useState<string>("");
+  const [showHistoryMode, setShowHistoryMode] = useState(false);
+  const [selectedImage, setSelectedImage] = useState<{ url: string; timestamp: number } | null>(null);
+  const [cameraFeedback, setCameraFeedback] = useState<string>("");
+
+  const monthOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    attendance.forEach(a => {
+      const d = new Date(a.timestamp);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const label = d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+      if (!map.has(key)) {
+        map.set(key, label);
+      }
+    });
+    return Array.from(map.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([value, label]) => ({ value, label }));
+  }, [attendance]);
 
   const filteredAttendance = useMemo(() => {
     let result = attendance;
-    
+
     if (filterDate) {
       result = result.filter(a => new Date(a.timestamp).toLocaleDateString() === new Date(filterDate).toLocaleDateString());
+    }
+
+    if (monthFilter) {
+      result = result.filter(a => {
+        const d = new Date(a.timestamp);
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+        return key === monthFilter;
+      });
     }
 
     if (attendanceSearchQuery) {
@@ -480,7 +611,218 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     }
 
     return result;
-  }, [attendance, filterDate, attendanceSearchQuery]);
+  }, [attendance, filterDate, monthFilter, attendanceSearchQuery]);
+
+  const schedule = useMemo(() => {
+    try {
+      const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
+      const saved = localStorage.getItem(key) || localStorage.getItem("schedule_default");
+      if (!saved) return null;
+      const parsed = JSON.parse(saved) as {
+        amIn?: string;
+        amOut?: string;
+        pmIn?: string;
+        pmOut?: string;
+        overtimeIn?: string;
+        overtimeOut?: string;
+      };
+      return {
+        amIn: parsed.amIn,
+        amOut: parsed.amOut,
+        pmIn: parsed.pmIn,
+        pmOut: parsed.pmOut,
+        otIn: parsed.overtimeIn,
+        otOut: parsed.overtimeOut
+      };
+    } catch {
+      return null;
+    }
+  }, [idnumber]);
+
+  const officialScheduleText = useMemo(() => {
+    const s = dbSchedule || schedule;
+    if (!s) return "";
+    const parts: string[] = [];
+    if (s.amIn && s.amOut) {
+      parts.push(`AM ${formatDisplayTime(s.amIn)} - ${formatDisplayTime(s.amOut)}`);
+    }
+    if (s.pmIn && s.pmOut) {
+      parts.push(`PM ${formatDisplayTime(s.pmIn)} - ${formatDisplayTime(s.pmOut)}`);
+    }
+    if (s.otIn && s.otOut) {
+      parts.push(`OT ${formatDisplayTime(s.otIn)} - ${formatDisplayTime(s.otOut)}`);
+    }
+    return parts.join(" • ");
+  }, [dbSchedule, schedule]);
+
+  const refreshScheduleFromServer = async () => {
+    try {
+      let rows: any[] | null = null;
+      if (supabase) {
+        const { data, error } = await supabase
+          .from("shifts")
+          .select("shift_name, official_start, official_end")
+          .order("official_start", { ascending: true });
+        if (!error && Array.isArray(data)) {
+          rows = data.filter(r => r && (r.official_start || r.official_end));
+        }
+      }
+      if (!rows) {
+        const res = await fetch("/api/shifts", { cache: "no-store" });
+        const json = await res.json();
+        const data = json.shifts;
+        if (Array.isArray(data)) {
+          rows = data.filter((r: any) => r && (r.official_start || r.official_end));
+        }
+      }
+      if (!rows || rows.length === 0) return null;
+      const sorted = rows
+        .slice()
+        .sort(
+          (a, b) =>
+            timeStringToMinutes(a.official_start || "") -
+            timeStringToMinutes(b.official_start || "")
+        );
+      let amRow = sorted[0];
+      let pmRow = sorted[1] || sorted[0];
+      const findByName = (match: (name: string) => boolean) =>
+        rows!.find((r) => {
+          const n = String(r.shift_name || "").toLowerCase().trim();
+          return match(n);
+        });
+      const amCandidate = findByName((n) => n.includes("am") || n.includes("morning"));
+      const pmCandidate = findByName((n) => n.includes("pm") || n.includes("afternoon"));
+      const otCandidate = findByName((n) => n === "overtime shift" || n === "overtime");
+      if (amCandidate && pmCandidate) {
+        amRow = amCandidate;
+        pmRow = pmCandidate;
+      }
+      let finalOtRow = otCandidate;
+      if (finalOtRow && (finalOtRow === amRow || finalOtRow === pmRow)) {
+        finalOtRow = undefined;
+      }
+      const amInNorm = normalizeTimeString(amRow.official_start || "");
+      const amOutNorm = normalizeTimeString(amRow.official_end || "");
+      const pmInNorm = normalizeTimeString(pmRow.official_start || "");
+      const pmOutNorm = normalizeTimeString(pmRow.official_end || "");
+      const otInNorm = normalizeTimeString(finalOtRow?.official_start || "");
+      const otOutNorm = normalizeTimeString(finalOtRow?.official_end || "");
+      if (!amInNorm || !amOutNorm || !pmInNorm || !pmOutNorm) return null;
+      const next = {
+        amIn: amInNorm,
+        amOut: amOutNorm,
+        pmIn: pmInNorm,
+        pmOut: pmOutNorm,
+        otIn: otInNorm || undefined,
+        otOut: otOutNorm || undefined,
+      };
+      setDbSchedule(next);
+      return next;
+    } catch {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        let rows: any[] | null = null;
+
+        if (supabase) {
+          const { data, error } = await supabase
+            .from("shifts")
+            .select("shift_name, official_start, official_end")
+            .order("official_start", { ascending: true });
+          if (!error && Array.isArray(data)) {
+            rows = data.filter(r => r && (r.official_start || r.official_end));
+          }
+        }
+
+        if (!rows) {
+          const res = await fetch("/api/shifts", { cache: "no-store" });
+          const json = await res.json();
+          const data = json.shifts;
+          if (Array.isArray(data)) {
+            rows = data.filter((r: any) => r && (r.official_start || r.official_end));
+          }
+        }
+
+        if (!rows || rows.length === 0) return;
+
+        const sorted = rows
+          .slice()
+          .sort(
+            (a, b) =>
+              timeStringToMinutes(a.official_start || "") -
+              timeStringToMinutes(b.official_start || "")
+          );
+        let amRow = sorted[0];
+        let pmRow = sorted[1] || sorted[0];
+        const findByName = (match: (name: string) => boolean) =>
+          rows!.find((r) => {
+            const n = String(r.shift_name || "").toLowerCase().trim();
+            return match(n);
+          });
+        const amCandidate = findByName((n) => n.includes("am") || n.includes("morning"));
+        const pmCandidate = findByName((n) => n.includes("pm") || n.includes("afternoon"));
+        const otCandidate = findByName((n) => n === "overtime shift" || n === "overtime");
+
+        if (amCandidate && pmCandidate) {
+          amRow = amCandidate;
+          pmRow = pmCandidate;
+        }
+
+        let finalOtRow = otCandidate;
+        if (finalOtRow && (finalOtRow === amRow || finalOtRow === pmRow)) {
+          finalOtRow = undefined;
+        }
+
+        const amInNorm = normalizeTimeString(amRow.official_start || "");
+        const amOutNorm = normalizeTimeString(amRow.official_end || "");
+        const pmInNorm = normalizeTimeString(pmRow.official_start || "");
+        const pmOutNorm = normalizeTimeString(pmRow.official_end || "");
+        const otInNorm = normalizeTimeString(finalOtRow?.official_start || "");
+        const otOutNorm = normalizeTimeString(finalOtRow?.official_end || "");
+
+        if (!amInNorm || !amOutNorm || !pmInNorm || !pmOutNorm) return;
+        if (!cancelled) {
+          setDbSchedule({ 
+            amIn: amInNorm,
+            amOut: amOutNorm, 
+            pmIn: pmInNorm, 
+            pmOut: pmOutNorm,
+            otIn: otInNorm || undefined,
+            otOut: otOutNorm || undefined
+          });
+        }
+      } catch {
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supabase) return;
+    const channel = supabase
+      .channel("global-shift-updates")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "shifts" },
+        () => {
+          refreshScheduleFromServer();
+        }
+      )
+      .subscribe();
+    return () => {
+      if (!supabase) return;
+      try {
+        supabase.removeChannel(channel);
+      } catch {}
+    };
+  }, []);
 
   const isCheckedIn = useMemo(() => {
     const sorted = attendance.slice().sort((a,b) => a.timestamp - b.timestamp);
@@ -542,6 +884,79 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
       if (readinessIntervalRef.current) { clearInterval(readinessIntervalRef.current); readinessIntervalRef.current = null; }
     };
   }, [stream]);
+
+  // Camera Analysis Loop
+  useEffect(() => {
+    if (!stream || !videoReady || !videoRef.current) return;
+    const interval = setInterval(() => {
+      const video = videoRef.current;
+      if (!video || video.paused || video.ended) return;
+      const canvas = document.createElement('canvas');
+      canvas.width = 120;
+      canvas.height = 120;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, 120, 120);
+
+      const img = ctx.getImageData(0, 0, 120, 120);
+      const d = img.data;
+      const cx = 60, cy = 70, rx = 48, ry = 64;
+
+      let ellipsePixels = 0;
+      let skinEllipse = 0;
+      let luminanceSumEllipse = 0;
+      let darkEllipse = 0;
+      let brightEllipse = 0;
+
+      let outsidePixels = 0;
+      let skinOutside = 0;
+
+      for (let y = 0; y < 120; y++) {
+        for (let x = 0; x < 120; x++) {
+          const idx = (y * 120 + x) * 4;
+          const r = d[idx], g = d[idx + 1], b = d[idx + 2];
+          const normX = (x - cx) / rx;
+          const normY = (y - cy) / ry;
+          const inEllipse = (normX * normX + normY * normY) <= 1;
+          const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+          const maxc = Math.max(r, g, b);
+          const minc = Math.min(r, g, b);
+          const isSkin = r > 95 && g > 40 && b > 20 && (maxc - minc) > 15 && Math.abs(r - g) > 15 && r > g && r > b;
+
+          if (inEllipse) {
+            ellipsePixels++;
+            luminanceSumEllipse += luminance;
+            if (isSkin) skinEllipse++;
+            if (luminance < 80) darkEllipse++;
+            if (luminance > 220) brightEllipse++;
+          } else {
+            outsidePixels++;
+            if (isSkin) skinOutside++;
+          }
+        }
+      }
+
+      const avgLum = ellipsePixels ? (luminanceSumEllipse / ellipsePixels) : 0;
+      const darkFrac = ellipsePixels ? (darkEllipse / ellipsePixels) : 0;
+      const brightFrac = ellipsePixels ? (brightEllipse / ellipsePixels) : 0;
+      const skinRatioEllipse = ellipsePixels ? (skinEllipse / ellipsePixels) : 0;
+      const skinRatioOutside = outsidePixels ? (skinOutside / outsidePixels) : 0;
+
+      let lighting: "too_dark" | "too_bright" | "okay" = "okay";
+      if (avgLum < 95 || darkFrac > 0.4) lighting = "too_dark";
+      else if (avgLum > 205 || brightFrac > 0.4) lighting = "too_bright";
+
+      const analysis: CameraAnalysis = {
+        faceDetected: skinRatioEllipse > 0.1,
+        faceSize: skinRatioEllipse < 0.2 ? "small" : skinRatioEllipse > 0.6 ? "large" : "medium",
+        facePosition: skinRatioEllipse < 0.12 && skinRatioOutside > 0.06 ? "partially_out" : "centered",
+        lighting,
+        numFaces: 1
+      };
+      setCameraFeedback(getCameraAssistantMessage(analysis));
+    }, 300);
+    return () => clearInterval(interval);
+  }, [stream, videoReady]);
 
   // Camera starts only when user taps "Start Camera"
 
@@ -606,10 +1021,6 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
   const startCamera = async () => {
     setCameraError(null);
-    if (isMobile) {
-      fileInputRef.current?.click();
-      return;
-    }
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setCameraError("Camera API not supported");
@@ -624,8 +1035,8 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         s = await navigator.mediaDevices.getUserMedia({ 
           video: { 
             facingMode: "user", 
-            width: { ideal: 1280 }, 
-            height: { ideal: 720 } 
+            width: { ideal: isMobile ? 640 : 1280, max: isMobile ? 640 : 1280 }, 
+            height: { ideal: isMobile ? 480 : 720, max: isMobile ? 480 : 720 } 
           },
           audio: false 
         });
@@ -710,6 +1121,122 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     setSubmitting(true);
     try {
       setCameraError(null);
+      let effectiveSchedule = dbSchedule || schedule;
+      const now = new Date();
+
+      if (type === "in") {
+        const latest = await refreshScheduleFromServer();
+        if (latest) {
+          effectiveSchedule = latest;
+        } else if (!effectiveSchedule) {
+          setCameraError("Your official schedule is not configured. Please contact your supervisor.");
+          setSubmitting(false);
+          return;
+        }
+      }
+
+      if (effectiveSchedule) {
+        const baseDate = new Date(now);
+        baseDate.setHours(0, 0, 0, 0);
+
+        const buildTs = (timeStr: string | undefined | null) => {
+          if (!timeStr) return null;
+          const [h, m] = timeStr.split(":").map(Number);
+          const d = new Date(baseDate.getTime());
+          d.setHours(h || 0, m || 0, 0, 0);
+          return d;
+        };
+
+        const amIn = buildTs(effectiveSchedule.amIn || null);
+        const amOut = buildTs(effectiveSchedule.amOut || null);
+        const pmIn = buildTs(effectiveSchedule.pmIn || null);
+        const pmOut = buildTs(effectiveSchedule.pmOut || null);
+        const otIn = buildTs(dbSchedule?.otIn);
+        const otOut = buildTs(dbSchedule?.otOut);
+
+        const nowMs = now.getTime();
+
+        if (type === "in") {
+          if (!amIn || !amOut || !pmIn || !pmOut) {
+            setCameraError("Your official schedule is not configured. Please contact your supervisor.");
+            setSubmitting(false);
+            return;
+          }
+
+          const morningWindowStart = amIn.getTime() - 30 * 60 * 1000;
+          const morningWindowEnd = amOut.getTime();
+          const afternoonWindowStart = pmIn.getTime() - 30 * 60 * 1000;
+          const afternoonWindowEnd = pmOut.getTime();
+
+          if (nowMs >= amOut.getTime() && nowMs < afternoonWindowStart) {
+            setBreakPmInText(formatDisplayTime(effectiveSchedule.pmIn));
+            setShowBreakModal(true);
+            setSubmitting(false);
+            return;
+          }
+
+          const pmOutMs = pmOut.getTime();
+          const otInMs = otIn ? otIn.getTime() : null;
+          const otOutMs = otOut ? otOut.getTime() : null;
+          const hasOvertime = otInMs !== null && otOutMs !== null;
+
+          if (nowMs >= pmOutMs) {
+            if (!hasOvertime) {
+              setLateInPmOutText(`You cannot time in beyond ${formatDisplayTime(effectiveSchedule.pmOut || "")}.`);
+              setShowLateInModal(true);
+              setSubmitting(false);
+              return;
+            }
+            const overtimeWindowStart = otInMs! - 30 * 60 * 1000;
+            const overtimeWindowEnd = otOutMs!;
+            if (nowMs < overtimeWindowStart || nowMs >= overtimeWindowEnd) {
+              setLateInPmOutText(`You cannot time in beyond ${formatDisplayTime(effectiveSchedule.pmOut || "")}.`);
+              setShowLateInModal(true);
+              setSubmitting(false);
+              return;
+            }
+            return;
+          }
+
+          if (nowMs >= morningWindowStart && nowMs < morningWindowEnd) {
+          } else if (nowMs >= afternoonWindowStart && nowMs < afternoonWindowEnd) {
+          } else {
+            setLateInPmOutText("You can time in 30 minutes before your official time in.");
+            setShowLateInModal(true);
+            setSubmitting(false);
+            return;
+          }
+        } else {
+          const todayLogs = attendance.filter(l => {
+            const d = new Date(l.timestamp);
+            return (
+              d.getFullYear() === now.getFullYear() &&
+              d.getMonth() === now.getMonth() &&
+              d.getDate() === now.getDate()
+            );
+          }).sort((a, b) => a.timestamp - b.timestamp);
+
+          let hasOpenIn = false;
+          let lastType: "in" | "out" | null = null;
+          todayLogs.forEach(l => {
+            if (l.type === "in") {
+              if (lastType !== "in") {
+                hasOpenIn = true;
+              }
+              lastType = "in";
+            } else {
+              lastType = "out";
+              hasOpenIn = false;
+            }
+          });
+
+          if (!hasOpenIn) {
+            setCameraError("You cannot time out without a confirmed time in.");
+            setSubmitting(false);
+            return;
+          }
+        }
+      }
       const res = await fetch("/api/attendance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -745,20 +1272,242 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     }
   };
 
+  const handleBeforeSubmit = async (type: "in" | "out") => {
+    if (type === "in") {
+      await addEntry("in");
+      return;
+    }
+
+    const now = new Date();
+    let effectiveSchedule = dbSchedule || schedule;
+    if (!effectiveSchedule) {
+      await addEntry("out");
+      return;
+    }
+
+    const baseDate = new Date(now);
+    baseDate.setHours(0, 0, 0, 0);
+
+    const buildTs = (timeStr: string | undefined | null) => {
+      if (!timeStr) return null;
+      const [h, m] = timeStr.split(":").map(Number);
+      const d = new Date(baseDate.getTime());
+      d.setHours(h || 0, m || 0, 0, 0);
+      return d;
+    };
+
+    const amIn = buildTs(effectiveSchedule.amIn || null);
+    const amOut = buildTs(effectiveSchedule.amOut || null);
+    const pmIn = buildTs(effectiveSchedule.pmIn || null);
+    const pmOut = buildTs(effectiveSchedule.pmOut || null);
+    const otIn = buildTs(effectiveSchedule.otIn);
+    const otOut = buildTs(effectiveSchedule.otOut);
+
+    const nowMs = now.getTime();
+
+    let officialOut: Date | null = null;
+
+    if (amIn && amOut) {
+      const start = amIn.getTime() - 30 * 60 * 1000;
+      const end = amOut.getTime();
+      if (nowMs >= start && nowMs < end) {
+        officialOut = amOut;
+      }
+    }
+
+    if (!officialOut && pmIn && pmOut) {
+      const start = pmIn.getTime() - 30 * 60 * 1000;
+      const end = pmOut.getTime();
+      if (nowMs >= start && nowMs < end) {
+        officialOut = pmOut;
+      }
+    }
+
+    if (!officialOut && otIn && otOut) {
+      const start = otIn.getTime() - 30 * 60 * 1000;
+      const end = otOut.getTime();
+      if (nowMs >= start && nowMs < end) {
+        officialOut = otOut;
+      }
+    }
+
+    if (officialOut && nowMs < officialOut.getTime()) {
+      let display = "";
+      if (officialOut && amOut && officialOut.getTime() === amOut.getTime()) {
+        display = formatDisplayTime(effectiveSchedule.amOut);
+      } else if (officialOut && pmOut && officialOut.getTime() === pmOut.getTime()) {
+        display = formatDisplayTime(effectiveSchedule.pmOut);
+      } else if (effectiveSchedule.otOut) {
+        display = formatDisplayTime(effectiveSchedule.otOut);
+      }
+      setEarlyOutShiftEndText(display);
+      setShowEarlyOutModal(true);
+      return;
+    }
+
+    await addEntry("out");
+  };
+
+  const formatHours = (ms: number) => {
+    if (!ms) return "-";
+    const totalSeconds = Math.floor(ms / 1000);
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
+    return `${h}h ${m}m ${s}s`;
+  };
+
+  const formatTime = (ts: number) => {
+    return new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  };
+
+  const statusCounts = useMemo(() => {
+    const counts = { Pending: 0, Approved: 0, Rejected: 0 };
+    filteredAttendance.forEach(a => {
+      const s = a.status || "Pending";
+      if (s === "Approved") counts.Approved += 1;
+      else if (s === "Rejected") counts.Rejected += 1;
+      else counts.Pending += 1;
+    });
+    return counts;
+  }, [filteredAttendance]);
+
+  const processedDays = useMemo(() => {
+    const grouped = new Map<string, { date: Date; logs: AttendanceEntry[] }>();
+    filteredAttendance.forEach(log => {
+      const d = new Date(log.timestamp);
+      const key = d.toLocaleDateString();
+      if (!grouped.has(key)) grouped.set(key, { date: d, logs: [] });
+      grouped.get(key)!.logs.push(log);
+    });
+
+    return Array.from(grouped.values())
+      .sort((a, b) => b.date.getTime() - a.date.getTime())
+      .map(day => {
+        const sorted = day.logs.slice().sort((a, b) => a.timestamp - b.timestamp);
+
+        const baseDate = new Date(day.date);
+        baseDate.setHours(0, 0, 0, 0);
+
+        const buildShift = (timeStr: string) => {
+          const [h, m] = timeStr.split(":").map(Number);
+          const d = new Date(baseDate.getTime());
+          d.setHours(h || 0, m || 0, 0, 0);
+          return d.getTime();
+        };
+
+        const classifySegment = (ts: number) => {
+          const h = new Date(ts).getHours();
+          return h < 12 ? "morning" : "afternoon";
+        };
+
+        const src = dbSchedule || schedule;
+
+        const morningLogs = sorted.filter(log => classifySegment(log.timestamp) === "morning");
+        const afternoonLogs = sorted.filter(log => classifySegment(log.timestamp) === "afternoon");
+
+        let overtimeLogs: AttendanceEntry[] = [];
+        if (src && src.otIn && src.otOut) {
+          const otStart = buildShift(src.otIn);
+          const otEnd = buildShift(src.otOut);
+          overtimeLogs = sorted.filter(
+            log => log.timestamp >= otStart && log.timestamp <= otEnd
+          );
+        }
+
+        const pickInOut = (logs: AttendanceEntry[]) => {
+          const inEntry = logs.find(l => l.type === "in") || null;
+          const outEntry = [...logs].reverse().find(l => l.type === "out") || null;
+          return { inEntry, outEntry };
+        };
+
+        const morningPair = pickInOut(morningLogs);
+        const afternoonPair = pickInOut(afternoonLogs);
+        const overtimePair = pickInOut(overtimeLogs);
+
+        const s1 = morningPair.inEntry;
+        const s2 = morningPair.outEntry;
+        const s3 = afternoonPair.inEntry;
+        const s4 = afternoonPair.outEntry;
+        const s5 = overtimePair.inEntry;
+        const s6 = overtimePair.outEntry;
+
+        const hasSchedule =
+          !!src &&
+          typeof src.amIn === "string" &&
+          typeof src.amOut === "string" &&
+          typeof src.pmIn === "string" &&
+          typeof src.pmOut === "string";
+
+        let total = 0;
+
+        if (hasSchedule && src) {
+          const amInStr = typeof src.amIn === "string" ? src.amIn : "";
+          const amOutStr = typeof src.amOut === "string" ? src.amOut : "";
+          const pmInStr = typeof src.pmIn === "string" ? src.pmIn : "";
+          const pmOutStr = typeof src.pmOut === "string" ? src.pmOut : "";
+
+          const localSchedule = {
+            amIn: buildShift(amInStr),
+            amOut: buildShift(amOutStr),
+            pmIn: buildShift(pmInStr),
+            pmOut: buildShift(pmOutStr),
+            otStart: src.otIn ? buildShift(src.otIn) : null,
+            otEnd: src.otOut ? buildShift(src.otOut) : null,
+          };
+
+          const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+
+          const findPairDuration = (logs: AttendanceEntry[], windowStart: number, windowEnd: number) => {
+            const withinWindow = logs.filter(
+              log => log.timestamp >= windowStart && log.timestamp <= windowEnd
+            );
+
+            let tIn: AttendanceEntry | null = null;
+            let duration = 0;
+
+            withinWindow.forEach(log => {
+              if (log.type === "in") {
+                tIn = log;
+              } else if (log.type === "out" && tIn) {
+                const rawIn = clamp(tIn.timestamp, windowStart, windowEnd);
+                const rawOut = clamp(log.timestamp, windowStart, windowEnd);
+                if (rawOut > rawIn) {
+                  duration += rawOut - rawIn;
+                }
+                tIn = null;
+              }
+            });
+
+            return duration;
+          };
+
+          const dayTotalAm = findPairDuration(sorted, localSchedule.amIn, localSchedule.amOut);
+          const dayTotalPm = findPairDuration(sorted, localSchedule.pmIn, localSchedule.pmOut);
+          const dayTotalOt =
+            localSchedule.otStart && localSchedule.otEnd
+              ? findPairDuration(sorted, localSchedule.otStart, localSchedule.otEnd)
+              : 0;
+          total = dayTotalAm + dayTotalPm + dayTotalOt;
+        } else {
+          const pairs: [AttendanceEntry | null, AttendanceEntry | null][] = [
+            [s1, s2],
+            [s3, s4],
+            [s5, s6],
+          ];
+          pairs.forEach(([a, b]) => {
+            if (a && b && b.timestamp > a.timestamp) {
+              total += b.timestamp - a.timestamp;
+            }
+          });
+        }
+
+        return { date: day.date, s1, s2, s3, s4, s5, s6, total };
+      });
+  }, [filteredAttendance, dbSchedule, schedule]);
+
   return (
     <div className="w-full space-y-6">
-      {/* Header / Status Bar */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white rounded-2xl border border-gray-200 p-5 shadow-sm">
-        <div>
-          <h1 className="text-xl font-bold text-gray-900">Attendance</h1>
-          <p className="text-sm text-gray-500">Manage your daily time logs</p>
-        </div>
-        <div className="flex items-center gap-3 bg-gray-50 px-4 py-2.5 rounded-xl border border-gray-100 shadow-sm">
-          <div className="h-2.5 w-2.5 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.5)]"/>
-          <div className="font-mono text-lg font-bold text-gray-700 tracking-tight">{nowText}</div>
-        </div>
-      </div>
-
       {cameraError && (
         <div className="rounded-xl bg-red-50 border border-red-100 p-4 flex items-center gap-3 text-red-700 animate-in fade-in slide-in-from-top-2 shadow-sm">
           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
@@ -766,11 +1515,335 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Main Action Area */}
-        <div className="lg:col-span-2 space-y-6">
+      {showBreakModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-2">Cannot Time In</h2>
+            <p className="text-gray-700 mb-4">
+              You cant time in until {breakPmInText || "the afternoon shift starts"}.
+            </p>
+            <button
+              onClick={() => setShowBreakModal(false)}
+              className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showLateInModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-2">Cannot Time In</h2>
+            <p className="text-gray-700 mb-4">
+              {lateInPmOutText || "You cannot time in beyond your official time."}
+            </p>
+            <button
+              onClick={() => setShowLateInModal(false)}
+              className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showEarlyOutModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-2">Time Out Early?</h2>
+            <p className="text-gray-700 mb-4">
+              Are you sure you want to time out early? Any remaining time until{" "}
+              {earlyOutShiftEndText || "your official time out"} will not be counted toward your OJT hours.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowEarlyOutModal(false)}
+                className="flex-1 px-4 py-2 rounded-xl border border-gray-300 text-gray-700 font-semibold bg-white hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  setShowEarlyOutModal(false);
+                  await addEntry("out");
+                }}
+                className="flex-1 px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold hover:bg-[#EA580C]"
+              >
+                Yes, Time Out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showHistoryMode ? (
+        <div className="space-y-6">
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+              <div>
+                <h2 className="text-base sm:text-lg font-bold text-gray-900">Attendance History</h2>
+                <p className="text-xs text-gray-500 mt-1">
+                  Full attendance records for {studentName || idnumber}.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowHistoryMode(false)}
+                className="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-100 transition-colors"
+              >
+                Back to Recent View
+              </button>
+            </div>
+
+            <div className="p-6 sm:p-8">
+              <div className="flex flex-col sm:flex-row gap-4">
+                <div className="flex-1">
+                  <label className="text-xs font-bold text-gray-700 uppercase tracking-wide mb-1 block">Search</label>
+                  <input 
+                    type="text" 
+                    value={attendanceSearchQuery}
+                    onChange={(e) => setAttendanceSearchQuery(e.target.value)}
+                    placeholder="Search by type or date..." 
+                    className="w-full rounded-lg border border-gray-400 px-4 py-2.5 text-sm font-medium text-gray-900 placeholder:text-gray-500 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                  />
+                </div>
+                <div className="w-full sm:w-40">
+                  <label className="text-xs font-bold text-gray-700 uppercase tracking-wide mb-1 block">Filter by Month</label>
+                  <select
+                    value={monthFilter}
+                    onChange={e => setMonthFilter(e.target.value)}
+                    className="w-full rounded-lg border border-gray-400 px-3 py-2.5 text-sm font-medium text-gray-900 bg-white focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                  >
+                    <option value="">All months</option>
+                    {monthOptions.map(opt => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="w-full sm:w-auto">
+                  <label className="text-xs font-bold text-gray-700 uppercase tracking-wide mb-1 block">Filter by Date</label>
+                  <input 
+                    type="date" 
+                    value={filterDate}
+                    onChange={(e) => setFilterDate(e.target.value)}
+                    className="w-full sm:w-48 rounded-lg border border-gray-400 px-4 py-2.5 text-sm font-medium text-gray-900 placeholder:text-gray-500 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all bg-white"
+                  />
+                </div>
+                {(attendanceSearchQuery || filterDate || monthFilter) && (
+                  <div className="flex items-end">
+                    <button 
+                      onClick={() => { setAttendanceSearchQuery(""); setFilterDate(""); setMonthFilter(""); }}
+                      className="mb-[1px] px-4 py-2.5 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2 text-xs">
+                <span className="px-3 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-700 font-medium">
+                  Pending: {statusCounts.Pending}
+                </span>
+                <span className="px-3 py-1 rounded-full border border-green-100 bg-green-50 text-green-700 font-medium">
+                  Validated: {statusCounts.Approved}
+                </span>
+                <span className="px-3 py-1 rounded-full border border-red-100 bg-red-50 text-red-700 font-medium">
+                  Unvalidated: {statusCounts.Rejected}
+                </span>
+              </div>
+
+              <div className="mt-4 border-t border-gray-100 pt-4">
+                {processedDays.length > 0 ? (
+                  <>
+                    <div className="hidden md:block overflow-x-auto custom-scrollbar">
+                      <table className="w-full text-[11px] text-left">
+                        <thead className="bg-gray-50 text-xs uppercase text-gray-500 font-bold">
+                          <tr>
+                            <th rowSpan={2} className="px-4 py-3 border-r border-gray-100 min-w-[110px] text-left align-bottom pb-4">Date</th>
+                            <th colSpan={2} className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50">Morning</th>
+                            <th colSpan={2} className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50">Afternoon</th>
+                            <th colSpan={2} className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50">Overtime</th>
+                            <th rowSpan={2} className="px-4 py-3 text-right align-bottom pb-4">Total Hours</th>
+                          </tr>
+                          <tr>
+                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time In</th>
+                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time Out</th>
+                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time In</th>
+                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time Out</th>
+                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time In</th>
+                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time Out</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {processedDays.map((day, i) => (
+                            <tr key={i} className="hover:bg-gray-50 transition-colors">
+                              <td className="px-4 py-3 font-medium text-gray-900 whitespace-nowrap border-r border-gray-100">
+                                {day.date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}
+                              </td>
+                              {[day.s1, day.s2, day.s3, day.s4, day.s5, day.s6].map((slot, idx) => (
+                                <td key={idx} className="px-1.5 py-2 border-r border-gray-100 text-center align-top min-w-[100px]">
+                                  {slot ? (
+                                    <div className="flex flex-col items-center gap-1">
+                                      <span className="text-[11px] font-medium text-gray-800">
+                                        {formatTime(slot.timestamp)}
+                                      </span>
+                                      {slot.photoDataUrl && (
+                                        <>
+                                          <div
+                                            className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
+                                            onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                          >
+                                            <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                          </div>
+                                          <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
+                                            {formatStatusLabel(slot)}
+                                          </span>
+                                        </>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="text-gray-300 block py-4">-</span>
+                                  )}
+                                </td>
+                              ))}
+                              <td className="px-6 py-4 text-right font-bold text-gray-900">
+                                {formatHours(day.total)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="md:hidden space-y-3">
+                      {processedDays.map((day, i) => (
+                        <div key={i} className="p-4 rounded-2xl border border-gray-200 bg-white">
+                          <div className="text-sm font-semibold text-gray-900">
+                            {day.date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}
+                          </div>
+                          <div className="mt-3 grid grid-cols-1 gap-3">
+                            <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+                              <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Morning</div>
+                              <div className="grid grid-cols-2 gap-3">
+                                {[day.s1, day.s2].map((slot, idx) => (
+                                  <div key={idx} className="flex flex-col items-center gap-1">
+                                    {slot ? (
+                                      <>
+                                        <span className="text-[11px] font-medium text-gray-800">
+                                          {formatTime(slot.timestamp)}
+                                        </span>
+                                        {slot.photoDataUrl && (
+                                          <>
+                                            <div
+                                              className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
+                                              onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                            >
+                                              <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                            </div>
+                                            <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
+                                              {formatStatusLabel(slot)}
+                                            </span>
+                                          </>
+                                        )}
+                                      </>
+                                    ) : (
+                                      <span className="text-gray-300">-</span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+                              <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Afternoon</div>
+                              <div className="grid grid-cols-2 gap-3">
+                                {[day.s3, day.s4].map((slot, idx) => (
+                                  <div key={idx} className="flex flex-col items-center gap-1">
+                                    {slot ? (
+                                      <>
+                                        <span className="text-[11px] font-medium text-gray-800">
+                                          {formatTime(slot.timestamp)}
+                                        </span>
+                                        {slot.photoDataUrl && (
+                                          <>
+                                            <div
+                                              className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
+                                              onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                            >
+                                              <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                            </div>
+                                            <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
+                                              {formatStatusLabel(slot)}
+                                            </span>
+                                          </>
+                                        )}
+                                      </>
+                                    ) : (
+                                      <span className="text-gray-300">-</span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+                              <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Overtime</div>
+                              <div className="grid grid-cols-2 gap-3">
+                                {[day.s5, day.s6].map((slot, idx) => (
+                                  <div key={idx} className="flex flex-col items-center gap-1">
+                                    {slot ? (
+                                      <>
+                                        <span className="text-[11px] font-medium text-gray-800">
+                                          {formatTime(slot.timestamp)}
+                                        </span>
+                                        {slot.photoDataUrl && (
+                                          <>
+                                            <div
+                                              className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
+                                              onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                            >
+                                              <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                            </div>
+                                            <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
+                                              {formatStatusLabel(slot)}
+                                            </span>
+                                          </>
+                                        )}
+                                      </>
+                                    ) : (
+                                      <span className="text-gray-300">-</span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+                              <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Total Hours</div>
+                              <div className="text-sm font-bold text-gray-900 mt-1 text-right">
+                                {formatHours(day.total)}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-48 text-gray-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" className="mb-4 opacity-50"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                    <p>No attendance records found.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2">
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                 <div className="flex items-center gap-2">
                   <div className="h-2 w-2 rounded-full bg-[#F97316]"></div>
                   <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Time Entry</div>
@@ -778,9 +1851,9 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                 <div className={`px-3 py-1 rounded-lg text-xs font-bold border ${isCheckedIn ? "bg-green-50 text-green-700 border-green-100" : "bg-gray-50 text-gray-600 border-gray-100"}`}>
                   {isCheckedIn ? "CURRENTLY TIMED IN" : "READY TO TIME IN"}
                 </div>
-            </div>
-            
-            <div className="p-6 sm:p-8 flex flex-col items-center">
+              </div>
+
+              <div className="p-6 sm:p-8 flex flex-col items-center">
                 <input 
                   type="file" 
                   accept="image/*" 
@@ -790,24 +1863,52 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                   className="hidden" 
                 />
                 
+                {officialScheduleText && (
+                  <div className="w-full max-w-md mb-4">
+                    <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-center">
+                      <div className="text-[11px] font-semibold text-gray-600 uppercase tracking-wide">
+                        Official Schedule
+                      </div>
+                      <div className="mt-1 text-sm font-bold text-gray-900">
+                        {officialScheduleText}
+                      </div>
+                      <div className="mt-1 text-[11px] text-gray-500">
+                        You can time in 30 minutes before your official time in.
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="relative w-full rounded-2xl bg-slate-900 border border-gray-200 shadow-inner flex items-center justify-center group h-[60vh] max-h-[700px] min-h-[280px] overflow-hidden">
                   {!photo && !stream && (
                     <div className="flex flex-col items-center gap-3 text-gray-500">
-                       <div className="p-4 rounded-full bg-slate-800 text-slate-400 group-hover:text-white transition-colors">
-                          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
-                       </div>
-                       <span className="text-sm font-medium">Tap Start Camera to take a photo</span>
+                      <div className="p-4 rounded-full bg-slate-800 text-slate-400 group-hover:text-white transition-colors">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                      </div>
+                      <span className="text-sm font-medium">Tap Start Camera to take a photo</span>
                     </div>
                   )}
                   {!photo && stream && (
-                    <video 
-                      ref={videoRef} 
-                      autoPlay 
-                      playsInline 
-                      muted 
-                      className={`w-full h-full object-contain ${isFrontCam ? "transform scale-x-[-1]" : ""}`} 
-                    />
-                  )}
+                   <>
+                     <video 
+                       ref={videoRef} 
+                       autoPlay 
+                       playsInline 
+                       muted 
+                       className={`w-full h-full object-contain ${isFrontCam ? "transform scale-x-[-1]" : ""}`} 
+                     />
+                     <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                       <div className="absolute top-6 left-1/2 -translate-x-1/2 z-10">
+                         <span className="inline-block px-4 py-2 rounded-full bg-blue-600/90 text-white font-semibold text-sm shadow-lg">
+                           {cameraFeedback || "Frame Your Face"}
+                         </span>
+                       </div>
+                       <svg width="280" height="360" viewBox="0 0 280 360" className="opacity-90">
+                         <ellipse cx="140" cy="190" rx="115" ry="155" fill="none" stroke="#2563eb" strokeWidth="6" />
+                       </svg>
+                     </div>
+                   </>
+                 )}
                   {photo && (
                     <img src={photo} alt="Captured photo" className="w-full h-full object-contain" />
                   )}
@@ -825,7 +1926,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                           Start Camera
                         </button>
                       )}
-                      {!isMobile && stream && (
+                      {stream && (
                         <div className="flex gap-3 w-full">
                           <button
                             onClick={takePhoto}
@@ -849,7 +1950,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                   {photo && (
                     <div className="flex flex-col gap-3 w-full animate-in fade-in slide-in-from-bottom-4">
                       <button
-                        onClick={() => addEntry(isCheckedIn ? "out" : "in")}
+                        onClick={() => handleBeforeSubmit(isCheckedIn ? "out" : "in")}
                         disabled={submitting}
                         className={`w-full rounded-xl px-6 py-4 text-white font-bold text-lg transition-all active:scale-95 shadow-md flex items-center justify-center gap-3 ${isCheckedIn ? "bg-gray-900 hover:bg-black" : "bg-[#F97316] hover:bg-[#EA580C]"} ${submitting ? "opacity-70 cursor-wait" : ""}`}
                       >
@@ -885,160 +1986,119 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                     </div>
                   )}
                 </div>
+              </div>
             </div>
           </div>
-        </div>
 
-        {/* Sidebar / History */}
-        <div className="space-y-6">
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[600px] overflow-hidden">
-            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[600px] overflow-hidden">
+              <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                 <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Recent Logs</div>
-                <button onClick={() => setShowAllAttendance(true)} className="text-xs font-bold text-[#F97316] hover:text-[#EA580C] transition-colors hover:underline">View All</button>
-            </div>
-            <div className="p-3 overflow-y-auto custom-scrollbar flex-1 space-y-2">
+                <button
+                  onClick={() => setShowHistoryMode(true)}
+                  className="text-xs font-bold text-[#F97316] hover:text-[#EA580C] transition-colors hover:underline"
+                >
+                  View All
+                </button>
+              </div>
+              <div className="p-3 overflow-y-auto custom-scrollbar flex-1 space-y-2">
                 {attendance.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center p-6 text-gray-400">
-                     <div className="p-3 rounded-full bg-gray-50 mb-3">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                     </div>
-                     <p className="text-sm font-medium">No records yet</p>
+                    <div className="p-3 rounded-full bg-gray-50 mb-3">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                    </div>
+                    <p className="text-sm font-medium">No records yet</p>
                   </div>
                 ) : (
-                  attendance.slice().sort((a,b) => Number(b.timestamp) - Number(a.timestamp)).map((entry, idx) => (
-                    <button 
+                  attendance
+                    .slice()
+                    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
+                    .map((entry, idx) => (
+                      <button 
                         key={idx} 
                         onClick={() => setSelectedAttendanceEntry(entry)}
                         className="w-full flex items-center gap-3 p-3 rounded-xl bg-white border border-gray-100 hover:border-orange-200 hover:shadow-md transition-all group text-left"
-                    >
-                      <div className="h-10 w-10 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 border border-gray-100 relative">
-                        {entry.photoDataUrl && (
-                          <img src={entry.photoDataUrl} alt="Log" className="h-full w-full object-cover" />
-                        )}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between">
-                           <span className={`text-xs font-bold uppercase ${entry.type === "in" ? "text-green-600" : "text-gray-600"}`}>{entry.type === "in" ? "Time In" : "Time Out"}</span>
-                           <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium inline-flex items-center ${entry.status === "Approved" ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"}`}>
-                             {entry.status === "Approved" && <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-1"><polyline points="20 6 9 17 4 12"></polyline></svg>}
-                             {entry.status === "Approved" ? "Approved" : "Pending"}
-                           </span>
+                      >
+                        <div className="h-9 w-9 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 border border-gray-100 relative">
+                          {entry.photoDataUrl && (
+                            <img src={entry.photoDataUrl} alt="Log" className="h-full w-full object-cover" />
+                          )}
                         </div>
-                        <div className="text-xs font-medium text-gray-900 mt-0.5">
-                          {new Date(entry.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-semibold uppercase text-gray-700">
+                              {entry.type === "in" ? "Time In" : "Time Out"}
+                            </span>
+                            <span className={`text-[10px] font-medium ${getStatusColorClass(entry)}`}>
+                              {formatStatusLabel(entry)}
+                            </span>
+                          </div>
+                          <div className="text-xs font-medium text-gray-900 mt-0.5">
+                            {new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          </div>
+                          <div className="text-[10px] text-gray-400">
+                            {new Date(entry.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                          </div>
                         </div>
-                        <div className="text-[10px] text-gray-400">
-                          {new Date(entry.timestamp).toLocaleDateString(undefined, {month:'short', day:'numeric'})}
-                        </div>
-                      </div>
-                    </button>
-                  ))
+                      </button>
+                    ))
                 )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {showAllAttendance && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 sm:px-6">
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowAllAttendance(false)} aria-hidden="true" />
-          <div
-            className="relative w-full max-w-4xl rounded-2xl bg-white shadow-2xl p-6 sm:p-10 max-h-[90vh] overflow-hidden flex flex-col"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Attendance History"
-          >
-            <div className="mb-6 flex items-center justify-between border-b border-gray-100 pb-4 shrink-0">
-              <h2 className="text-xl sm:text-2xl font-bold text-gray-900">Attendance History</h2>
-              <button 
-                onClick={() => setShowAllAttendance(false)}
-                className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-              </button>
-            </div>
-
-            <div className="mb-6 flex flex-col sm:flex-row gap-4 shrink-0">
-              <div className="flex-1">
-                <label className="text-xs font-bold text-gray-700 uppercase tracking-wide mb-1 block">Search</label>
-                <input 
-                  type="text" 
-                  value={attendanceSearchQuery}
-                  onChange={(e) => setAttendanceSearchQuery(e.target.value)}
-                  placeholder="Search by type or date..." 
-                  className="w-full rounded-lg border border-gray-400 px-4 py-2.5 text-sm font-medium text-gray-900 placeholder:text-gray-500 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
-                />
               </div>
-              <div className="w-full sm:w-auto">
-                <label className="text-xs font-bold text-gray-700 uppercase tracking-wide mb-1 block">Filter by Date</label>
-                <input 
-                  type="date" 
-                  value={filterDate}
-                  onChange={(e) => setFilterDate(e.target.value)}
-                  className="w-full sm:w-48 rounded-lg border border-gray-400 px-4 py-2.5 text-sm font-medium text-gray-900 placeholder:text-gray-500 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all bg-white"
-                />
-              </div>
-              {(attendanceSearchQuery || filterDate) && (
-                 <div className="flex items-end">
-                   <button 
-                     onClick={() => { setAttendanceSearchQuery(""); setFilterDate(""); }}
-                     className="mb-[1px] px-4 py-2.5 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                   >
-                     Clear
-                   </button>
-                 </div>
-              )}
-            </div>
-
-            <div className="flex-1 overflow-y-auto min-h-0 custom-scrollbar">
-              {filteredAttendance.length > 0 ? (
-                <div className="space-y-3">
-                  {filteredAttendance.slice().sort((a,b) => Number(b.timestamp) - Number(a.timestamp)).map((entry, idx) => (
-                    <button 
-                        key={idx} 
-                        onClick={() => setSelectedAttendanceEntry(entry)}
-                        className="w-full flex items-center justify-between gap-4 p-4 rounded-xl border border-gray-200 hover:border-orange-200 hover:shadow-sm bg-white transition-all text-left group"
-                    >
-                      <div className="flex items-center gap-4 min-w-0">
-                         <div className="h-12 w-12 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 border border-gray-100 relative">
-                           {entry.photoDataUrl ? (
-                             <img src={entry.photoDataUrl} alt="Log" className="h-full w-full object-cover" />
-                           ) : (
-                             <div className="w-full h-full flex items-center justify-center text-gray-400">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                             </div>
-                           )}
-                         </div>
-                         <div className="min-w-0">
-                           <div className="flex items-center gap-2">
-                             <span className={`text-base font-bold capitalize ${entry.type === "in" ? "text-green-700" : "text-blue-700"}`}>{entry.type === "in" ? "Time In" : "Time Out"}</span>
-                             <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium inline-flex items-center ${entry.status === "Approved" ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"}`}>
-                               {entry.status === "Approved" && <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-1"><polyline points="20 6 9 17 4 12"></polyline></svg>}
-                               {entry.status === "Approved" ? "Approved" : "Pending"}
-                             </span>
-                           </div>
-                           <div className="text-gray-500 text-sm mt-1 flex items-center gap-2">
-                             <span>{new Date(entry.timestamp).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}</span>
-                             <span className="text-gray-300">•</span>
-                             <span className="text-gray-400 text-xs">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                           </div>
-                         </div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center h-48 text-gray-400">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" className="mb-4 opacity-50"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                  <p>No attendance records found.</p>
-                </div>
-              )}
             </div>
           </div>
         </div>
       )}
 
-      {/* Image viewer removed per request */}
+      {selectedImage && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => setSelectedImage(null)}
+        >
+          <button
+            onClick={() => setSelectedImage(null)}
+            className="absolute top-4 right-4 p-2 text-white/70 hover:text-white transition-colors z-[110]"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="32"
+              height="32"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+          <div
+            className="relative max-w-4xl max-h-[90vh] w-full flex flex-col items-center justify-center"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="relative rounded-2xl overflow-hidden shadow-2xl bg-black w-auto h-auto flex flex-col">
+              <img
+                src={selectedImage.url}
+                alt="Attendance Log"
+                className="max-w-full max-h-[80vh] object-contain"
+              />
+              <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-6 pt-20 text-center">
+                <p className="text-white font-mono text-xl font-bold drop-shadow-md">
+                  {new Date(selectedImage.timestamp).toLocaleString(undefined, {
+                    weekday: "long",
+                    year: "numeric",
+                    month: "long",
+                    day: "numeric",
+                    hour: "numeric",
+                    minute: "2-digit",
+                  })}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Attendance Details Modal */}
       {selectedAttendanceEntry && (
@@ -1541,14 +2601,20 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
                          <div key={idx} onClick={() => setViewing(r)} className="p-3 rounded-xl hover:bg-orange-50 cursor-pointer group transition-all border border-transparent hover:border-orange-100 relative">
                              <div className="flex justify-between items-start mb-1">
                                 <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
-                                   {r.instructorComment && (
-                                     <button
-                                        onClick={(e) => { e.stopPropagation(); setViewingComment(r); }} 
-                                        className="flex-shrink-0 text-red-500 animate-pulse hover:bg-red-50 rounded-full p-1 -ml-1 transition-all" 
-                                        title="View Instructor Feedback"
-                                     >
-                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-                                     </button>
+                                   {(r.instructorComment || r.isViewedByInstructor) && (
+                                     <div className="flex items-center gap-1">
+                                        {r.instructorComment ? (
+                                           <button
+                                              onClick={(e) => { e.stopPropagation(); setViewingComment(r); }} 
+                                              className="flex-shrink-0 text-red-500 animate-pulse hover:bg-red-50 rounded-full p-1 -ml-1 transition-all" 
+                                              title="View Instructor Feedback"
+                                           >
+                                              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                                           </button>
+                                        ) : (
+                                           <span className="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded border border-green-100 whitespace-nowrap">Viewed</span>
+                                        )}
+                                     </div>
                                    )}
                                    <h4 className="text-sm font-bold text-gray-800 line-clamp-1 group-hover:text-[#F97316] transition-colors">{r.title || "Untitled Report"}</h4>
                                 </div>
@@ -1647,14 +2713,20 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
                     <div className="flex justify-between items-start gap-4">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1.5">
-                          {r.instructorComment && (
-                             <button
-                               onClick={(e) => { e.stopPropagation(); setViewingComment(r); }}
-                               className="flex-shrink-0 inline-flex items-center justify-center h-6 w-6 rounded-full bg-red-50 text-red-600 border border-red-100 shadow-sm hover:bg-red-100 transition-colors" 
-                               title="View Instructor Feedback"
-                             >
-                               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-                             </button>
+                          {(r.instructorComment || r.isViewedByInstructor) && (
+                            <>
+                              {r.instructorComment ? (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setViewingComment(r); }}
+                                  className="flex-shrink-0 inline-flex items-center justify-center h-6 w-6 rounded-full bg-red-50 text-red-600 border border-red-100 shadow-sm hover:bg-red-100 transition-colors" 
+                                  title="View Instructor Feedback"
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                                </button>
+                              ) : (
+                                <span className="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded border border-green-100 whitespace-nowrap uppercase tracking-wide">Viewed</span>
+                              )}
+                            </>
                           )}
                           <h3 className="text-base font-bold text-gray-900 group-hover:text-[#F97316] transition-colors truncate">
                             {r.title || "(Untitled)"}

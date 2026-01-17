@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSupabaseAdmin } from "../../../lib/supabaseClient";
+import { getSupabaseAdmin } from "@/lib/supabaseClient";
 
 export const dynamic = 'force-dynamic';
 
@@ -14,7 +14,7 @@ export async function GET() {
   const { data, error } = await admin
     .from("users")
     .select(`
-      id, idnumber, role, name, firstname, middlename, lastname, course, section, company, location, supervisorid, email, email_verified,
+      id, idnumber, role, name, firstname, middlename, lastname, course, section, company, location, supervisorid, email, email_verified, signup_status,
       user_courses (
         courses (id, name)
       ),
@@ -101,7 +101,8 @@ export async function GET() {
       location: u.location,
       supervisorid: u.supervisorid,
       email: u.email,
-      email_verified: u.email_verified
+      email_verified: u.email_verified,
+      signup_status: u.signup_status
     };
   });
 
@@ -115,9 +116,9 @@ export async function POST(req: Request) {
 
     const body = await req.json();
     const { 
-      idnumber, password, role, firstname, lastname, middlename, 
+      idnumber, email, password, role, firstname, lastname, middlename, 
       course, section, company, location, supervisorid,
-      courseIds, sectionIds 
+      courseIds, sectionIds, signup_status 
     } = body;
 
     if (!idnumber || !password || !role || !firstname || !lastname) {
@@ -127,6 +128,9 @@ export async function POST(req: Request) {
     // Insert user
     const { data: user, error } = await admin.from("users").insert({
       idnumber,
+      email: email || null, // Allow null if not provided, or require it if DB enforces it. Schema says NOT NULL, so we should probably require it or generate a dummy one? 
+                            // Better to let it fail or require it. For now let's pass it if present.
+                            // If schema is NOT NULL, we must provide it.
       password,
       role,
       firstname,
@@ -136,7 +140,8 @@ export async function POST(req: Request) {
       section,
       company,
       location,
-      supervisorid
+      supervisorid,
+      signup_status: signup_status || 'PENDING'
     }).select().single();
 
     if (error) {

@@ -2,8 +2,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AttendanceView, StudentHeader, StudentBottomNav } from "../ui";
 
-type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" };
-type ServerAttendanceEntry = { type: "in" | "out"; ts: number; photourl: string; status?: string; approvedby?: string | null };
+type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" };
+type ServerAttendanceEntry = { type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null };
 
 export default function StudentAttendancePage() {
   const idnumber = useMemo(() => {
@@ -21,7 +21,10 @@ export default function StudentAttendancePage() {
         const json = await res.json();
         if (active && res.ok && Array.isArray(json.entries)) {
           const mapped = json.entries.map((e: ServerAttendanceEntry) => {
-            const status = String(e.status || "").trim().toLowerCase() === "approved" || !!e.approvedby ? "Approved" : "Pending";
+            const sStr = String(e.status || "").trim().toLowerCase();
+            const isRejected = sStr === "rejected";
+            const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
+            const status = isRejected ? "Rejected" : isApproved ? "Approved" : "Pending";
             return {
               type: e.type,
               timestamp: e.ts,

@@ -7,13 +7,16 @@ import {
   Users, 
   GraduationCap, 
   Briefcase, 
+  UserCheck,
   Menu, 
   LogOut, 
   LayoutDashboard,
-  Settings
+  Settings,
+  UserPlus
 } from 'lucide-react';
 import { 
   UsersView, 
+  ApprovalsView,
   AddUserForm, 
   EditUserForm, 
   ViewUserDetails, 
@@ -21,7 +24,8 @@ import {
   User, 
   RoleType, 
   Course, 
-  Section 
+  Section,
+  AssignSupervisorView
 } from "./ui";
 
 export default function CoordinatorPage() {
@@ -57,6 +61,7 @@ export default function CoordinatorPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [availableCourses, setAvailableCourses] = useState<Course[]>([]);
   const [availableSections, setAvailableSections] = useState<Section[]>([]);
+  const [instructorApprovalStatuses, setInstructorApprovalStatuses] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   
   // Modals State
@@ -93,6 +98,25 @@ export default function CoordinatorPage() {
     }
   };
 
+  const fetchInstructorApprovalStatuses = async () => {
+    try {
+      const res = await fetch("/api/instructor-approval-status");
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.statuses)) {
+        const map: Record<string, boolean> = {};
+        data.statuses.forEach((s: { idnumber: string; allowed: boolean }) => {
+          if (s && s.idnumber) {
+            map[s.idnumber] = s.allowed ?? true;
+          }
+        });
+        setInstructorApprovalStatuses(map);
+      }
+    } catch (error) {
+      console.error("Failed to fetch instructor approval statuses", error);
+    }
+  };
+
   useEffect(() => {
     fetchUsers();
     
@@ -104,6 +128,8 @@ export default function CoordinatorPage() {
         if (data.sections) setAvailableSections(data.sections);
       })
       .catch(console.error);
+
+    fetchInstructorApprovalStatuses();
 
     const fname = localStorage.getItem("firstname");
     const lname = localStorage.getItem("lastname");
@@ -146,10 +172,63 @@ export default function CoordinatorPage() {
     router.replace("/");
   };
 
+  const handleApprove = async (user: User) => {
+    if (!confirm(`Are you sure you want to approve ${user.firstname} ${user.lastname}?`)) return;
+    try {
+      setLoading(true);
+      const actorId = localStorage.getItem("idnumber") || "SYSTEM";
+      const res = await fetch(`/api/users/${user.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          signup_status: 'APPROVED',
+          actorId: actorId,
+          actorRole: 'coordinator',
+          reason: "Coordinator approval"
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to approve user");
+      fetchUsers();
+    } catch (e) {
+      console.error("Approve failed", e);
+      alert("Failed to approve user");
+      setLoading(false);
+    }
+  };
+
+  const toggleInstructorApproval = async (idnumber: string, current: boolean) => {
+    try {
+      const res = await fetch("/api/instructor-approval-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idnumber, allowed: !current }),
+      });
+      if (!res.ok) {
+        try {
+          const errorBody = await res.json().catch(() => null);
+          console.error("Failed to update instructor approval setting", errorBody || res.statusText);
+          alert("Failed to update instructor approval setting. Please check server logs or Supabase table configuration.");
+        } catch {
+          console.error("Failed to update instructor approval setting");
+          alert("Failed to update instructor approval setting.");
+        }
+        return;
+      }
+      setInstructorApprovalStatuses(prev => ({
+        ...prev,
+        [idnumber]: !current,
+      }));
+    } catch (error) {
+      console.error("Failed to update instructor approval setting", error);
+    }
+  };
+
   const navItems = [
-    { id: "student", label: "Students", icon: Users, color: "text-blue-600", bg: "bg-blue-50" },
+    { id: "student", label: "Student Profile", icon: Users, color: "text-blue-600", bg: "bg-blue-50" },
+    { id: "assign", label: "Assign Supervisor", icon: UserPlus, color: "text-orange-600", bg: "bg-orange-50" },
     { id: "instructor", label: "Instructors", icon: GraduationCap, color: "text-orange-600", bg: "bg-orange-50" },
     { id: "supervisor", label: "Supervisors", icon: Briefcase, color: "text-purple-600", bg: "bg-purple-50" },
+    { id: "approval", label: "Account Approval", icon: UserCheck, color: "text-green-600", bg: "bg-green-50" },
   ] as const;
 
   return (
@@ -254,14 +333,7 @@ export default function CoordinatorPage() {
             >
               <Menu size={24} />
             </button>
-            <div>
-              <h2 className="text-xl font-bold text-gray-900">
-                {activeTab.charAt(0).toUpperCase() + activeTab.slice(1)} Management
-              </h2>
-              <p className="text-sm text-gray-500 hidden sm:block">
-                View and manage {activeTab} accounts
-              </p>
-            </div>
+            <div className="sr-only" aria-hidden="true"></div>
           </div>
           
           <div className="flex items-center gap-3">
@@ -271,16 +343,33 @@ export default function CoordinatorPage() {
         {/* Content Area */}
         <main className="flex-1 overflow-hidden p-4 sm:p-6 lg:p-8 bg-[#F6F7F9] relative">
            <div className="h-full max-w-7xl mx-auto w-full animate-in fade-in zoom-in-95 duration-300">
-             <UsersView 
-               role={activeTab}
-               users={users}
-               availableCourses={availableCourses}
-               availableSections={availableSections}
-               onAdd={() => setShowAddModal(activeTab)}
-               onEdit={setEditingUser}
-               onView={setViewingUser}
-               onDelete={setDeletingUser}
-             />
+            {activeTab === 'approval' ? (
+              <ApprovalsView 
+                users={users} 
+                onApprove={handleApprove} 
+                onDelete={setDeletingUser} 
+                onView={setViewingUser}
+              />
+            ) : activeTab === 'assign' ? (
+              <AssignSupervisorView 
+                users={users}
+                onRefresh={fetchUsers}
+              />
+            ) : (
+              <UsersView 
+                role={activeTab as "student" | "instructor" | "supervisor"}
+                users={users}
+                availableCourses={availableCourses}
+                availableSections={availableSections}
+                onAdd={() => setShowAddModal(activeTab as "student" | "instructor" | "supervisor")}
+                onEdit={setEditingUser}
+                onView={setViewingUser}
+                onDelete={setDeletingUser}
+                onApprove={handleApprove}
+                instructorApprovalStatuses={instructorApprovalStatuses}
+                onToggleInstructorApproval={toggleInstructorApproval}
+              />
+            )}
            </div>
         </main>
       </div>
@@ -307,12 +396,13 @@ export default function CoordinatorPage() {
             onClose={() => setEditingUser(null)} 
             availableCourses={availableCourses}
             availableSections={availableSections}
+            users={users}
           />
         </Modal>
       )}
 
       {viewingUser && (
-        <Modal onClose={() => setViewingUser(null)}>
+        <Modal onClose={() => setViewingUser(null)} className="max-w-4xl">
           <ViewUserDetails 
             user={viewingUser}
             users={users}

@@ -1,14 +1,21 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabaseClient";
 
+type AttendanceEvent = {
+  type: string;
+  ts: number;
+  status: string;
+  validated_by?: string | null;
+  validated_at?: number | null;
+};
+
 export async function GET() {
   const admin = getSupabaseAdmin();
   if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
 
-  // Fetch all attendance sorted by timestamp
   const { data, error } = await admin
     .from("attendance")
-    .select("idnumber, type, ts, status, approvedby, approvedat")
+    .select("idnumber, type, ts, status, validated_by, validated_at")
     .order("ts", { ascending: true });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -17,16 +24,15 @@ export async function GET() {
   const activeSessions: Record<string, number> = {};
   const recentAttendance: { idnumber: string; type: string; ts: number }[] = [];
 
-  // Group by idnumber
-  const grouped: Record<string, { type: string; ts: number; status: string; approvedby?: string | null; approvedat?: number | null }[]> = {};
-  (data || []).forEach((row: { idnumber: string; type: string; ts: number | string; status: string; approvedby?: string | null; approvedat?: string | null }) => {
+  const grouped: Record<string, AttendanceEvent[]> = {};
+  (data || []).forEach((row: { idnumber: string; type: string; ts: number | string; status: string; validated_by?: string | null; validated_at?: string | null }) => {
     if (!grouped[row.idnumber]) grouped[row.idnumber] = [];
     grouped[row.idnumber].push({ 
       type: row.type, 
       ts: Number(row.ts),
       status: row.status,
-      approvedby: row.approvedby,
-      approvedat: row.approvedat ? Number(new Date(row.approvedat).getTime()) : null
+      validated_by: row.validated_by,
+      validated_at: row.validated_at ? Number(new Date(row.validated_at).getTime()) : null
     });
     // Collect recent attendance (last 7 days)
     const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -35,28 +41,127 @@ export async function GET() {
     }
   });
 
-  // Calculate hours
-  Object.keys(grouped).forEach(id => {
-    const events = grouped[id];
-    let totalMs = 0;
-    
-    // Filter only approved events or legacy approved (if logic existed)
-    // We strictly follow: status === 'Approved' OR approvedby IS NOT NULL
-    const approvedEvents = events.filter(e => 
-      (e.status && String(e.status).toLowerCase() === 'approved') || e.approvedby
-    );
+  const shiftConfig: Record<string, { start: string; end: string }> = {};
+  try {
+    const { data: shiftRows } = await admin
+      .from("shifts")
+      .select("shift_name, official_start, official_end");
 
-    // We need to pair them based on the filtered list?
-    // Or do we pair them from the full list but only count if both are approved?
-    // "when the supervisor approves the time in the total hours will start counting"
-    // "when the supervisor approves the time out it will stop counting"
-    // This implies we pair APPROVED events.
-    
-    // Logic: Iterate approved events.
-    // If we find an 'in', look for next 'out'.
-    // If found 'out', add duration.
-    // If NO 'out' found, and it's the last event, it is ACTIVE.
-    
+    (shiftRows || []).forEach((row: { shift_name?: string | null; official_start?: string | null; official_end?: string | null }) => {
+      const name = row.shift_name || "";
+      if (!name) return;
+      shiftConfig[name] = {
+        start: row.official_start || "",
+        end: row.official_end || "",
+      };
+    });
+  } catch {}
+
+  Object.keys(grouped).forEach(id => {
+    const events: AttendanceEvent[] = grouped[id];
+    let totalMs = 0;
+
+    const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+
+    const isApproved = (e: AttendanceEvent) => {
+      const st = String(e.status || "").toUpperCase();
+      return st === "APPROVED" || st === "VALIDATED" || !!e.validated_by;
+    };
+
+    const findPairDuration = (logs: AttendanceEvent[], windowStart: number, windowEnd: number) => {
+      let firstInTs: number | null = null;
+      let lastOutTs: number | null = null;
+
+      // Use a buffer window to catch early logins/late logouts
+      // 2 hours buffer seems reasonable
+      const BUFFER_MS = 2 * 60 * 60 * 1000;
+      const searchStart = windowStart - BUFFER_MS;
+      const searchEnd = windowEnd + BUFFER_MS;
+
+      logs.forEach(log => {
+        if (log.ts < searchStart || log.ts > searchEnd) return;
+        if (!isApproved(log)) return;
+        if (log.type === "in") {
+          if (firstInTs === null || log.ts < firstInTs) {
+            firstInTs = log.ts;
+          }
+        } else if (log.type === "out") {
+          if (lastOutTs === null || log.ts > lastOutTs) {
+            lastOutTs = log.ts;
+          }
+        }
+      });
+
+      if (firstInTs === null || lastOutTs === null || lastOutTs <= firstInTs) {
+        return 0;
+      }
+
+      const rawIn = clamp(firstInTs, windowStart, windowEnd);
+      const rawOut = clamp(lastOutTs, windowStart, windowEnd);
+      return rawOut > rawIn ? rawOut - rawIn : 0;
+    };
+
+    const byDay: { [dayKey: string]: { date: Date; logs: AttendanceEvent[] } } = {};
+    events.forEach(ev => {
+      const date = new Date(ev.ts);
+      const day = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+      const key = day.toISOString();
+      if (!byDay[key]) byDay[key] = { date: day, logs: [] as typeof events };
+      byDay[key].logs.push(ev);
+    });
+
+    // Helper to parse "HH:MM"
+    const parseTime = (t: string | undefined, defaultH: number, defaultM: number) => {
+      if (!t) return { h: defaultH, m: defaultM };
+      const [h, m] = t.split(':').map(Number);
+      return { h: isNaN(h) ? defaultH : h, m: isNaN(m) ? defaultM : m };
+    };
+
+    // Parse configured shifts or use defaults
+    const amCfg = shiftConfig["Morning Shift"];
+    const pmCfg = shiftConfig["Afternoon Shift"];
+    const otCfg = shiftConfig["Overtime Shift"];
+
+    const amStartT = parseTime(amCfg?.start, 8, 0);
+    const amEndT = parseTime(amCfg?.end, 11, 0);
+    const pmStartT = parseTime(pmCfg?.start, 13, 0);
+    const pmEndT = parseTime(pmCfg?.end, 17, 0);
+    // Default OT is 17:00 - 20:00 if not configured
+    const otStartT = parseTime(otCfg?.start, 17, 0);
+    const otEndT = parseTime(otCfg?.end, 20, 0);
+
+    Object.values(byDay).forEach(day => {
+      const baseDate = new Date(day.date.getTime());
+      baseDate.setHours(0, 0, 0, 0);
+
+      const buildShift = (t: { h: number, m: number }) => {
+        const d = new Date(baseDate.getTime());
+        d.setHours(t.h, t.m, 0, 0);
+        return d.getTime();
+      };
+
+      const amIn = buildShift(amStartT);
+      const amOut = buildShift(amEndT);
+      const pmIn = buildShift(pmStartT);
+      const pmOut = buildShift(pmEndT);
+      const otStart = buildShift(otStartT);
+      const otEnd = buildShift(otEndT);
+
+      const dayLogs = day.logs.slice().sort((a, b) => a.ts - b.ts);
+
+      const dayValidatedAm = findPairDuration(dayLogs, amIn, amOut);
+      const dayValidatedPm = findPairDuration(dayLogs, pmIn, pmOut);
+      
+      // Only calculate OT if it's configured or we want to allow default OT
+      // The requirement says "Overtime is a separate time-in/out period"
+      // We'll calculate it using the configured (or default) window
+      const dayValidatedOt = findPairDuration(dayLogs, otStart, otEnd);
+
+      totalMs += dayValidatedAm + dayValidatedPm + dayValidatedOt;
+    });
+
+    const approvedEvents = events.filter(e => isApproved(e));
+
     for (let i = 0; i < approvedEvents.length; i++) {
       if (approvedEvents[i].type === 'in') {
         let outIndex = -1;
@@ -67,19 +172,14 @@ export async function GET() {
           }
         }
 
-        if (outIndex !== -1) {
-          const inTs = approvedEvents[i].approvedat ?? approvedEvents[i].ts;
-          const outTs = approvedEvents[outIndex].approvedat ?? approvedEvents[outIndex].ts;
-          totalMs += (outTs - inTs);
-          i = outIndex; // skip to out
+        if (outIndex === -1) {
+          activeSessions[id] = approvedEvents[i].validated_at ?? approvedEvents[i].ts;
         } else {
-           // No approved out found. This is an active session.
-           // We only consider it active if there is NO subsequent approved IN (which shouldn't happen normally)
-           // But technically, if we have In (Approved), In (Approved)... that's an error in data, but let's assume valid pairs.
-           activeSessions[id] = approvedEvents[i].approvedat ?? approvedEvents[i].ts;
+          i = outIndex;
         }
       }
     }
+
     summary[id] = totalMs;
   });
 

@@ -12,9 +12,10 @@ import {
   ChevronRight,
   Users,
   ClipboardCheck,
-  BellRing
+  BellRing,
+  CalendarClock
 } from 'lucide-react';
-import { supabase } from "../../../lib/supabaseClient";
+import { supabase } from "@/lib/supabaseClient";
 import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import dynamic from "next/dynamic";
 import { 
@@ -23,6 +24,7 @@ import {
   EvaluationView,
   EvaluationButton,
   EvaluationModal,
+  SetOfficialTimeView,
   User
 } from "./ui";
 import ServiceWorkerRegister from "../../../components/ServiceWorkerRegister";
@@ -126,7 +128,7 @@ function SupervisorContent() {
 
   const [isSidebarOpen, setSidebarOpen] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
-  const [activeTab, setActiveTab] = useState<"dashboard" | "attendance" | "profile" | "evaluation">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "attendance" | "profile" | "evaluation" | "schedule">("dashboard");
 
   // Data State
   const [students, setStudents] = useState<User[]>([]);
@@ -208,144 +210,33 @@ function SupervisorContent() {
     }
   }, [notificationPermission, myIdnumber]);
 
-  // Evaluation Status (Realtime Subscription)
   useEffect(() => {
-    // 1. Initial Fetch
+    let cancelled = false;
+
     const fetchStatuses = async () => {
       try {
         const res = await fetch("/api/evaluation-status", { cache: "no-store" });
+        if (!res.ok) {
+          return;
+        }
         const json = await res.json();
-        if (Array.isArray(json.statuses)) {
+        if (!cancelled && Array.isArray(json.statuses)) {
           const map: Record<string, boolean> = {};
           json.statuses.forEach((s: any) => {
             if (s.idnumber) map[String(s.idnumber).trim()] = s.enabled;
           });
           setEvalStatuses(map);
         }
-      } catch (e) { console.error(e); }
+      } catch {
+      }
     };
 
     fetchStatuses();
-
-    // 2. Realtime Subscription
-    if (!supabase) return;
-    
-    const channel = supabase
-      .channel('global-evaluation-updates')
-      .on(
-        'postgres_changes',
-        { 
-          event: '*', 
-          schema: 'public', 
-          table: 'evaluation_status' 
-        },
-        (payload) => {
-          if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-            const newRow = payload.new as { idnumber: string, enabled: boolean };
-            if (newRow && newRow.idnumber) {
-              setEvalStatuses((prev) => ({
-                ...prev,
-                [String(newRow.idnumber).trim()]: newRow.enabled
-              }));
-              if (newRow.enabled) {
-                const student = students.find(s => String(s.idnumber).trim() === String(newRow.idnumber).trim());
-                const fullName = student ? `${student.firstname} ${student.lastname}` : String(newRow.idnumber);
-                const msg = `Available evaluation for ${fullName}`;
-                pushToast("Evaluation Available", msg);
-                try {
-                  fetch('/api/push/send-eval', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ idnumber: myIdnumber, message: msg })
-                  }).catch(() => {});
-                } catch {}
-                if (Notification.permission === 'granted') {
-                  if ('serviceWorker' in navigator) {
-                    navigator.serviceWorker.ready.then(reg => {
-                      try {
-                        // @ts-ignore
-                        reg.showNotification("Evaluation Available", {
-                          body: msg,
-                          icon: '/icons-192.png',
-                          tag: `evaluation-available-${String(newRow.idnumber).trim()}-${Date.now()}`,
-                          // renotify is not supported in the Notification constructor; omit it here
-                          data: { url: '/portal/supervisor?tab=evaluation' }
-                        });
-                      } catch {}
-                    });
-                  } else {
-                    try {
-                      // @ts-ignore
-                      new Notification("Evaluation Available", {
-                        body: msg,
-                        icon: '/icons-192.png',
-                        tag: `evaluation-available-${String(newRow.idnumber).trim()}-${Date.now()}`,
-                        // renotify is not supported in the Notification constructor
-                      });
-                    } catch {}
-                  }
-                }
-              }
-            }
-          }
-        }
-      )
-      .on(
-        'broadcast',
-        { event: 'toggle' },
-        async (payload) => {
-           const { idnumber, enabled } = payload.payload;
-           if (idnumber) {
-             setEvalStatuses((prev) => ({
-               ...prev,
-               [String(idnumber).trim()]: enabled
-             }));
-              if (enabled) {
-                const student = students.find(s => String(s.idnumber).trim() === String(idnumber).trim());
-                const fullName = student ? `${student.firstname} ${student.lastname}` : String(idnumber);
-                const msg = `Available evaluation for ${fullName}`;
-                pushToast("Evaluation Available", msg);
-                try {
-                  await fetch('/api/push/send-eval', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ idnumber: myIdnumber, message: msg })
-                  });
-                } catch {}
-                if (Notification.permission === 'granted') {
-                  if ('serviceWorker' in navigator) {
-                    navigator.serviceWorker.ready.then(reg => {
-                      try {
-                        // @ts-ignore
-                        reg.showNotification("Evaluation Available", {
-                          body: msg,
-                          icon: '/icons-192.png',
-                          tag: `evaluation-available-${String(idnumber).trim()}-${Date.now()}`,
-// renotify is not supported in the Notification constructor; omit it here
-                          data: { url: '/portal/supervisor?tab=evaluation' }
-                        });
-                      } catch {}
-                    });
-                  } else {
-                    try {
-                      // @ts-ignore
-                      new Notification("Evaluation Available", {
-                        body: msg,
-                        icon: '/icons-192.png',
-                        tag: `evaluation-available-${String(idnumber).trim()}-${Date.now()}`,
-                        // renotify is not supported in the Notification constructor; omit it here
-                      });
-                    } catch {}
-                  }
-                }
-              }
-           }
-        }
-      )
-      .subscribe();
+    const interval = setInterval(fetchStatuses, 1000);
 
     return () => {
-      supabase?.removeChannel(channel);
+      cancelled = true;
+      clearInterval(interval);
     };
   }, []);
 
@@ -449,16 +340,21 @@ function SupervisorContent() {
                          body: message,
                          icon: '/icons-192.png',
                          tag: 'attendance-update',
-                         data: { url: '/portal/supervisor?tab=attendance' }
+                         data: { url: '/portal/supervisor?tab=dashboard' }
                       });
-                    } catch (e) { console.error(e); }
+                    } catch (e: any) { 
+                      if (e.name !== 'AbortError') console.error(e); 
+                    }
                  } else {
                     try {
+                      // @ts-ignore
                       new Notification(`Attendance Update`, {
                          body: message,
                          icon: '/icons-192.png'
                       });
-                    } catch (e) { console.error(e); }
+                    } catch (e: any) { 
+                      if (e.name !== 'AbortError') console.error(e); 
+                    }
                  }
              }
 
@@ -490,7 +386,7 @@ function SupervisorContent() {
   useEffect(() => {
     if (students.length === 0) return;
     const tab = (searchParams.get("tab") || "").toLowerCase();
-    if (tab === "attendance" || tab === "evaluation" || tab === "profile" || tab === "dashboard") {
+    if (tab === "attendance" || tab === "evaluation" || tab === "profile" || tab === "dashboard" || tab === "schedule") {
       setActiveTab(tab as any);
     }
     const id = searchParams.get("studentId");
@@ -647,10 +543,10 @@ function SupervisorContent() {
 
   // Menu Items
   const menuItems = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "dashboard", label: "Account Monitoring", icon: LayoutDashboard },
     { id: "evaluation", label: "Evaluation", icon: ClipboardCheck },
-    { id: "attendance", label: "Approvals", icon: CheckSquare },
-    { id: "profile", label: "My Profile", icon: UserIcon },
+    { id: "schedule", label: "Set Official Time", icon: CalendarClock },
+    { id: "profile", label: "Profile", icon: UserIcon },
   ];
 
   return (
@@ -781,7 +677,7 @@ function SupervisorContent() {
             </div>
             <div>
               <h2 className="text-xl font-bold text-gray-900 capitalize tracking-tight">
-                {activeTab === 'dashboard' ? 'Overview' : activeTab}
+                {menuItems.find(i => i.id === activeTab)?.label || activeTab}
               </h2>
             </div>
           </div>
@@ -801,6 +697,7 @@ function SupervisorContent() {
                   supervisorInfo={supervisorInfo}
                   selected={selected}
                   onSelect={handleSelect}
+                  refreshKey={refreshKey}
                 />
               </Suspense>
             )}
@@ -817,7 +714,7 @@ function SupervisorContent() {
                 }}
               />
             )}
-            {activeTab === 'attendance' && <AttendanceView students={students} myIdnumber={myIdnumber} onPendingChange={setPendingApprovalsCount} refreshKey={refreshKey} />}
+            {activeTab === 'schedule' && <SetOfficialTimeView students={students} />}
             {activeTab === 'profile' && <ProfileView user={me} />}
           </div>
         </main>

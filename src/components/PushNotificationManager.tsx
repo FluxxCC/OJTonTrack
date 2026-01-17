@@ -52,11 +52,33 @@ export default function PushNotificationManager() {
       // Check existing subscription
       const existingSub = await reg.pushManager.getSubscription();
       
-      // Fetch public key
       const res = await fetch("/api/push/public-key");
-      if (!res.ok) throw new Error("Failed to fetch public key");
+      if (!res.ok) {
+        let errorPayload: unknown = null;
+        try {
+          errorPayload = await res.json();
+        } catch {
+        }
+        const message =
+          errorPayload &&
+          typeof errorPayload === "object" &&
+          "error" in errorPayload &&
+          typeof (errorPayload as { error: unknown }).error === "string"
+            ? (errorPayload as { error: string }).error
+            : null;
+        if (message === "VAPID keys not configured") {
+          console.warn(
+            "Push notifications are disabled because VAPID keys are not configured on the server."
+          );
+          return;
+        }
+        throw new Error("Failed to fetch public key");
+      }
       const { publicKey } = await res.json();
-      if (!publicKey) throw new Error("No public key");
+      if (!publicKey) {
+        console.warn("Push notifications are disabled because no public key is available.");
+        return;
+      }
 
       let sub = existingSub;
       
@@ -79,12 +101,14 @@ export default function PushNotificationManager() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ idnumber, subscription: sub })
         });
-        // Optional: Mark as synced in sessionStorage to avoid repeated calls?
-        // But the user said "all users login will allow", so ensuring it matches the current user is good.
-        // The API should handle upserts/duplicates gracefully.
       }
-    } catch (e) {
-      console.error("Push subscription error:", e);
+    } catch (e: unknown) {
+      const error = e as Error;
+      if (error.name === "AbortError" || error.message.includes("push service not available")) {
+        console.warn("Push notifications are not supported or available in this environment.");
+        return;
+      }
+      console.error("Push subscription error:", error);
     } finally {
       isSubscribing.current = false;
     }

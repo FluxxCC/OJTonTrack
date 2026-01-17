@@ -1,7 +1,8 @@
 "use client";
 import React, { useState, useMemo } from "react";
+import { Search } from "lucide-react";
 
-export type RoleType = "student" | "instructor" | "supervisor";
+export type RoleType = "student" | "instructor" | "supervisor" | "approval" | "assign";
 
 export interface User {
   id: number;
@@ -20,6 +21,7 @@ export interface User {
   courseIds?: number[];
   sectionIds?: number[];
   supervisorid?: string;
+  signup_status?: string;
 }
 
 export interface Course {
@@ -48,10 +50,10 @@ function formatCourseSection(courseStr?: string, sectionStr?: string): string {
 
 // --- Helper Components ---
 
-export function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+export function Modal({ children, onClose, className }: { children: React.ReactNode; onClose: () => void; className?: string }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-      <div className="relative w-full max-w-lg max-h-[85vh] rounded-2xl bg-white shadow-2xl overflow-y-auto animate-in fade-in zoom-in duration-200">
+      <div className={`relative w-full max-h-[85vh] rounded-2xl bg-white shadow-2xl overflow-y-auto animate-in fade-in zoom-in duration-200 ${className || "max-w-lg md:max-w-3xl"}`}>
         <button
           onClick={onClose}
           className="absolute right-4 top-4 text-gray-400 hover:text-gray-600 z-10 p-1 hover:bg-gray-100 rounded-full transition-colors"
@@ -59,6 +61,251 @@ export function Modal({ children, onClose }: { children: React.ReactNode; onClos
           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
         </button>
         {children}
+      </div>
+    </div>
+  );
+}
+
+export const ApprovalsView = ({ users, onApprove, onDelete, onView }: { 
+  users: User[], 
+  onApprove: (user: User) => void,
+  onDelete: (user: User) => void,
+  onView: (user: User) => void
+}) => {
+  const students = useMemo(() => users.filter(u => u.role === "student"), [users]);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [filterCourse, setFilterCourse] = useState("");
+  const [filterSection, setFilterSection] = useState("");
+  const [filterStatus, setFilterStatus] = useState("PENDING");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  const uniqueCourses = useMemo(
+    () =>
+      Array.from(
+        new Set(students.map(s => s.course).filter((c): c is string => !!c))
+      ).sort(),
+    [students]
+  );
+
+  const uniqueSections = useMemo(() => {
+    const subset = filterCourse ? students.filter(s => s.course === filterCourse) : students;
+    return Array.from(
+      new Set(subset.map(s => s.section).filter((s): s is string => !!s))
+    ).sort();
+  }, [students, filterCourse]);
+
+  const filteredStudents = useMemo(() => {
+    const normalize = (s: string) => s.toLowerCase().trim();
+    return students
+      .filter(s => {
+        const search = normalize(searchTerm);
+        const name = normalize(`${s.firstname || ""} ${s.lastname || ""}`);
+        const id = normalize(s.idnumber);
+        const matchesSearch = !search || name.includes(search) || id.includes(search);
+
+        const matchesCourse = !filterCourse || s.course === filterCourse;
+        const matchesSection = !filterSection || s.section === filterSection;
+
+        const status = s.signup_status || "APPROVED";
+        const matchesStatus =
+          filterStatus === "ALL" ? true : status === filterStatus;
+
+        return matchesSearch && matchesCourse && matchesSection && matchesStatus;
+      })
+      .sort((a, b) => (a.lastname || "").localeCompare(b.lastname || ""));
+  }, [students, searchTerm, filterCourse, filterSection, filterStatus]);
+
+  const toggleSelection = (id: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    const pendingFiltered = filteredStudents.filter(
+      s => (s.signup_status || "APPROVED") === "PENDING"
+    );
+    if (pendingFiltered.length === 0) {
+      setSelectedIds(new Set());
+      return;
+    }
+    const allSelected = pendingFiltered.every(s => selectedIds.has(s.id));
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(pendingFiltered.map(s => s.id)));
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-full bg-white rounded-3xl border border-gray-200 shadow-sm overflow-hidden">
+      <div className="px-6 py-5 border-b border-gray-100 bg-white">
+        <div>
+          <h2 className="text-xl font-extrabold text-gray-900 tracking-tight">Account Approvals</h2>
+          <p className="text-sm text-gray-500 font-medium mt-1">
+            Review and approve student account requests
+          </p>
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-gray-50/30">
+        <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm flex flex-col md:flex-row gap-4 items-center">
+          <div className="flex-1 relative w-full">
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500" size={18} />
+            <input
+              type="text"
+              placeholder="Search by name or ID..."
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              className="w-full pl-11 pr-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm"
+            />
+          </div>
+          <select
+            value={filterCourse}
+            onChange={e => {
+              setFilterCourse(e.target.value);
+              setFilterSection("");
+            }}
+            className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
+          >
+            <option value="">All Courses</option>
+            {uniqueCourses.map(c => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+          <select
+            value={filterSection}
+            onChange={e => setFilterSection(e.target.value)}
+            className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
+          >
+            <option value="">All Sections</option>
+            {uniqueSections.map(s => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          <select
+            value={filterStatus}
+            onChange={e => setFilterStatus(e.target.value)}
+            className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
+          >
+            <option value="ALL">All Status</option>
+            <option value="PENDING">Pending</option>
+            <option value="APPROVED">Approved</option>
+            <option value="REJECTED">Rejected</option>
+          </select>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex-1">
+          <div className="overflow-x-auto h-full">
+            <table className="w-full text-sm text-left">
+              <thead className="bg-gray-50 text-gray-500 font-medium border-b border-gray-100 sticky top-0 z-10">
+                <tr>
+                  <th className="px-6 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                      onChange={toggleAll}
+                      checked={
+                        filteredStudents.some(s => (s.signup_status || "APPROVED") === "PENDING") &&
+                        filteredStudents
+                          .filter(s => (s.signup_status || "APPROVED") === "PENDING")
+                          .every(s => selectedIds.has(s.id))
+                      }
+                    />
+                  </th>
+                  <th className="px-6 py-3">Student</th>
+                  <th className="px-6 py-3">ID Number</th>
+                  <th className="px-6 py-3">Course & Section</th>
+                  <th className="px-6 py-3">Status</th>
+                  <th className="px-6 py-3">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {filteredStudents.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-6 py-8 text-center text-gray-500">
+                      No students found
+                    </td>
+                  </tr>
+                ) : (
+                  filteredStudents.map(s => {
+                    const isPending = (s.signup_status || "APPROVED") === "PENDING";
+                    const isSelected = selectedIds.has(s.id);
+                    return (
+                      <tr
+                        key={s.id}
+                        className={`hover:bg-gray-50/50 ${
+                          isSelected ? "bg-orange-50/30" : ""
+                        }`}
+                      >
+                        <td className="px-6 py-3">
+                          {isPending && (
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleSelection(s.id)}
+                              className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                            />
+                          )}
+                        </td>
+                        <td className="px-6 py-3 font-medium text-gray-900">
+                          <button
+                            type="button"
+                            onClick={() => onView(s)}
+                            className="hover:text-orange-600 hover:underline text-left font-semibold"
+                          >
+                            {s.firstname} {s.lastname}
+                          </button>
+                        </td>
+                        <td className="px-6 py-3 text-gray-600">{s.idnumber}</td>
+                        <td className="px-6 py-3 text-gray-600">
+                          {formatCourseSection(s.course, s.section)}
+                        </td>
+                        <td className="px-6 py-3">
+                          <span
+                            className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium border ${
+                              s.signup_status === "PENDING"
+                                ? "bg-yellow-50 text-yellow-700 border-yellow-200"
+                                : s.signup_status === "REJECTED"
+                                ? "bg-red-50 text-red-700 border-red-200"
+                                : "bg-green-50 text-green-700 border-green-200"
+                            }`}
+                          >
+                            {s.signup_status || "APPROVED"}
+                          </span>
+                        </td>
+                        <td className="px-6 py-3">
+                          {isPending && (
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => onApprove(s)}
+                                className="px-3 py-1.5 bg-[#F97316] text-white rounded-lg text-xs font-bold shadow-sm hover:bg-[#EA580C] transition-colors"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                onClick={() => onDelete(s)}
+                                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors"
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -198,6 +445,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
   });
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [assignmentConflict, setAssignmentConflict] = useState<string | null>(null);
   const title = role.charAt(0).toUpperCase() + role.slice(1);
   const [showSupervisorModal, setShowSupervisorModal] = useState(false);
   const [supervisorSearch, setSupervisorSearch] = useState("");
@@ -214,6 +462,52 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
   }, [availableCourses, availableSections]);
 
   const submit = async () => {
+    if (role === "instructor" && form.sectionIds.length > 0) {
+      const instructors = users.filter(u => String(u.role).toLowerCase() === "instructor");
+      const conflicts: string[] = [];
+      const seen = new Set<string>();
+
+      form.sectionIds.forEach(secId => {
+        const sectionObj = availableSections.find(s => s.id === secId);
+        if (!sectionObj) return;
+        const courseObj = availableCourses.find(c => c.id === sectionObj.course_id);
+        const sectionLabel = `${courseObj?.name || "Course"} ${sectionObj.name}`;
+
+        const conflictInst = instructors.find(inst => {
+          const instSectionIds = Array.isArray(inst.sectionIds) ? inst.sectionIds : [];
+          if (instSectionIds.includes(secId)) return true;
+
+          const instCourse = inst.course;
+          const instSection = inst.section;
+          if (!instCourse || !instSection || !courseObj) return false;
+
+          const courseParts = String(instCourse).split(",").map(s => s.trim());
+          const sectionParts = String(instSection).split(",").map(s => s.trim());
+          const len = Math.max(courseParts.length, sectionParts.length);
+          for (let i = 0; i < len; i++) {
+            if (courseParts[i] === courseObj.name && sectionParts[i] === sectionObj.name) {
+              return true;
+            }
+          }
+          return false;
+        });
+
+        if (conflictInst) {
+          const instructorLabel = `${(conflictInst.firstname || "")} ${(conflictInst.lastname || "")}`.trim() || conflictInst.name || conflictInst.idnumber;
+          const key = `${sectionObj.id}-${conflictInst.id}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            conflicts.push(`${sectionLabel} (Instructor: ${instructorLabel})`);
+          }
+        }
+      });
+
+      if (conflicts.length > 0) {
+        setAssignmentConflict(`An instructor is already assigned in ${conflicts.join(", ")}`);
+        return;
+      }
+    }
+
     if (!form.idnumber || !form.password) {
       setMessage("ID Number and Password are required");
       return;
@@ -234,6 +528,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
         supervisorid: form.supervisorid || undefined,
         company: form.company || undefined,
         location: form.location || undefined,
+        signup_status: role === "student" ? "APPROVED" : undefined,
       };
       const res = await fetch("/api/users", {
         method: "POST",
@@ -553,11 +848,30 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
           {loading ? "Adding..." : "Add User"}
         </button>
       </div>
+
+      {assignmentConflict && (
+        <Modal onClose={() => setAssignmentConflict(null)}>
+          <div className="p-6 sm:p-8">
+            <h3 className="text-xl font-bold text-gray-900 mb-2">Instructor already assigned</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              {assignmentConflict}
+            </p>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setAssignmentConflict(null)}
+                className="px-4 py-2.5 rounded-xl bg-[#F97316] text-white text-sm font-bold hover:bg-[#EA580C] transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
 
-export function EditUserForm({ user, onSuccess, onClose, availableCourses, availableSections }: { user: User; onSuccess: () => void; onClose: () => void; availableCourses: Course[]; availableSections: Section[] }) {
+export function EditUserForm({ user, onSuccess, onClose, availableCourses, availableSections, users }: { user: User; onSuccess: () => void; onClose: () => void; availableCourses: Course[]; availableSections: Section[]; users: User[] }) {
   const [form, setForm] = useState({
     idnumber: user.idnumber || "",
     firstname: user.firstname || "",
@@ -569,9 +883,13 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
     password: "",
     courseIds: Array.isArray(user.courseIds) ? user.courseIds : [],
     sectionIds: Array.isArray(user.sectionIds) ? user.sectionIds : [],
+    supervisorid: user.supervisorid || "",
   });
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [assignmentConflict, setAssignmentConflict] = useState<string | null>(null);
+  const [showSupervisorModal, setShowSupervisorModal] = useState(false);
+  const [supervisorSearch, setSupervisorSearch] = useState("");
   const combinedCourseSections = useMemo(() => {
     return availableSections.map(s => {
       const c = availableCourses.find(c => c.id === s.course_id);
@@ -584,9 +902,60 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
   }, [availableCourses, availableSections]);
 
   const submit = async () => {
+    if (user.role === "instructor" && form.sectionIds.length > 0) {
+      const instructors = users.filter(u => String(u.role).toLowerCase() === "instructor" && u.id !== user.id);
+      const conflicts: string[] = [];
+      const seen = new Set<string>();
+
+      form.sectionIds.forEach(secId => {
+        const sectionObj = availableSections.find(s => s.id === secId);
+        if (!sectionObj) return;
+        const courseObj = availableCourses.find(c => c.id === sectionObj.course_id);
+        const sectionLabel = `${courseObj?.name || "Course"} ${sectionObj.name}`;
+
+        const conflictInst = instructors.find(inst => {
+          const instSectionIds = Array.isArray(inst.sectionIds) ? inst.sectionIds : [];
+          if (instSectionIds.includes(secId)) return true;
+
+          const instCourse = inst.course;
+          const instSection = inst.section;
+          if (!instCourse || !instSection || !courseObj) return false;
+
+          const courseParts = String(instCourse).split(",").map(s => s.trim());
+          const sectionParts = String(instSection).split(",").map(s => s.trim());
+          const len = Math.max(courseParts.length, sectionParts.length);
+          for (let i = 0; i < len; i++) {
+            if (courseParts[i] === courseObj.name && sectionParts[i] === sectionObj.name) {
+              return true;
+            }
+          }
+          return false;
+        });
+
+        if (conflictInst) {
+          const instructorLabel = `${(conflictInst.firstname || "")} ${(conflictInst.lastname || "")}`.trim() || conflictInst.name || conflictInst.idnumber;
+          const key = `${sectionObj.id}-${conflictInst.id}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            conflicts.push(`${sectionLabel} (Instructor: ${instructorLabel})`);
+          }
+        }
+      });
+
+      if (conflicts.length > 0) {
+        setAssignmentConflict(`An instructor is already assigned in ${conflicts.join(", ")}`);
+        return;
+      }
+    }
+
     setLoading(true);
     setMessage(null);
     try {
+      let actorId = "SYSTEM";
+      try {
+        actorId = localStorage.getItem("idnumber") || "SYSTEM";
+      } catch {}
+
       const payload: Record<string, unknown> = {
         idnumber: form.idnumber.trim(),
         firstname: form.firstname || undefined,
@@ -595,10 +964,14 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
         section: form.section || undefined,
         company: form.company || undefined,
         location: form.location || undefined,
+        actorId,
+        actorRole: "coordinator",
+        reason: form.password ? "Coordinator changed password" : "Coordinator updated user",
       };
       if (form.password) payload.password = form.password;
       if (form.courseIds && form.courseIds.length > 0) payload.courseIds = form.courseIds;
       if (form.sectionIds && form.sectionIds.length > 0) payload.sectionIds = form.sectionIds;
+      if (form.supervisorid) payload.supervisorid = form.supervisorid;
 
       const res = await fetch(`/api/users/${user.id}`, {
         method: "PUT",
@@ -707,6 +1080,37 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
                 </div>
               </div>
             </label>
+            <label className="grid gap-1.5 md:col-span-2">
+              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Supervisor</span>
+              {form.supervisorid ? (
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900 bg-white sm:px-4 sm:py-2.5">
+                      <span className="block truncate">
+                        {(() => {
+                          const sup = users.find(u => u.idnumber === form.supervisorid);
+                          const name = sup ? ((sup.firstname || "") + " " + (sup.lastname || "")).trim() || sup.name || sup.idnumber : form.supervisorid;
+                          return `Selected: ${name}`;
+                        })()}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setForm({ ...form, supervisorid: "" })}
+                    className="shrink-0 text-sm font-semibold text-red-600 hover:text-red-700"
+                  >
+                    Clear
+                  </button>
+                </div>
+              ) : (
+                <button 
+                  onClick={() => setShowSupervisorModal(true)}
+                  className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all bg-white text-left"
+                >
+                  Choose supervisor
+                </button>
+              )}
+            </label>
           </>
         )}
         {user.role === "instructor" && (
@@ -752,7 +1156,15 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
                 onChange={(sectionIds) => {
                   const selectedSections = combinedCourseSections.filter(opt => sectionIds.includes(opt.id));
                   const courseIds = Array.from(new Set(selectedSections.map(opt => opt.courseId)));
-                  setForm({ ...form, sectionIds, courseIds });
+                  const courseNames = courseIds
+                    .map(id => availableCourses.find(c => c.id === id)?.name)
+                    .filter(Boolean) as string[];
+                  const sectionNames = selectedSections
+                    .map(opt => availableSections.find(s => s.id === opt.id)?.name)
+                    .filter(Boolean) as string[];
+                  const courseStr = courseNames.join(", ");
+                  const sectionStr = sectionNames.join(", ");
+                  setForm({ ...form, sectionIds, courseIds, course: courseStr, section: sectionStr });
                 }}
                 placeholder="Select course & section"
               />
@@ -771,6 +1183,117 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
           {loading ? "Saving..." : "Save Changes"}
         </button>
       </div>
+
+      {assignmentConflict && (
+        <Modal onClose={() => setAssignmentConflict(null)}>
+          <div className="p-6 sm:p-8">
+            <h3 className="text-xl font-bold text-gray-900 mb-2">Instructor already assigned</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              {assignmentConflict}
+            </p>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setAssignmentConflict(null)}
+                className="px-4 py-2.5 rounded-xl bg-[#F97316] text-white text-sm font-bold hover:bg-[#EA580C] transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {showSupervisorModal && (
+        <Modal onClose={() => setShowSupervisorModal(false)}>
+          <div className="p-6">
+            <div className="mb-4 relative">
+              <h3 className="text-lg font-bold text-gray-900">Select Supervisor</h3>
+              <p className="text-xs text-gray-500 mt-1">Search and assign an eligible supervisor</p>
+              <div className="relative mt-2">
+                <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <input
+                  value={supervisorSearch}
+                  onChange={(e) => setSupervisorSearch(e.target.value)}
+                  placeholder="Search by name, ID, or company"
+                  className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-300 rounded-xl text-sm font-medium placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-900 transition-all shadow-sm"
+                />
+              </div>
+            </div>
+            <div className="space-y-2 max-h-[50vh] overflow-y-auto">
+              {users
+                .filter(u => {
+                  if (String(u.role).toLowerCase() !== "supervisor") return false;
+                  
+                  // If student has no course/section set, show all supervisors
+                  if (!form.course && !form.section && (!form.courseIds.length || !form.sectionIds.length)) return true;
+
+                  const studentCourseId = form.courseIds[0] || availableCourses.find(c => c.name === form.course)?.id;
+                  const studentSectionId = form.sectionIds[0] || availableSections.find(s => {
+                    const c = availableCourses.find(cc => cc.name === form.course);
+                    return c && s.course_id === c.id && s.name === form.section;
+                  })?.id;
+
+                  // If we can't resolve IDs but have names, try name matching or default to true to avoid blocking
+                  if (!studentCourseId || !studentSectionId) return true;
+
+                  const hasCourseId = u.courseIds && u.courseIds.includes(studentCourseId);
+                  const hasSectionId = u.sectionIds && u.sectionIds.includes(studentSectionId);
+                  
+                  if (hasCourseId && hasSectionId) return true;
+
+                  // Legacy string matching fallback
+                  const courseObj = availableCourses.find(c => c.id === studentCourseId);
+                  const sectionObj = availableSections.find(s => s.id === studentSectionId);
+                  const hasCourseName = courseObj && u.course && u.course.includes(courseObj.name);
+                  const hasSectionName = sectionObj && u.section && u.section.includes(sectionObj.name);
+
+                  return hasCourseName && hasSectionName;
+                })
+                .filter(u => {
+                  const s = supervisorSearch.trim().toLowerCase();
+                  if (!s) return true;
+                  const name = ((u.firstname || "") + " " + (u.lastname || "")).toLowerCase();
+                  const company = (u.company || "").toLowerCase();
+                  return u.idnumber.toLowerCase().includes(s) || name.includes(s) || company.includes(s);
+                })
+                .map(u => (
+                  <div key={u.id} className="flex items-center justify-between p-3 rounded-xl border border-gray-200 bg-white hover:border-orange-200 hover:shadow-sm transition-all">
+                    <div className="flex items-center gap-3">
+                      <div className="h-10 w-10 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold">
+                        {(u.firstname?.[0] || u.idnumber[0]).toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-semibold text-gray-900 truncate">
+                          {((u.firstname || "") + " " + (u.lastname || "")).trim() || u.name || u.idnumber}
+                        </div>
+                        <div className="text-xs text-gray-500 truncate">
+                          {u.company || "N/A"}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setForm({ ...form, supervisorid: u.idnumber });
+                        setShowSupervisorModal(false);
+                      }}
+                      className="px-4 py-2 rounded-xl bg-[#F97316] text-white text-sm font-bold hover:bg-[#EA580C]"
+                    >
+                      Select
+                    </button>
+                  </div>
+                ))}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setShowSupervisorModal(false)}
+                className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -870,6 +1393,517 @@ export function ViewUserDetails({ user, users, onClose }: { user: User; users: U
   );
 }
 
+export function AssignSupervisorView({
+  users,
+  onRefresh,
+}: {
+  users: User[];
+  onRefresh?: () => void;
+}) {
+  const [studentSearch, setStudentSearch] = useState("");
+  const [supervisorSearch, setSupervisorSearch] = useState("");
+  const [studentCourseFilter, setStudentCourseFilter] = useState("");
+  const [studentSectionFilter, setStudentSectionFilter] = useState("");
+  const [supervisorCourseFilter, setSupervisorCourseFilter] = useState("");
+  const [supervisorSectionFilter, setSupervisorSectionFilter] = useState("");
+  const [selectedStudentIds, setSelectedStudentIds] = useState<Set<number>>(new Set());
+  const [selectedSupervisorId, setSelectedSupervisorId] = useState("");
+  const [assignLoading, setAssignLoading] = useState(false);
+  const [assignMessage, setAssignMessage] = useState<string | null>(null);
+
+  const unsupervisedStudents = useMemo(
+    () =>
+      users.filter(
+        (u) =>
+          String(u.role || "").toLowerCase() === "student" &&
+          (u.signup_status || "APPROVED") !== "PENDING" &&
+          (!u.supervisorid || u.supervisorid.trim() === "")
+      ),
+    [users]
+  );
+
+  const supervisors = useMemo(
+    () => users.filter((u) => String(u.role || "").toLowerCase() === "supervisor"),
+    [users]
+  );
+
+  const studentCourses = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          unsupervisedStudents
+            .map((s) => s.course)
+            .filter((c): c is string => !!c)
+        )
+      ).sort(),
+    [unsupervisedStudents]
+  );
+
+  const studentSections = useMemo(
+    () => {
+      const subset = studentCourseFilter
+        ? unsupervisedStudents.filter((s) => s.course === studentCourseFilter)
+        : unsupervisedStudents;
+      return Array.from(
+        new Set(
+          subset
+            .map((s) => s.section)
+            .filter((s): s is string => !!s)
+        )
+      ).sort();
+    },
+    [unsupervisedStudents, studentCourseFilter]
+  );
+
+  const supervisorCourses = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          supervisors
+            .flatMap((u) => String(u.course || "").split(",").map((s) => s.trim()))
+            .filter(Boolean)
+        )
+      ).sort(),
+    [supervisors]
+  );
+
+  const supervisorSections = useMemo(() => {
+    const subset = supervisorCourseFilter
+      ? supervisors.filter((u) =>
+          String(u.course || "")
+            .split(",")
+            .map((s) => s.trim())
+            .includes(supervisorCourseFilter)
+        )
+      : supervisors;
+    return Array.from(
+      new Set(
+        subset
+          .flatMap((u) => String(u.section || "").split(",").map((s) => s.trim()))
+          .filter(Boolean)
+      )
+    ).sort();
+  }, [supervisors, supervisorCourseFilter]);
+
+  const filteredStudents = useMemo(() => {
+    const term = studentSearch.trim().toLowerCase();
+    return unsupervisedStudents.filter((s) => {
+      if (studentCourseFilter && s.course !== studentCourseFilter) return false;
+      if (studentSectionFilter && s.section !== studentSectionFilter) return false;
+      if (!term) return true;
+      const name = `${s.firstname || ""} ${s.lastname || ""}`.toLowerCase();
+      const id = s.idnumber?.toLowerCase() || "";
+      const course = (s.course || "").toLowerCase();
+      const section = (s.section || "").toLowerCase();
+      return (
+        id.includes(term) ||
+        name.includes(term) ||
+        course.includes(term) ||
+        section.includes(term)
+      );
+    });
+  }, [unsupervisedStudents, studentSearch, studentCourseFilter, studentSectionFilter]);
+
+  const filteredSupervisors = useMemo(() => {
+    const term = supervisorSearch.trim().toLowerCase();
+    return supervisors.filter((u) => {
+      if (supervisorCourseFilter) {
+        const courses = String(u.course || "")
+          .split(",")
+          .map((s) => s.trim());
+        if (!courses.includes(supervisorCourseFilter)) return false;
+      }
+      if (supervisorSectionFilter) {
+        const sections = String(u.section || "")
+          .split(",")
+          .map((s) => s.trim());
+        if (!sections.includes(supervisorSectionFilter)) return false;
+      }
+      if (!term) return true;
+      const name = `${u.firstname || ""} ${u.lastname || ""}`.toLowerCase();
+      const company = (u.company || "").toLowerCase();
+      const location = (u.location || "").toLowerCase();
+      const id = u.idnumber?.toLowerCase() || "";
+      return (
+        id.includes(term) ||
+        name.includes(term) ||
+        company.includes(term) ||
+        location.includes(term)
+      );
+    });
+  }, [supervisors, supervisorSearch, supervisorCourseFilter, supervisorSectionFilter]);
+
+  const toggleStudent = (id: number) => {
+    setSelectedStudentIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAllStudents = () => {
+    setSelectedStudentIds((prev) => {
+      const ids = filteredStudents.map((s) => s.id);
+      if (ids.length === 0) return new Set<number>();
+      const allSelected = ids.every((id) => prev.has(id));
+      if (allSelected) return new Set<number>();
+      return new Set<number>(ids);
+    });
+  };
+
+  const handleAssign = async () => {
+    if (selectedStudentIds.size === 0 || !selectedSupervisorId) {
+      setAssignMessage("Select at least one student and a supervisor.");
+      return;
+    }
+    const supervisor = supervisors.find(
+      (u) => u.idnumber === selectedSupervisorId
+    );
+    const count = selectedStudentIds.size;
+    const supervisorLabel =
+      (supervisor &&
+        (`${supervisor.firstname || ""} ${supervisor.lastname || ""}`.trim() ||
+          supervisor.name ||
+          supervisor.idnumber)) ||
+      selectedSupervisorId;
+    const confirmed = window.confirm(
+      `Assign ${supervisorLabel} to ${count} student${count > 1 ? "s" : ""}?`
+    );
+    if (!confirmed) return;
+
+    try {
+      setAssignLoading(true);
+      setAssignMessage(null);
+      let actorId = "SYSTEM";
+      try {
+        actorId = localStorage.getItem("idnumber") || "SYSTEM";
+      } catch {}
+
+      for (const id of Array.from(selectedStudentIds)) {
+        try {
+          const res = await fetch(`/api/users/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              supervisorid: selectedSupervisorId,
+              actorId,
+              actorRole: "coordinator",
+              reason: "Bulk supervisor assignment",
+            }),
+          });
+          const json = await res.json();
+          if (!res.ok) {
+            throw new Error(json?.error || "Failed to assign supervisor");
+          }
+        } catch (e) {
+          const msg =
+            e instanceof Error ? e.message : "Failed to assign supervisor";
+          setAssignMessage(msg);
+          setAssignLoading(false);
+          return;
+        }
+      }
+
+      setSelectedStudentIds(new Set());
+      setSelectedSupervisorId("");
+      setStudentSearch("");
+      setSupervisorSearch("");
+      if (onRefresh) onRefresh();
+    } finally {
+      setAssignLoading(false);
+    }
+  };
+
+  const assignDisabled =
+    assignLoading ||
+    selectedStudentIds.size === 0 ||
+    !selectedSupervisorId ||
+    filteredStudents.length === 0;
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="mb-4">
+        <h2 className="text-xl font-extrabold text-gray-900 tracking-tight">
+          Assign Supervisor
+        </h2>
+      </div>
+
+      <div className="flex-1 p-4 bg-gray-50/30 max-h-[calc(100vh-180px)] overflow-y-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col min-h-[460px]">
+            <div className="p-4 border-b border-gray-100 flex items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                  Students Without Supervisor
+                </p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {unsupervisedStudents.length} total student
+                  {unsupervisedStudents.length === 1 ? "" : "s"} available
+                </p>
+              </div>
+              <button
+                onClick={toggleAllStudents}
+                disabled={filteredStudents.length === 0}
+                className="px-3 py-1.5 rounded-lg text-[11px] font-bold border border-gray-300 text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Select All
+              </button>
+            </div>
+            <div className="p-4 border-b border-gray-100">
+              <div className="relative">
+                <Search
+                  className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500"
+                  size={16}
+                />
+                <input
+                  value={studentSearch}
+                  onChange={(e) => setStudentSearch(e.target.value)}
+                  placeholder="Search by name, ID, course or section..."
+                  className="w-full pl-10 pr-3 py-2.5 bg-white border border-gray-300 rounded-xl text-sm placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                />
+              </div>
+              <div className="mt-3 flex flex-wrap sm:flex-nowrap gap-2">
+                <select
+                  value={studentCourseFilter}
+                  onChange={(e) => {
+                    setStudentCourseFilter(e.target.value);
+                    setStudentSectionFilter("");
+                  }}
+                  className="flex-1 min-w-0 px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs sm:text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                >
+                  <option value="">All Courses</option>
+                  {studentCourses.map((course) => (
+                    <option key={course} value={course}>
+                      {course}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={studentSectionFilter}
+                  onChange={(e) => setStudentSectionFilter(e.target.value)}
+                  className="flex-1 min-w-0 px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs sm:text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                >
+                  <option value="">All Sections</option>
+                  {studentSections.map((section) => (
+                    <option key={section} value={section}>
+                      {section}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto mt-2 space-y-2">
+              {filteredStudents.length === 0 ? (
+                <div className="p-6 text-center text-sm text-gray-500 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                  No students without supervisor match your filters.
+                </div>
+              ) : (
+                filteredStudents.map((s) => {
+                  const isSelected = selectedStudentIds.has(s.id);
+                  return (
+                    <button
+                      key={s.id}
+                      onClick={() => toggleStudent(s.id)}
+                      className={`w-full flex items-center gap-3 p-3 rounded-xl border bg-white text-left transition-all ${
+                        isSelected
+                          ? "border-[#F97316] bg-orange-50/60 shadow-sm"
+                          : "border-gray-200 hover:border-orange-200 hover:bg-orange-50/40"
+                      }`}
+                    >
+                      <div
+                        className={`h-5 w-5 rounded-md border flex items-center justify-center ${
+                          isSelected
+                            ? "border-[#F97316] bg-[#F97316]"
+                            : "border-gray-300 bg-white"
+                        }`}
+                      >
+                        {isSelected && (
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="white"
+                            strokeWidth="3"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <polyline points="20 6 9 17 4 12"></polyline>
+                          </svg>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="h-9 w-9 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center text-xs font-bold">
+                          {(s.firstname?.[0] || s.idnumber[0]).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-gray-900 truncate">
+                            {s.firstname} {s.lastname}
+                          </p>
+                          <p className="text-xs text-gray-500 truncate">
+                            {s.idnumber}{" "}
+                            {s.course && s.section && (
+                              <span className="ml-1">
+                                • {s.course} {s.section}
+                              </span>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col min-h-[460px]">
+            <div className="p-4 border-b border-gray-100 flex items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                  Choose Supervisor
+                </p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {supervisors.length} supervisor
+                  {supervisors.length === 1 ? "" : "s"} available
+                </p>
+              </div>
+              <div className="text-[11px] text-gray-500 font-medium">
+                {selectedStudentIds.size} selected student
+                {selectedStudentIds.size === 1 ? "" : "s"}
+              </div>
+            </div>
+            <div className="sticky top-0 z-10 bg-white px-4 py-2 border-b border-gray-100 flex flex-wrap sm:flex-nowrap justify-end gap-2">
+              <button
+                onClick={() => {
+                  setSelectedStudentIds(new Set());
+                  setSelectedSupervisorId("");
+                  setStudentSearch("");
+                  setSupervisorSearch("");
+                  setAssignMessage(null);
+                  setStudentCourseFilter("");
+                  setStudentSectionFilter("");
+                  setSupervisorCourseFilter("");
+                  setSupervisorSectionFilter("");
+                }}
+                className="px-3.5 py-1.5 rounded-2xl border border-gray-300 bg-white text-xs sm:text-sm font-semibold text-gray-700 hover:bg-gray-100 transition-colors"
+              >
+                Clear Selection
+              </button>
+              <button
+                onClick={handleAssign}
+                disabled={assignDisabled}
+                className="px-4 py-1.5 rounded-2xl bg-[#F97316] text-white text-xs sm:text-sm font-bold hover:bg-[#EA580C] transition-colors shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {assignLoading ? "Assigning..." : "Assign Supervisor"}
+              </button>
+            </div>
+            <div className="p-4 border-b border-gray-100">
+              <div className="relative">
+                <Search
+                  className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500"
+                  size={16}
+                />
+                <input
+                  value={supervisorSearch}
+                  onChange={(e) => setSupervisorSearch(e.target.value)}
+                  placeholder="Search by name, ID, company or location..."
+                  className="w-full pl-10 pr-3 py-2.5 bg-white border border-gray-300 rounded-xl text-sm placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                />
+              </div>
+              <div className="mt-3 flex flex-wrap sm:flex-nowrap gap-2">
+                <select
+                  value={supervisorCourseFilter}
+                  onChange={(e) => {
+                    setSupervisorCourseFilter(e.target.value);
+                    setSupervisorSectionFilter("");
+                  }}
+                  className="flex-1 min-w-0 px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs sm:text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                >
+                  <option value="">All Courses</option>
+                  {supervisorCourses.map((course) => (
+                    <option key={course} value={course}>
+                      {course}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={supervisorSectionFilter}
+                  onChange={(e) => setSupervisorSectionFilter(e.target.value)}
+                  className="flex-1 min-w-0 px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs sm:text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                >
+                  <option value="">All Sections</option>
+                  {supervisorSections.map((section) => (
+                    <option key={section} value={section}>
+                      {section}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto mt-2 space-y-2">
+              {filteredSupervisors.length === 0 ? (
+                <div className="p-6 text-center text-sm text-gray-500 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                  No supervisors match your search.
+                </div>
+              ) : (
+                filteredSupervisors.map((u) => {
+                  const isActive = selectedSupervisorId === u.idnumber;
+                  return (
+                    <button
+                      key={u.id}
+                      onClick={() =>
+                        setSelectedSupervisorId(
+                          selectedSupervisorId === u.idnumber ? "" : u.idnumber
+                        )
+                      }
+                      className={`w-full flex items-center justify-between p-3 rounded-xl border bg-white text-left transition-all ${
+                        isActive
+                          ? "border-[#F97316] bg-orange-50/60 shadow-sm"
+                          : "border-gray-200 hover:border-orange-200 hover:bg-orange-50/40"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="h-9 w-9 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center text-xs font-bold">
+                          {(u.firstname?.[0] || u.idnumber[0]).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-gray-900 truncate">
+                            {`${u.firstname || ""} ${u.lastname || ""}`.trim() ||
+                              u.name ||
+                              u.idnumber}
+                          </p>
+                          <p className="text-xs text-gray-500 truncate">
+                            {u.idnumber} • {u.company || "Company N/A"}{" "}
+                            {u.location && `• ${u.location}`}
+                          </p>
+                        </div>
+                      </div>
+                      {isActive && (
+                        <div className="h-6 w-6 rounded-full bg-[#F97316] text-white flex items-center justify-center text-xs font-bold">
+                          ✓
+                        </div>
+                      )}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+
+        {assignMessage && (
+          <div className="mt-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-3">
+            {assignMessage}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function UsersView({ 
   role, 
   users, 
@@ -878,7 +1912,10 @@ export function UsersView({
   onAdd, 
   onEdit, 
   onView, 
-  onDelete 
+  onDelete,
+  onApprove,
+  instructorApprovalStatuses,
+  onToggleInstructorApproval,
 }: { 
   role: RoleType; 
   users: User[]; 
@@ -888,42 +1925,53 @@ export function UsersView({
   onEdit: (user: User) => void;
   onView: (user: User) => void;
   onDelete: (user: User) => void;
+  onApprove?: (user: User) => void;
+  instructorApprovalStatuses?: Record<string, boolean>;
+  onToggleInstructorApproval?: (idnumber: string, current: boolean) => void;
 }) {
   const [search, setSearch] = useState("");
   const [courseFilter, setCourseFilter] = useState("");
   const [sectionFilter, setSectionFilter] = useState("");
   const title = role.charAt(0).toUpperCase() + role.slice(1) + "s";
 
-  const { filteredUsers, availableCourses: courses, availableSections: sections } = useMemo(() => {
+  const { activeUsers, pendingUsers, availableCourses: courses, availableSections: sections } = useMemo(() => {
     const s = search.toLowerCase();
     const targetRole = role.toLowerCase();
     
-    // First get all users for this role to determine available courses/sections
+    // First get all users for this role
     const roleUsers = users.filter(u => u.role?.toLowerCase() === targetRole);
     
-    // Extract unique courses and sections from the users present (or use props if you prefer strictly metadata)
-    // But typically we want to filter by what's actually there + metadata
     const userCourses = Array.from(new Set(roleUsers.map(u => u.course).filter(Boolean))).sort() as string[];
     const userSections = Array.from(new Set(roleUsers.map(u => u.section).filter(Boolean))).sort() as string[];
     
-    // We can also use the availableCourses prop if we want to show options even if no user has them
-    // For now, let's stick to what's in the data + maybe metadata if needed
-    // The previous implementation derived it from users, let's stick to that for consistency
-    
-    const filtered = roleUsers.filter(u => 
+    const filterFn = (u: User) => 
       (courseFilter === "" || u.course === courseFilter) &&
       (sectionFilter === "" || u.section === sectionFilter) &&
       (u.idnumber?.toLowerCase().includes(s) || 
        u.firstname?.toLowerCase().includes(s) || 
-       u.lastname?.toLowerCase().includes(s))
-    );
+       u.lastname?.toLowerCase().includes(s));
 
-    return { filteredUsers: filtered, availableCourses: userCourses, availableSections: userSections };
+    let active: User[] = [];
+    // We don't show pending users in the main views anymore - they go to ApprovalsView (for students)
+    // or are treated as active (for others who don't need approval)
+    
+    if (role === 'student') {
+      active = roleUsers.filter(u => u.signup_status !== 'PENDING').filter(filterFn);
+    } else {
+      // For instructors/supervisors, show everyone in the main list as they don't need approval
+      active = roleUsers.filter(filterFn);
+    }
+
+    return { 
+      activeUsers: active, 
+      pendingUsers: [] as User[], // Always empty to hide the pending section in main views
+      availableCourses: userCourses, 
+      availableSections: userSections 
+    };
   }, [users, role, search, courseFilter, sectionFilter]);
 
   return (
     <div className="flex flex-col h-full bg-white rounded-3xl border border-gray-200 shadow-sm overflow-hidden">
-      {/* Header */}
       <div className="px-6 py-5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white">
         <div>
           <h2 className="text-xl font-extrabold text-gray-900 tracking-tight">{title} Directory</h2>
@@ -931,13 +1979,26 @@ export function UsersView({
             Manage and monitor {role} accounts
           </p>
         </div>
-        <button 
-          onClick={onAdd}
-          className="flex items-center justify-center gap-2 bg-[#F97316] text-white px-5 py-2.5 rounded-xl text-sm font-bold hover:bg-[#EA580C] transition-all shadow-md hover:shadow-lg active:scale-95"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-          Add New {role}
-        </button>
+        <button
+            onClick={onAdd}
+            className="flex items-center justify-center gap-2 bg-[#F97316] text-white px-5 py-2.5 rounded-xl text-sm font-bold hover:bg-[#EA580C] transition-all shadow-md hover:shadow-lg active:scale-95"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Add New {role}
+          </button>
       </div>
 
       {/* Search & Filter */}
@@ -979,65 +2040,157 @@ export function UsersView({
         )}
       </div>
 
-      {/* List */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50/30">
-        {filteredUsers.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-64 text-gray-400">
-            <div className="p-4 rounded-full bg-gray-100 mb-3">
-              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-gray-50/30">
+        {pendingUsers.length > 0 && (
+          <div className="animate-in fade-in slide-in-from-top-4 duration-500">
+            <div className="flex items-center gap-2 mb-3 px-1">
+              <div className="h-2 w-2 rounded-full bg-orange-500 animate-pulse"></div>
+              <h3 className="text-xs font-bold text-orange-600 uppercase tracking-widest">Pending Approvals</h3>
+              <span className="bg-orange-100 text-orange-700 text-[10px] font-bold px-2 py-0.5 rounded-full">{pendingUsers.length}</span>
             </div>
-            <p className="font-medium">No {role}s found matching your criteria.</p>
-          </div>
-        ) : (
-          filteredUsers.map((user) => (
-            <div key={user.id} className="group flex items-center justify-between p-4 rounded-2xl bg-white border border-gray-100 hover:border-orange-200 hover:shadow-md transition-all duration-200">
-              <div className="flex items-center gap-4 overflow-hidden">
-                <div className="flex-shrink-0 h-12 w-12 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-lg">
-                  {(user.firstname?.[0] || user.idnumber[0]).toUpperCase()}
-                </div>
-                <div className="min-w-0">
-                  <h3 className="font-bold text-gray-900 text-sm sm:text-base truncate">
-                    {user.firstname} {user.lastname}
-                  </h3>
-                  <div className="flex items-center gap-2 text-xs sm:text-sm text-gray-500">
-                    <span className="font-medium text-gray-600 bg-gray-100 px-2 py-0.5 rounded-md">{user.idnumber}</span>
-                    {user.course && (
-                      <span className="truncate">
-                        • {user.role === 'instructor' 
-                            ? formatCourseSection(user.course, user.section) 
-                            : `${user.course} - ${user.section}`}
-                      </span>
+            <div className="space-y-3">
+              {pendingUsers.map((user) => (
+                <div key={user.id} className="group flex items-center justify-between p-4 rounded-2xl bg-orange-50 border border-orange-100 shadow-sm hover:shadow-md transition-all duration-200">
+                  <div className="flex items-center gap-4 overflow-hidden">
+                    <div className="flex-shrink-0 h-12 w-12 rounded-full bg-white text-[#F97316] border border-orange-200 flex items-center justify-center font-bold text-lg shadow-sm">
+                      {(user.firstname?.[0] || user.idnumber[0]).toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-bold text-gray-900 text-sm sm:text-base truncate">
+                          {user.firstname} {user.lastname}
+                        </h3>
+                        <span className="px-2 py-0.5 bg-orange-200 text-orange-800 text-[10px] font-bold rounded-md uppercase tracking-wide">Pending</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs sm:text-sm text-gray-600 mt-0.5">
+                        <span className="font-medium bg-white/50 px-2 py-0.5 rounded-md border border-orange-100">{user.idnumber}</span>
+                        {user.course && (
+                          <span className="truncate">
+                            • {user.role === 'instructor' 
+                                ? formatCourseSection(user.course, user.section) 
+                                : `${user.course} - ${user.section}`}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {onApprove && (
+                      <button 
+                        onClick={() => onApprove(user)}
+                        className="px-4 py-2 bg-[#F97316] text-white text-xs font-bold rounded-xl hover:bg-[#EA580C] shadow-sm hover:shadow-orange-200 transition-all active:scale-95"
+                      >
+                        Approve
+                      </button>
                     )}
-                    {user.company && <span className="truncate">• {user.company}</span>}
+                    <button 
+                      onClick={() => onDelete(user)}
+                      className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
+                      title="Reject / Delete"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
                   </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-1 opacity-100 sm:opacity-0 group-hover:opacity-100 transition-all duration-200">
-                <button 
-                  onClick={() => onView(user)}
-                  className="p-2.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-colors"
-                  title="View Details"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                </button>
-                <button 
-                  onClick={() => onEdit(user)}
-                  className="p-2.5 text-gray-400 hover:text-[#F97316] hover:bg-orange-50 rounded-xl transition-colors"
-                  title="Edit User"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
-                </button>
-                <button 
-                  onClick={() => onDelete(user)}
-                  className="p-2.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
-                  title="Delete User"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path></svg>
-                </button>
-              </div>
+              ))}
             </div>
-          ))
+          </div>
         )}
+
+        <div>
+          {pendingUsers.length > 0 && activeUsers.length > 0 && (
+             <div className="flex items-center gap-2 mb-3 px-1 mt-2">
+               <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest">Active Accounts</h3>
+             </div>
+          )}
+          
+          <div className="space-y-3">
+            {activeUsers.length === 0 && pendingUsers.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+                <div className="p-4 rounded-full bg-gray-100 mb-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                </div>
+                <p className="font-medium">No {role}s found matching your criteria.</p>
+              </div>
+            ) : (
+              activeUsers.map((user) => {
+                const isInstructor = role === "instructor";
+                const approvalAllowed = isInstructor
+                  ? instructorApprovalStatuses?.[user.idnumber] ?? true
+                  : undefined;
+                return (
+                  <div key={user.id} className="group flex items-center justify-between p-4 rounded-2xl bg-white border border-gray-100 hover:border-orange-200 hover:shadow-md transition-all duration-200">
+                    <div className="flex items-center gap-4 overflow-hidden">
+                      <div className="flex-shrink-0 h-12 w-12 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-lg">
+                        {(user.firstname?.[0] || user.idnumber[0]).toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <h3 className="font-bold text-gray-900 text-sm sm:text-base truncate">
+                          {user.firstname} {user.lastname}
+                        </h3>
+                        <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm text-gray-500">
+                          <span className="font-medium text-gray-600 bg-gray-100 px-2 py-0.5 rounded-md">{user.idnumber}</span>
+                          {user.course && (
+                            <span className="truncate">
+                              • {user.role === 'instructor' 
+                                  ? formatCourseSection(user.course, user.section) 
+                                  : `${user.course} - ${user.section}`}
+                            </span>
+                          )}
+                          {user.company && <span className="truncate">• {user.company}</span>}
+                        </div>
+                        {isInstructor && approvalAllowed !== undefined && onToggleInstructorApproval && (
+                          <div className="mt-2 flex items-center gap-3">
+                            <span className="text-[11px] font-semibold text-gray-600 uppercase tracking-wider">
+                              Account Approval
+                            </span>
+                            <label className="flex items-center gap-2 cursor-pointer select-none">
+                              <span className="text-[11px] text-gray-500">
+                                {approvalAllowed ? "Enabled" : "Restricted"}
+                              </span>
+                              <div className="relative">
+                                <input
+                                  type="checkbox"
+                                  className="sr-only peer"
+                                  checked={approvalAllowed}
+                                  onChange={() => onToggleInstructorApproval(user.idnumber, approvalAllowed)}
+                                />
+                                <div className="w-10 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all" />
+                              </div>
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 opacity-100 sm:opacity-0 group-hover:opacity-100 transition-all duration-200">
+                      <button 
+                        onClick={() => onView(user)}
+                        className="p-2.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-colors"
+                        title="View Details"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                      </button>
+                      <button 
+                        onClick={() => onEdit(user)}
+                        className="p-2.5 text-gray-400 hover:text-[#F97316] hover:bg-orange-50 rounded-xl transition-colors"
+                        title="Edit User"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                      </button>
+                      <button 
+                        onClick={() => onDelete(user)}
+                        className="p-2.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
+                        title="Delete User"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path></svg>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

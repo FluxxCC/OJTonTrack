@@ -10,8 +10,11 @@ export function getSupabaseAdmin() {
     throw new Error("supabaseAdmin is server-only");
   }
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-  if (!publicUrl || !serviceKey) {
-    return null;
+  if (publicUrl && serviceKey) {
+    return createClient(publicUrl, serviceKey);
   }
-  return createClient(publicUrl, serviceKey);
+  if (publicUrl && publicAnon) {
+    return createClient(publicUrl, publicAnon);
+  }
+  return null;
 }

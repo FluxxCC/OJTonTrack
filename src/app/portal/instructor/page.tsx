@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState, useRef } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import citeLogo from "../../../../assets/CITE.png";
-import { supabase } from "../../../lib/supabaseClient";
+import { supabase } from "@/lib/supabaseClient";
 import type { RealtimePostgresChangesPayload, RealtimeChannel } from "@supabase/supabase-js";
 import { 
   LayoutDashboard, 
@@ -17,9 +17,16 @@ import {
   ChevronLeft,
   ChevronDown,
   Search,
+  RefreshCw,
   X,
   Clock,
-  CheckCircle2
+  CheckCircle2,
+  ClipboardCheck,
+  UserCheck,
+  Download,
+  MessageSquare,
+  Calendar,
+  ShieldAlert
 } from 'lucide-react';
 import { 
   ResponsiveContainer,
@@ -31,14 +38,20 @@ import {
   Tooltip
 } from 'recharts';
 import { AttendanceDetailsModal } from "@/components/AttendanceDetailsModal";
-import { UsersView, AddUserForm, EditUserForm, ViewUserDetails, Modal, ConfirmationModal, SuccessModal } from './ui';
- 
+import { UsersView, AddUserForm, EditUserForm, ViewUserDetails, Modal, ConfirmationModal, SuccessModal, AlertModal } from './ui';
+
+
+// --- Global Cache for Reports ---
+let cachedReportsData: ReportEntry[] | null = null;
+let lastReportsFetchTime = 0;
+const REPORTS_CACHE_DURATION = 300000; // 5 minutes
+
 
 // --- Types ---
 
-type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved"; approvedAt?: number; approvedBy?: string };
-type ServerAttendanceEntry = { type: "in" | "out"; ts: number; photourl: string; status?: string; approvedby?: string | null; approvedat?: string | null };
-type ReportEntry = { id: number; title?: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string };
+type AttendanceEntry = { idnumber: string; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; validatedBy?: string };
+type ServerAttendanceEntry = { idnumber: string; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null; validated_at?: string | null };
+type ReportEntry = { id: number; title?: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string; idnumber?: string; isViewedByInstructor?: boolean };
 type ReportFile = { name?: string; type?: string } | null;
 type ReportFiles = ReportFile[] | ReportFile | undefined;
 type User = {
@@ -55,11 +68,13 @@ type User = {
   supervisorid?: string;
   courseIds?: number[];
   sectionIds?: number[];
+  status?: string;
+  signup_status?: string;
 };
 
 type Course = { id: number; name: string; name_key: string };
 type Section = { id: number; name: string; code: string; course_id: number };
-type TabId = "dashboard" | "students" | "users" | "profile";
+type TabId = "attendance" | "reports" | "approval" | "profile";
 type ReportRow = { id: number; idnumber: string; title?: string | null; text?: string | null; files?: ReportFiles; ts?: number | null; submittedat?: string | null; instructor_comment?: string | null; status?: string | null };
 type ApiReport = { id: number; title?: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string | null; status?: string };
 type EvaluationDetail = { createdAt: number; supervisorId?: string; comment?: string; interpretation?: string; criteria: Record<string, number>; overallScore?: number };
@@ -472,8 +487,7 @@ const StudentDetailsPanel = ({
     const [now, setNow] = useState(() => Date.now());
     
     // Evaluation Toggle State
-    const [showEvalConfirm, setShowEvalConfirm] = useState(false);
-    const [pendingEvalToggle, setPendingEvalToggle] = useState<string | null>(null);
+    const [showEvalRestriction, setShowEvalRestriction] = useState(false);
 
     const handleToggleClick = (idnumber: string, current: boolean) => {
         if (current) {
@@ -484,8 +498,7 @@ const StudentDetailsPanel = ({
             const baseMs = attendanceSummary[idnumber] || 0;
             const hours = baseMs / (1000 * 60 * 60);
             if (hours < 486) {
-                setPendingEvalToggle(idnumber);
-                setShowEvalConfirm(true);
+                setShowEvalRestriction(true);
             } else {
                 toggleEvaluation(idnumber, current);
             }
@@ -751,23 +764,17 @@ const StudentDetailsPanel = ({
                 </div>
             </div>
 
-            {/* Confirmation Modal for Evaluation */}
-            {showEvalConfirm && (
+            {showEvalRestriction && selected && (
                 <ConfirmationModal 
-                    title="Enable Evaluation?"
-                    message="Are you sure you want to enable evaluation? The student hasn't reached the requirements."
-                    confirmLabel="Yes, Enable"
+                    title="Requirements Not Met"
+                    message="The student hasn't reached the requirements. Total validated time must be at least 486 hours. Do you still want to enable the evaluation for this student?"
+                    confirmLabel="Yes, enable evaluation"
+                    onCancel={() => setShowEvalRestriction(false)}
                     onConfirm={() => {
-                        if (pendingEvalToggle) {
-                            toggleEvaluation(pendingEvalToggle, false); 
-                            setShowEvalConfirm(false);
-                            setPendingEvalToggle(null);
-                        }
+                        toggleEvaluation(selected.idnumber, evaluationStatuses[selected.idnumber] || false);
+                        setShowEvalRestriction(false);
                     }}
-                    onCancel={() => {
-                        setShowEvalConfirm(false);
-                        setPendingEvalToggle(null);
-                    }}
+                    variant="warning"
                 />
             )}
         </>
@@ -798,8 +805,1228 @@ interface StudentsViewProps {
   onViewedChange?: () => void;
 }
 
-const StudentsView = ({
-  students,
+  const StudentAttendanceDetailView = ({ 
+    student, 
+    attendance, 
+    onBack,
+    evaluationStatuses,
+    toggleEvaluation,
+  }: { 
+    student: User, 
+    attendance: AttendanceEntry[], 
+    onBack: () => void,
+    evaluationStatuses: Record<string, boolean>,
+    toggleEvaluation: (id: string, current: boolean) => void,
+  }) => {
+    const [now, setNow] = useState(() => Date.now());
+    const [monthFilter, setMonthFilter] = useState("");
+
+    useEffect(() => {
+        const id = setInterval(() => setNow(Date.now()), 60000);
+        return () => clearInterval(id);
+    }, []);
+
+    const monthOptions = useMemo(() => {
+        const map = new Map<string, string>();
+        attendance
+          .filter(a => (a as any).idnumber === student.idnumber)
+          .forEach(a => {
+            const d = new Date(a.timestamp);
+            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+            const label = d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+            if (!map.has(key)) {
+              map.set(key, label);
+            }
+          });
+        return Array.from(map.entries())
+          .sort((a, b) => a[0].localeCompare(b[0]))
+          .map(([value, label]) => ({ value, label }));
+    }, [attendance, student.idnumber]);
+
+    const filteredAttendance = useMemo(() => {
+        if (!monthFilter) return attendance;
+        return attendance.filter(a => {
+          if ((a as any).idnumber !== student.idnumber) return false;
+          const d = new Date(a.timestamp);
+          const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+          return key === monthFilter;
+        });
+    }, [attendance, monthFilter, student.idnumber]);
+
+    const statusCounts = useMemo(() => {
+        const counts = { Pending: 0, Approved: 0, Rejected: 0 };
+        filteredAttendance
+          .filter(a => (a as any).idnumber === student.idnumber)
+          .forEach(a => {
+            const s = a.status || "Pending";
+            if (s === "Approved") counts.Approved += 1;
+            else if (s === "Rejected") counts.Rejected += 1;
+            else counts.Pending += 1;
+          });
+        return counts;
+    }, [filteredAttendance, student.idnumber]);
+
+    // Helper to format hours
+    const formatHours = (ms: number) => {
+        if (!ms) return "0h 0m 0s";
+        const totalSeconds = Math.floor(ms / 1000);
+        const h = Math.floor(totalSeconds / 3600);
+        const m = Math.floor((totalSeconds % 3600) / 60);
+        const s = totalSeconds % 60;
+        return `${h}h ${m}m ${s}s`;
+    };
+
+    // Helper to format time
+    const formatTime = (ts: number) => {
+        return new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    };
+
+    const { days, overallTotal, overallValidated } = useMemo(() => {
+        const studentLogs = filteredAttendance.filter(a => (a as any).idnumber === student.idnumber);
+
+        const grouped = new Map<string, { date: Date; logs: AttendanceEntry[] }>();
+        studentLogs.forEach(log => {
+            const date = new Date(log.timestamp);
+            const key = date.toLocaleDateString();
+            if (!grouped.has(key)) grouped.set(key, { date, logs: [] });
+            grouped.get(key)!.logs.push(log);
+        });
+
+        let totalMsAll = 0;
+        let totalValidatedMsAll = 0;
+
+        const processedDays = Array.from(grouped.values())
+            .sort((a, b) => b.date.getTime() - a.date.getTime())
+            .map(day => {
+                const dayLogs = day.logs.sort((a, b) => a.timestamp - b.timestamp);
+
+                let dayRawMs = 0;
+                let dayValidatedRawMs = 0;
+                let inTs: number | null = null;
+                let approvedInTs: number | null = null;
+                dayLogs.forEach(log => {
+                    if (log.type === "in") {
+                        inTs = log.timestamp;
+                        if (log.status === "Approved") {
+                            approvedInTs = log.timestamp;
+                        }
+                    } else if (log.type === "out" && inTs !== null) {
+                        if (log.timestamp > inTs) {
+                            dayRawMs += log.timestamp - inTs;
+                        }
+                        inTs = null;
+                        if (approvedInTs !== null && log.status === "Approved" && log.timestamp > approvedInTs) {
+                            dayValidatedRawMs += log.timestamp - approvedInTs;
+                            approvedInTs = null;
+                        }
+                    }
+                });
+
+                if (inTs !== null) {
+                    if (now > inTs) {
+                        dayRawMs += now - inTs;
+                    }
+                }
+
+                const dayDate = new Date(day.date);
+                dayDate.setHours(0, 0, 0, 0);
+
+                const buildShift = (timeStr: string) => {
+                    const [h, m] = timeStr.split(":").map(Number);
+                    const d = new Date(dayDate.getTime());
+                    d.setHours(h || 0, m || 0, 0, 0);
+                    return d.getTime();
+                };
+
+                let schedule: {
+                    amIn: number;
+                    amOut: number;
+                    pmIn: number;
+                    pmOut: number;
+                    otStart: number;
+                    otEnd: number;
+                };
+
+                try {
+                    const stored = localStorage.getItem(`schedule_${student.idnumber}`) || localStorage.getItem("schedule_default");
+                    if (stored) {
+                        const parsed = JSON.parse(stored);
+                        const amInTs = buildShift(parsed.amIn || "07:00");
+                        const amOutTs = buildShift(parsed.amOut || "11:00");
+                        const pmInTs = buildShift(parsed.pmIn || "13:00");
+                        const pmOutTs = buildShift(parsed.pmOut || "17:00");
+                        const otInTs = buildShift(parsed.overtimeIn || "17:00");
+                        const otOutTs = buildShift(parsed.overtimeOut || "18:00");
+                        schedule = {
+                            amIn: amInTs,
+                            amOut: amOutTs,
+                            pmIn: pmInTs,
+                            pmOut: pmOutTs,
+                            otStart: otInTs,
+                            otEnd: otOutTs,
+                        };
+                    } else {
+                        schedule = {
+                            amIn: buildShift("07:00"),
+                            amOut: buildShift("11:00"),
+                            pmIn: buildShift("13:00"),
+                            pmOut: buildShift("17:00"),
+                            otStart: buildShift("17:00"),
+                            otEnd: buildShift("18:00"),
+                        };
+                    }
+                } catch {
+                    schedule = {
+                        amIn: buildShift("07:00"),
+                        amOut: buildShift("11:00"),
+                        pmIn: buildShift("13:00"),
+                        pmOut: buildShift("17:00"),
+                        otStart: buildShift("17:00"),
+                        otEnd: buildShift("18:00"),
+                    };
+                }
+
+                const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+
+                const computeShiftDuration = (
+                    logs: AttendanceEntry[],
+                    windowStart: number,
+                    windowEnd: number,
+                    requireApproved: boolean
+                ) => {
+                    const earlyWindowStart = windowStart - 30 * 60 * 1000;
+                    let currentIn: number | null = null;
+                    let duration = 0;
+
+                    logs.forEach(log => {
+                        if (requireApproved && log.status !== "Approved") return;
+                        if (log.type === "in") {
+                            if (log.timestamp > windowEnd) return;
+                            if (log.timestamp < earlyWindowStart) return;
+                            const effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
+                            currentIn = effectiveIn;
+                        } else if (log.type === "out") {
+                            if (currentIn === null) return;
+                            const effectiveOut = clamp(log.timestamp, windowStart, windowEnd);
+                            if (effectiveOut > currentIn) {
+                                duration += effectiveOut - currentIn;
+                            }
+                            currentIn = null;
+                        }
+                    });
+
+                    if (!requireApproved && currentIn !== null) {
+                        const effectiveOut = clamp(now, windowStart, windowEnd);
+                        if (effectiveOut > currentIn) {
+                            duration += effectiveOut - currentIn;
+                        }
+                    }
+
+                    return duration;
+                };
+
+                const dayTotalAm = computeShiftDuration(dayLogs, schedule.amIn, schedule.amOut, false);
+                const dayTotalPm = computeShiftDuration(dayLogs, schedule.pmIn, schedule.pmOut, false);
+                const dayTotalOt = computeShiftDuration(dayLogs, schedule.otStart, schedule.otEnd, false);
+
+                const dayValidatedAm = computeShiftDuration(dayLogs, schedule.amIn, schedule.amOut, true);
+                const dayValidatedPm = computeShiftDuration(dayLogs, schedule.pmIn, schedule.pmOut, true);
+                const dayValidatedOt = computeShiftDuration(dayLogs, schedule.otStart, schedule.otEnd, true);
+
+                const dayTotalMs = dayTotalAm + dayTotalPm + dayTotalOt;
+                const dayValidatedMs = dayValidatedAm + dayValidatedPm + dayValidatedOt;
+
+                totalMsAll += dayTotalMs;
+                totalValidatedMsAll += dayValidatedMs;
+
+                const classifySegment = (ts: number) => {
+                    const h = new Date(ts).getHours();
+                    return h < 12 ? "morning" : "afternoon";
+                };
+
+                const morningSegLogs = dayLogs.filter(l => classifySegment(l.timestamp) === "morning");
+                const afternoonSegLogs = dayLogs.filter(l => classifySegment(l.timestamp) === "afternoon");
+
+                const s1: AttendanceEntry | null = morningSegLogs.find(l => l.type === "in") || null;
+                const s2: AttendanceEntry | null = [...morningSegLogs].filter(l => l.type === "out").pop() || null;
+                const s3: AttendanceEntry | null = afternoonSegLogs.find(l => l.type === "in") || null;
+                const s4: AttendanceEntry | null = [...afternoonSegLogs].filter(l => l.type === "out").pop() || null;
+
+                const s5: AttendanceEntry | null =
+                    (() => {
+                        const overtimeLogs = dayLogs.filter(
+                            l => l.timestamp >= schedule.otStart && l.timestamp <= schedule.otEnd
+                        );
+                        return overtimeLogs.find(l => l.type === "in") || null;
+                    })();
+
+                const s6: AttendanceEntry | null =
+                    (() => {
+                        const overtimeLogs = dayLogs.filter(
+                            l => l.timestamp >= schedule.otStart && l.timestamp <= schedule.otEnd
+                        );
+                        return [...overtimeLogs].filter(l => l.type === "out").pop() || null;
+                    })();
+
+                const overtimeMs = dayTotalOt;
+
+                return { date: day.date, s1, s2, s3, s4, s5, s6, dayTotalMs, overtimeMs, dayTotalMsScheduled: dayTotalMs };
+            });
+
+        return { days: processedDays, overallTotal: totalMsAll, overallValidated: totalValidatedMsAll };
+    }, [student, filteredAttendance, now]);
+
+    const [showEvalRestriction, setShowEvalRestriction] = useState(false);
+    const [detailEvaluation, setDetailEvaluation] = useState<EvaluationDetail | null>(null);
+    const [isDetailEvalModalOpen, setDetailEvalModalOpen] = useState(false);
+
+    const handleToggleClick = () => {
+        const current = evaluationStatuses[student.idnumber] || false;
+        if (current) {
+            toggleEvaluation(student.idnumber, current);
+            return;
+        }
+        const hours = overallValidated / (1000 * 60 * 60);
+        if (hours < 486) {
+            setShowEvalRestriction(true);
+        } else {
+            toggleEvaluation(student.idnumber, current);
+        }
+    };
+
+    useEffect(() => {
+        if (!student?.idnumber) {
+            setDetailEvaluation(null);
+            return;
+        }
+
+        const fetchEval = async () => {
+            try {
+                const res = await fetch(`/api/evaluation?idnumber=${encodeURIComponent(student.idnumber)}`, { cache: "no-store" });
+                const json = await res.json();
+                if (res.ok && json.evaluation) {
+                    const ev = json.evaluation;
+                    const created = ev.createdAt ? Number(new Date(ev.createdAt).getTime()) : Date.now();
+                    setDetailEvaluation({
+                        createdAt: created,
+                        supervisorId: ev.supervisorId,
+                        comment: ev.comment || "",
+                        interpretation: ev.interpretation || "",
+                        criteria: ev.criteria || {},
+                        overallScore: ev.overall
+                    });
+                } else {
+                    setDetailEvaluation(null);
+                }
+            } catch {
+                setDetailEvaluation(null);
+            }
+        };
+
+        fetchEval();
+
+        if (!supabase) return;
+        const channel = supabase
+            .channel(`evaluation_updates_detail_${student.idnumber}`)
+            .on(
+                'postgres_changes',
+                { 
+                    event: '*', 
+                    schema: 'public', 
+                    table: 'evaluation_forms',
+                    filter: `student_id=eq.${student.idnumber}`
+                },
+                () => {
+                    fetchEval();
+                }
+            )
+            .subscribe();
+
+        return () => {
+            try { supabase?.removeChannel(channel); } catch {}
+        };
+    }, [student.idnumber]);
+
+    return (
+        <>
+        <div className="space-y-6 animate-in slide-in-from-right duration-300">
+            <div className="flex items-center gap-4">
+                <button 
+                    onClick={onBack}
+                    className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                >
+                    <ChevronLeft size={24} className="text-gray-600" />
+                </button>
+                <div>
+                    <h1 className="text-2xl font-bold text-gray-900">{student.lastname}, {student.firstname}</h1>
+                    <p className="text-gray-500">{student.course} {student.section} • Attendance Detail</p>
+                </div>
+            </div>
+
+            {/* Summary Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-blue-50 p-4 rounded-2xl border border-blue-100 flex items-center justify-between shadow-sm">
+                    <div>
+                        <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">Total Hours</p>
+                        <p className="text-2xl font-bold text-blue-900">{formatHours(overallTotal)}</p>
+                    </div>
+                    <div className="p-2 bg-blue-100 rounded-xl">
+                         <Clock className="text-blue-600" size={20} />
+                    </div>
+                </div>
+                <div className="bg-green-50 p-4 rounded-2xl border border-green-100 flex items-center justify-between shadow-sm">
+                    <div>
+                        <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-1">Total Validated Time</p>
+                        <p className="text-2xl font-bold text-green-900">{formatHours(overallValidated)}</p>
+                        <p className="text-[11px] text-gray-600 mt-1">Requirement: 486 hours validated</p>
+                    </div>
+                    <div className="p-2 bg-green-100 rounded-xl">
+                        <ClipboardCheck className="text-green-600" size={20} />
+                    </div>
+                </div>
+            </div>
+
+            <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-lg ${detailEvaluation ? "bg-green-100 text-green-600" : "bg-gray-100 text-gray-500"}`}>
+                        {detailEvaluation ? <CheckCircle2 size={20} /> : <Clock size={20} />}
+                    </div>
+                    <div>
+                        <p className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-1">Supervisor Evaluation</p>
+                        <p className={`text-sm font-bold ${detailEvaluation ? "text-green-900" : "text-gray-900"}`}>
+                            {detailEvaluation ? "Evaluation Submitted" : "No evaluation yet"}
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                            {detailEvaluation
+                                ? `Overall score: ${Number(detailEvaluation.overallScore ?? 0).toFixed(1)}% • ${new Date(detailEvaluation.createdAt).toLocaleDateString()}`
+                                : evaluationStatuses[student.idnumber]
+                                    ? "Waiting for supervisor to submit."
+                                    : "Enable evaluation once requirements are met."}
+                        </p>
+                    </div>
+                </div>
+                <div className="flex flex-col items-stretch md:items-end gap-2">
+                    <label className="flex items-center gap-3 cursor-pointer select-none bg-gray-50 px-3 py-2 rounded-xl border border-gray-200 hover:border-gray-300 transition-colors">
+                        <span className="text-xs text-gray-700 font-medium">Allow Evaluation</span>
+                        <div className="relative">
+                            <input 
+                                type="checkbox" 
+                                className="sr-only peer"
+                                checked={evaluationStatuses[student.idnumber] || false}
+                                onChange={handleToggleClick}
+                            />
+                            <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-500"></div>
+                        </div>
+                    </label>
+                    <button
+                        type="button"
+                        onClick={() => { if (detailEvaluation) setDetailEvalModalOpen(true); }}
+                        disabled={!detailEvaluation}
+                        className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+                            detailEvaluation
+                                ? "bg-white text-green-700 border border-green-200 hover:bg-green-50 shadow-sm"
+                                : "bg-gray-200 text-gray-400 cursor-not-allowed"
+                        }`}
+                    >
+                        View Evaluation Details
+                    </button>
+                </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap gap-2 text-[11px]">
+                    <span className="px-3 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-700 font-medium">
+                        Pending: {statusCounts.Pending}
+                    </span>
+                    <span className="px-3 py-1 rounded-full border border-green-100 bg-green-50 text-green-700 font-medium">
+                        Validated: {statusCounts.Approved}
+                    </span>
+                    <span className="px-3 py-1 rounded-full border border-red-100 bg-red-50 text-red-700 font-medium">
+                        Unvalidated: {statusCounts.Rejected}
+                    </span>
+                </div>
+                <div className="w-full sm:w-40">
+                    <select
+                        value={monthFilter}
+                        onChange={e => setMonthFilter(e.target.value)}
+                        className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-900 bg-white focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                    >
+                        <option value="">All months</option>
+                        {monthOptions.map(opt => (
+                            <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left">
+                        <thead className="bg-gray-50 text-xs uppercase text-gray-500 font-bold">
+                            <tr>
+                                <th rowSpan={2} className="px-6 py-4 border-r border-gray-100 min-w-[140px] align-middle">
+                                    Date
+                                </th>
+                                <th colSpan={2} className="px-4 py-3 text-center border-r border-gray-100">
+                                    Morning
+                                </th>
+                                <th colSpan={2} className="px-4 py-3 text-center border-r border-gray-100">
+                                    Afternoon
+                                </th>
+                                <th colSpan={2} className="px-4 py-3 text-center border-r border-gray-100">
+                                    Overtime
+                                </th>
+                                <th rowSpan={2} className="px-6 py-4 text-center align-middle">
+                                    Total Hours
+                                </th>
+                            </tr>
+                            <tr>
+                                <th className="px-4 py-2 text-center border-r border-gray-100 min-w-[90px]">Time In</th>
+                                <th className="px-4 py-2 text-center border-r border-gray-100 min-w-[90px]">Time Out</th>
+                                <th className="px-4 py-2 text-center border-r border-gray-100 min-w-[90px]">Time In</th>
+                                <th className="px-4 py-2 text-center border-r border-gray-100 min-w-[90px]">Time Out</th>
+                                <th className="px-4 py-2 text-center border-r border-gray-100 min-w-[90px]">Time In</th>
+                                <th className="px-4 py-2 text-center border-r border-gray-100 min-w-[90px]">Time Out</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                            {days.map((day, i) => (
+                                <tr key={i} className="hover:bg-gray-50 transition-colors">
+                                    <td className="px-6 py-4 font-medium text-gray-900 whitespace-nowrap border-r border-gray-100">
+                                        {day.date.toLocaleDateString(undefined, {
+                                            weekday: "short",
+                                            month: "short",
+                                            day: "numeric",
+                                            year: "numeric",
+                                        })}
+                                    </td>
+                                    {[day.s1, day.s2, day.s3, day.s4, day.s5, day.s6].map((slot, idx) => (
+                                        <td
+                                            key={idx}
+                                            className="px-2 py-3 border-r border-gray-100 text-center align-top w-[12%]"
+                                        >
+                                            {slot ? (
+                                                <div className="flex flex-col items-center gap-1.5">
+                                                    <span className="text-xs font-semibold text-gray-900">
+                                                        {formatTime(slot.timestamp)}
+                                                    </span>
+                                                    <span
+                                                        className={`text-[11px] font-semibold ${
+                                                            slot.status === "Approved"
+                                                                ? "text-green-600"
+                                                                : slot.status === "Rejected"
+                                                                ? "text-red-600"
+                                                                : "text-yellow-600"
+                                                        }`}
+                                                    >
+                                                        {slot.status === "Approved"
+                                                            ? "Validated"
+                                                            : slot.status === "Rejected"
+                                                            ? "Unvalidated"
+                                                            : "Pending"}
+                                                    </span>
+                                                </div>
+                                            ) : (
+                                                <span className="text-gray-300 block py-4">-</span>
+                                            )}
+                                        </td>
+                                    ))}
+                                    <td className="px-6 py-4 text-center font-bold text-gray-900 whitespace-nowrap">
+                                        {formatHours(day.dayTotalMs)}
+                                    </td>
+                                </tr>
+                            ))}
+                            {days.length === 0 && (
+                                <tr>
+                                    <td colSpan={8} className="px-6 py-12 text-center text-gray-500">
+                                        No attendance records found.
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        {showEvalRestriction && (
+            <ConfirmationModal 
+                title="Requirements Not Met"
+                message="The student hasn't reached the requirements. Total validated time must be at least 486 hours. Do you still want to enable the evaluation for this student?"
+                confirmLabel="Yes, enable evaluation"
+                onCancel={() => setShowEvalRestriction(false)}
+                onConfirm={() => {
+                    toggleEvaluation(student.idnumber, evaluationStatuses[student.idnumber] || false);
+                    setShowEvalRestriction(false);
+                }}
+                variant="warning"
+            />
+        )}
+        {isDetailEvalModalOpen && detailEvaluation && (
+            <Modal onClose={() => setDetailEvalModalOpen(false)}>
+                <div className="p-6 space-y-4">
+                    <div className="flex items-center justify-between mr-8">
+                        <h3 className="text-lg font-bold text-gray-900">Supervisor Evaluation</h3>
+                        <span className="text-xs text-gray-500">{new Date(detailEvaluation.createdAt).toLocaleDateString()}</span>
+                    </div>
+                    <div className="text-sm text-gray-600">For {student.firstname} {student.lastname}</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="p-4 rounded-xl bg-orange-50 border border-orange-100">
+                            <div className="text-xs font-semibold text-orange-700 uppercase tracking-wider mb-2">General Average</div>
+                            <div className="text-3xl font-bold text-gray-900">{detailEvaluation.overallScore !== undefined ? `${Number(detailEvaluation.overallScore).toFixed(1)}%` : "—"}</div>
+                        </div>
+                        <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
+                            <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Grade Interpretation</div>
+                            <div className="text-lg font-medium text-gray-900">{detailEvaluation.interpretation || "—"}</div>
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {[
+                            { id: "quantity_of_work", title: "Quantity of Work", items: [
+                                { id: "quantity_volume", label: "Considers volume of assignment completed on time" },
+                                { id: "quantity_replace", label: "Willing to replace an absent trainee if needed" },
+                            ]},
+                            { id: "quality_of_work", title: "Quality of Work", items: [
+                                { id: "quality_serious", label: "Serious and accurate" },
+                                { id: "quality_housekeeping", label: "Follows good housekeeping without prompting" },
+                            ]},
+                            { id: "job_competence", title: "Job Competence", items: [
+                                { id: "competence_knowledge", label: "Knowledge and skills required of the job" },
+                            ]},
+                            { id: "dependability", title: "Dependability", items: [
+                                { id: "depend_follow", label: "Reliability in following instructions" },
+                                { id: "depend_trust", label: "Can be depended upon when things go wrong" },
+                            ]},
+                            { id: "initiative", title: "Initiative", items: [
+                                { id: "init_help", label: "Performs helpful tasks beyond responsibility" },
+                                { id: "init_volunteer", label: "Volunteers to do the job when needed" },
+                            ]},
+                            { id: "cooperative", title: "Cooperative", items: [
+                                { id: "coop_trainee", label: "Gets along with co-trainees" },
+                                { id: "coop_superior", label: "Gets along with superiors" },
+                                { id: "coop_owner", label: "Gets along with owners/managers" },
+                            ]},
+                            { id: "loyalty", title: "Loyalty", items: [
+                                { id: "loyal_protect", label: "Protects the company" },
+                                { id: "loyal_trust", label: "Can be trusted" },
+                                { id: "loyal_policy", label: "Follows company policies/objectives" },
+                            ]},
+                            { id: "judgment", title: "Judgment", items: [
+                                { id: "judge_grasp", label: "Ability to grasp problems and follow instructions" },
+                                { id: "judge_decide", label: "Knows how to decide when needed" },
+                            ]},
+                            { id: "attendance", title: "Attendance", items: [
+                                { id: "attend_regular", label: "Regular work schedule; leaves taken properly" },
+                                { id: "attend_punctual", label: "Always punctual; does not come in late" },
+                            ]},
+                            { id: "customer_service", title: "Customer Service", items: [
+                                { id: "cs_practice", label: "Practices good customer service" },
+                                { id: "cs_never_argue", label: "Never argues with customer" },
+                                { id: "cs_greet", label: "Greets customers" },
+                            ]},
+                        ].map(cat => (
+                            <div key={cat.id} className="rounded-xl border border-gray-100 bg-white shadow-sm p-4">
+                                <div className="text-sm font-bold text-gray-900 mb-2">{cat.title}</div>
+                                <div className="space-y-3">
+                                    {cat.items.map(item => (
+                                        <div key={item.id} className="flex items-center justify-between">
+                                            <div className="text-xs text-gray-600">{item.label}</div>
+                                            <div className="text-sm font-semibold text-gray-900">{detailEvaluation.criteria[item.id] ?? "—"}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="rounded-2xl border border-gray-100 bg-white shadow-sm p-4">
+                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Comments / Remarks</div>
+                        <div className="text-sm text-gray-900">{detailEvaluation.comment || "—"}</div>
+                    </div>
+                    <div className="flex justify-end">
+                        <button
+                            onClick={() => setDetailEvalModalOpen(false)}
+                            className="px-4 py-2 rounded-xl text-sm font-semibold text-gray-600 hover:bg-gray-200 transition-colors"
+                        >
+                            Close
+                        </button>
+                    </div>
+                </div>
+            </Modal>
+        )}
+        </>
+    );
+  };
+
+
+
+  const AttendanceMonitoringView = ({
+    students,
+    attendance,
+    onNavigateToApproval,
+    attendanceSummary,
+    evaluationStatuses,
+    toggleEvaluation,
+  }: {
+    students: User[];
+    attendance: AttendanceEntry[];
+    onNavigateToApproval: () => void;
+    attendanceSummary: Record<string, number>;
+    evaluationStatuses: Record<string, boolean>;
+    toggleEvaluation: (id: string, current: boolean) => void;
+  }) => {
+
+    // 1. Calculate available weeks dynamically based on attendance data
+    const availableWeeks = useMemo(() => {
+        let startTs: number;
+        let numWeeks = 1;
+
+        if (attendance.length > 0) {
+            // Find earliest and latest timestamp safely
+            const minTs = attendance.reduce((min, p) => p.timestamp < min ? p.timestamp : min, attendance[0].timestamp);
+            const maxTs = attendance.reduce((max, p) => p.timestamp > max ? p.timestamp : max, attendance[0].timestamp);
+            
+            // Start of Week 1 (Monday of minTs)
+            const date = new Date(minTs);
+            const day = date.getDay() || 7; // 1=Mon...7=Sun
+            const monday = new Date(date);
+            monday.setHours(0, 0, 0, 0);
+            monday.setDate(date.getDate() - day + 1);
+            startTs = monday.getTime();
+
+            // Calculate number of weeks needed to cover maxTs
+            const oneWeekMs = 7 * 24 * 60 * 60 * 1000;
+            // Ensure maxTs is included in the range. 
+            // If maxTs is exactly on the start of next week, it falls into next week.
+            // (maxTs - startTs) / oneWeekMs gives the index of the week (0-based)
+            const weeksDiff = Math.floor((maxTs - startTs) / oneWeekMs);
+            numWeeks = weeksDiff + 1;
+        } else {
+            // Fallback: Use current week if no data exists
+            const now = new Date();
+            const day = now.getDay() || 7;
+            const monday = new Date(now);
+            monday.setHours(0, 0, 0, 0);
+            monday.setDate(now.getDate() - day + 1);
+            startTs = monday.getTime();
+            numWeeks = 1;
+        }
+            
+        return Array.from({ length: numWeeks }, (_, i) => {
+            const weekStart = startTs + i * 7 * 24 * 60 * 60 * 1000;
+            return {
+                id: i + 1,
+                startTs: weekStart,
+                endTs: weekStart + 7 * 24 * 60 * 60 * 1000,
+                label: `${i + 1}`
+            };
+        });
+    }, [attendance]);
+
+    // 2. Initialize selectedWeekStart
+    const [selectedWeekStart, setSelectedWeekStart] = useState<number>(() => {
+        // Default to current week
+        const now = new Date();
+        const day = now.getDay() || 7;
+        const monday = new Date(now);
+        monday.setHours(0, 0, 0, 0);
+        monday.setDate(now.getDate() - day + 1);
+        return monday.getTime();
+    });
+
+    // Ensure selection is valid
+    useEffect(() => {
+        if (availableWeeks.length > 0) {
+            const isSelectedValid = availableWeeks.some(w => w.startTs === selectedWeekStart);
+            if (!isSelectedValid) {
+                // If current selection is invalid, try to select the week containing "now", or default to Week 1
+                const now = Date.now();
+                const currentWeek = availableWeeks.find(w => now >= w.startTs && now < w.endTs);
+                if (currentWeek) {
+                    setSelectedWeekStart(currentWeek.startTs);
+                } else {
+                    setSelectedWeekStart(availableWeeks[0].startTs);
+                }
+            }
+        }
+    }, [availableWeeks, selectedWeekStart]);
+
+    const [selectedStudentDetail, setSelectedStudentDetail] = useState<User | null>(null);
+    const [filterCourse, setFilterCourse] = useState("");
+    const [filterSection, setFilterSection] = useState("");
+    const [searchTerm, setSearchTerm] = useState("");
+
+    const weekMs = 7 * 24 * 60 * 60 * 1000;
+    const weekEnd = selectedWeekStart + weekMs;
+
+    // Filter students
+    const pendingCount = useMemo(() => {
+        return students.filter(s => (s.signup_status || 'APPROVED') !== 'APPROVED').length;
+    }, [students]);
+
+    const uniqueCourses = useMemo(() => Array.from(new Set(students.map(s => s.course).filter(Boolean))).sort(), [students]);
+    
+    // Derived sections based on selected course
+    const availableSections = useMemo(() => {
+        let relevantStudents = students;
+        if (filterCourse) {
+            relevantStudents = students.filter(s => s.course === filterCourse);
+        }
+        return Array.from(new Set(relevantStudents.map(s => s.section).filter(Boolean))).sort();
+    }, [students, filterCourse]);
+
+    const filteredStudents = useMemo(() => {
+        return students.filter(s => {
+            const matchesSearch = !searchTerm || 
+                (s.firstname?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                 s.lastname?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                 s.idnumber.includes(searchTerm));
+            const matchesCourse = !filterCourse || s.course === filterCourse;
+            const matchesSection = !filterSection || s.section === filterSection;
+            const isApproved = (s.signup_status || 'APPROVED') === 'APPROVED';
+            return matchesSearch && matchesCourse && matchesSection && isApproved;
+        }).sort((a, b) => (a.lastname || "").localeCompare(b.lastname || ""));
+    }, [students, searchTerm, filterCourse, filterSection]);
+
+    // Reset section if course changes
+    useEffect(() => {
+        if (filterCourse && !availableSections.includes(filterSection)) {
+            setFilterSection("");
+        }
+    }, [filterCourse, availableSections, filterSection]);
+
+    const studentHours = useMemo(() => {
+        const map = new Map<string, number[]>();
+
+        filteredStudents.forEach(s => {
+            const logs = attendance
+                .filter(a => 
+                    (a as any).idnumber === s.idnumber && 
+                    a.timestamp >= selectedWeekStart && 
+                    a.timestamp < weekEnd
+                )
+                .sort((a, b) => a.timestamp - b.timestamp);
+
+            const days = [0, 0, 0, 0, 0, 0, 0];
+
+            if (logs.length === 0) {
+                map.set(s.idnumber, days);
+                return;
+            }
+
+            const grouped = new Map<string, { date: Date; logs: AttendanceEntry[] }>();
+            logs.forEach(log => {
+                const d = new Date(log.timestamp);
+                const key = d.toLocaleDateString();
+                if (!grouped.has(key)) grouped.set(key, { date: d, logs: [] });
+                grouped.get(key)!.logs.push(log);
+            });
+
+            grouped.forEach(day => {
+                const dayLogs = day.logs.slice().sort((a, b) => a.timestamp - b.timestamp);
+
+                const baseDate = new Date(day.date);
+                baseDate.setHours(0, 0, 0, 0);
+
+                const buildShift = (timeStr: string | undefined) => {
+                    if (!timeStr) return null;
+                    const [h, m] = timeStr.split(":").map(Number);
+                    const d = new Date(baseDate.getTime());
+                    d.setHours(h || 0, m || 0, 0, 0);
+                    return d.getTime();
+                };
+
+                let schedule: {
+                    amIn: number | null;
+                    amOut: number | null;
+                    pmIn: number | null;
+                    pmOut: number | null;
+                    otStart: number | null;
+                    otEnd: number | null;
+                };
+
+                try {
+                    const stored = localStorage.getItem(`schedule_${s.idnumber}`) || localStorage.getItem("schedule_default");
+                    if (stored) {
+                        const parsed = JSON.parse(stored);
+                        schedule = {
+                            amIn: buildShift(parsed.amIn || "07:00"),
+                            amOut: buildShift(parsed.amOut || "11:00"),
+                            pmIn: buildShift(parsed.pmIn || "13:00"),
+                            pmOut: buildShift(parsed.pmOut || "17:00"),
+                            otStart: buildShift(parsed.overtimeIn || "17:00"),
+                            otEnd: buildShift(parsed.overtimeOut || "18:00"),
+                        };
+                    } else {
+                        schedule = {
+                            amIn: buildShift("07:00"),
+                            amOut: buildShift("11:00"),
+                            pmIn: buildShift("13:00"),
+                            pmOut: buildShift("17:00"),
+                            otStart: buildShift("17:00"),
+                            otEnd: buildShift("18:00"),
+                        };
+                    }
+                } catch {
+                    schedule = {
+                        amIn: buildShift("07:00"),
+                        amOut: buildShift("11:00"),
+                        pmIn: buildShift("13:00"),
+                        pmOut: buildShift("17:00"),
+                        otStart: buildShift("17:00"),
+                        otEnd: buildShift("18:00"),
+                    };
+                }
+
+            const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+
+            const computeShiftDuration = (
+                entries: AttendanceEntry[],
+                windowStart: number | null,
+                windowEnd: number | null
+            ) => {
+                if (windowStart === null || windowEnd === null) return 0;
+                const earlyWindowStart = windowStart - 30 * 60 * 1000;
+                let currentIn: number | null = null;
+                let duration = 0;
+
+                entries.forEach(log => {
+                    if (log.type === "in") {
+                        if (log.timestamp > windowEnd) return;
+                        if (log.timestamp < earlyWindowStart) return;
+                        const effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
+                        currentIn = effectiveIn;
+                    } else if (log.type === "out") {
+                        if (currentIn === null) return;
+                        const effectiveOut = clamp(log.timestamp, windowStart, windowEnd);
+                        if (effectiveOut > currentIn) {
+                            duration += effectiveOut - currentIn;
+                        }
+                        currentIn = null;
+                    }
+                });
+
+                if (currentIn !== null) {
+                    const effectiveOut = clamp(windowEnd, windowStart, windowEnd);
+                    if (effectiveOut > currentIn) {
+                        duration += effectiveOut - currentIn;
+                    }
+                }
+
+                return duration;
+            };
+
+            const dayTotalMs =
+                computeShiftDuration(dayLogs, schedule.amIn, schedule.amOut) +
+                computeShiftDuration(dayLogs, schedule.pmIn, schedule.pmOut) +
+                computeShiftDuration(dayLogs, schedule.otStart, schedule.otEnd);
+
+            let dayIdx = day.date.getDay() - 1;
+            if (dayIdx === -1) dayIdx = 6;
+            if (dayIdx >= 0 && dayIdx <= 6) {
+                days[dayIdx] += dayTotalMs;
+            }
+            });
+
+            map.set(s.idnumber, days);
+        });
+
+        return map;
+    }, [filteredStudents, attendance, selectedWeekStart, weekEnd]);
+
+    const formatHours = (ms: number) => {
+        if (!ms) return "";
+        const totalSeconds = Math.floor(ms / 1000);
+        const h = Math.floor(totalSeconds / 3600);
+        const m = Math.floor((totalSeconds % 3600) / 60);
+        const s = totalSeconds % 60;
+        return `${h.toString()}:${m.toString().padStart(2, "0")}:${s
+            .toString()
+            .padStart(2, "0")}`;
+    };
+
+    const weekNumber = useMemo(() => {
+        const d = new Date(selectedWeekStart);
+        return Math.ceil(d.getDate() / 7);
+    }, [selectedWeekStart]);
+
+    const dayLabels = useMemo(() => {
+        const start = new Date(selectedWeekStart);
+        start.setHours(0, 0, 0, 0);
+        return Array.from({ length: 7 }, (_, index) => {
+            const d = new Date(start);
+            d.setDate(start.getDate() + index);
+            const weekday = d.toLocaleDateString(undefined, { weekday: "short" });
+            const month = d.toLocaleDateString(undefined, { month: "short" });
+            const day = d.getDate();
+            return { weekday, date: `${month} ${day}` };
+        });
+    }, [selectedWeekStart]);
+
+    const handlePrint = () => {
+        window.print();
+    };
+
+    if (selectedStudentDetail) {
+        return (
+            <StudentAttendanceDetailView 
+                student={selectedStudentDetail}
+                attendance={attendance}
+                onBack={() => setSelectedStudentDetail(null)}
+                evaluationStatuses={evaluationStatuses}
+                toggleEvaluation={toggleEvaluation}
+            />
+        );
+    }
+
+    return (
+        <div className="space-y-6 animate-in fade-in duration-500">
+            {/* Header / Controls */}
+            <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 print:hidden">
+                <div />
+
+                <div className="flex items-center gap-2">
+                    <button 
+                        onClick={handlePrint}
+                        className="flex items-center gap-2 px-4 py-2 bg-gray-900 text-white rounded-xl hover:bg-gray-800 transition-colors shadow-sm"
+                    >
+                        <FileText size={18} />
+                        <span>Print / PDF</span>
+                    </button>
+                </div>
+            </div>
+
+            {/* Compact Toolbar */}
+            <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-sm flex flex-col gap-3 print:hidden">
+                 {/* Top Row: Filters */}
+                 <div className="flex flex-col md:flex-row items-center justify-between gap-3">
+                     <div className="flex items-center gap-2 w-full md:w-auto">
+                         <select 
+                             value={filterCourse}
+                             onChange={e => setFilterCourse(e.target.value)}
+                             className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 bg-gray-50 hover:bg-white transition-all cursor-pointer min-w-[140px]"
+                         >
+                             <option value="">Course</option>
+                             {uniqueCourses.map(c => <option key={c} value={c}>{c}</option>)}
+                         </select>
+                         <select 
+                             value={filterSection}
+                             onChange={e => setFilterSection(e.target.value)}
+                             disabled={!filterCourse}
+                             className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 bg-gray-50 hover:bg-white transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed min-w-[100px]"
+                         >
+                             <option value="">Section</option>
+                             {availableSections.map(s => <option key={s} value={s}>{s}</option>)}
+                         </select>
+                     </div>
+
+                     <div className="relative w-full md:w-72">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                        <input 
+                            type="text" 
+                            placeholder="Filter by name..." 
+                            value={searchTerm}
+                            onChange={e => setSearchTerm(e.target.value)}
+                            className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-gray-300 text-sm font-medium text-gray-900 placeholder-gray-500 bg-gray-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm"
+                        />
+                    </div>
+                 </div>
+
+                 <div className="h-px w-full bg-gray-100" />
+
+                 {/* Bottom Row: Week Navigation */}
+                 <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 overflow-x-auto w-full pb-1 sm:pb-0 custom-scrollbar">
+                        <span className="text-xs font-bold text-gray-500 uppercase tracking-wider whitespace-nowrap mr-2">Select Week:</span>
+                        
+                        {availableWeeks.length === 0 ? (
+                            <span className="text-sm text-gray-400 italic">No attendance data yet</span>
+                        ) : (
+                            <>
+                                {availableWeeks.length === 0 ? (
+                                <div className="flex items-center gap-2 bg-amber-50 px-4 py-2 rounded-lg border border-amber-200">
+                                    <Clock size={16} className="text-amber-500" />
+                                    <span className="text-sm font-medium text-amber-700">Waiting for first attendance log...</span>
+                                </div>
+                            ) : (
+                                <>
+                                    {(() => {
+                                        const currentIndex = availableWeeks.findIndex(w => w.startTs === selectedWeekStart);
+                                        const maxPage = Math.ceil(availableWeeks.length / 8);
+                                        const currentPage = Math.floor(currentIndex / 8);
+                                        const startIdx = currentPage * 8;
+                                        const visibleWeeks = availableWeeks.slice(startIdx, startIdx + 8);
+
+                                        return (
+                                            <div className="flex items-center gap-1">
+                                                <button 
+                                                    onClick={() => {
+                                                        const prevPageStartIdx = Math.max(0, startIdx - 8);
+                                                        if (prevPageStartIdx !== startIdx) {
+                                                            setSelectedWeekStart(availableWeeks[prevPageStartIdx].startTs);
+                                                        }
+                                                    }}
+                                                    disabled={currentPage === 0}
+                                                    className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 disabled:opacity-30 disabled:hover:bg-transparent"
+                                                >
+                                                    <ChevronLeft size={16} />
+                                                </button>
+
+                                                {visibleWeeks.map((week) => {
+                                                    const isSelected = week.startTs === selectedWeekStart;
+                                                    return (
+                                                        <button
+                                                            key={week.id}
+                                                            onClick={() => setSelectedWeekStart(week.startTs)}
+                                                            className={`w-8 h-8 flex items-center justify-center rounded-lg text-xs font-bold transition-all ${
+                                                                isSelected
+                                                                    ? "bg-gray-900 text-white shadow-md" 
+                                                                    : "bg-gray-50 text-gray-600 hover:bg-gray-100 hover:text-gray-900 border border-gray-200"
+                                                            }`}
+                                                        >
+                                                            {week.label}
+                                                        </button>
+                                                    );
+                                                })}
+
+                                                <button 
+                                                    onClick={() => {
+                                                        const nextPageStartIdx = Math.min((maxPage - 1) * 8, startIdx + 8);
+                                                        if (nextPageStartIdx < availableWeeks.length && nextPageStartIdx !== startIdx) {
+                                                            setSelectedWeekStart(availableWeeks[nextPageStartIdx].startTs);
+                                                        }
+                                                    }}
+                                                    disabled={currentPage >= maxPage - 1}
+                                                    className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 disabled:opacity-30 disabled:hover:bg-transparent"
+                                                >
+                                                    <ChevronRight size={16} />
+                                                </button>
+                                            </div>
+                                        );
+                                    })()}
+                                </>
+                            )}
+                            </>
+                        )}
+                    </div>
+
+                    {/* Display Selected Week Date Range */}
+                    {availableWeeks.length > 0 && (
+                        <div className="flex items-center gap-2 bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-200 whitespace-nowrap">
+                             <Clock size={14} className="text-gray-400" />
+                             <span className="text-xs font-semibold text-gray-700">
+                                 {new Date(selectedWeekStart).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} - {new Date(selectedWeekStart + 6 * 24 * 60 * 60 * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                             </span>
+                        </div>
+                    )}
+                 </div>
+            </div>
+
+
+
+            {/* Table */}
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden print:border-none print:shadow-none">
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left border-collapse">
+                        <thead className="bg-gray-50 text-gray-900 font-bold border-b border-gray-200 print:bg-gray-100">
+                            <tr>
+                                <th className="px-4 py-3 border-r border-gray-200 min-w-[200px]">Name</th>
+                                {dayLabels.map((item, index) => (
+                                    <th key={index} className="px-2 py-3 text-center border-r border-gray-200 w-16 align-middle">
+                                        <div className="flex flex-col items-center gap-0.5">
+                                            <span className="text-sm font-bold text-gray-900 leading-tight">{item.weekday}</span>
+                                            <span className="text-sm font-bold text-gray-900 leading-tight whitespace-nowrap">{item.date}</span>
+                                        </div>
+                                    </th>
+                                ))}
+                                <th className="px-4 py-3 text-center w-20">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 border-b border-gray-200">
+                            {filteredStudents.length === 0 ? (
+                                <tr>
+                                    <td colSpan={9} className="px-6 py-8 text-center text-gray-500">
+                                        No active students found
+                                        {pendingCount > 0 && (
+                                            <div className="mt-2 text-sm">
+                                                You have {pendingCount} pending student{pendingCount !== 1 ? 's' : ''}.{' '}
+                                                <button 
+                                                    onClick={onNavigateToApproval}
+                                                    className="text-orange-600 font-bold hover:underline"
+                                                >
+                                                    Go to Approvals
+                                                </button>
+                                            </div>
+                                        )}
+                                    </td>
+                                </tr>
+                            ) : (
+                                filteredStudents.map(s => {
+                                    const hours = studentHours.get(s.idnumber) || [0,0,0,0,0,0,0];
+                                    const total = hours.reduce((a, b) => a + b, 0);
+
+                                    const baseMs = attendanceSummary[s.idnumber] || 0;
+                                    const totalHours = Math.floor(baseMs / (1000 * 60 * 60));
+
+                                    return (
+                                        <tr key={s.idnumber} className="hover:bg-gray-50 print:hover:bg-transparent group">
+                                            <td 
+                                                className="px-4 py-3 font-medium text-gray-900 border-r border-gray-100 print:border-gray-300 cursor-pointer group-hover:text-orange-600 transition-colors"
+                                                onClick={() => setSelectedStudentDetail(s)}
+                                            >
+                                                <div className="flex items-center gap-3">
+                                                    <div className="font-bold text-sm text-gray-900">
+                                                        {s.lastname}, {s.firstname}
+                                                    </div>
+                                                </div>
+                                            </td>
+                                            {hours.map((h, i) => (
+                                                <td key={i} className="px-2 py-3 text-center text-gray-600 border-r border-gray-100 print:border-gray-300">
+                                                    {formatHours(h)}
+                                                </td>
+                                            ))}
+                                            <td className="px-4 py-3 text-center font-bold text-gray-900">
+                                                {formatHours(total)}
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <style jsx global>{`
+                @media print {
+                    @page { size: landscape; margin: 1cm; }
+                    body * { visibility: hidden; }
+                    .animate-in { animation: none !important; }
+                    .print\\:hidden { display: none !important; }
+                    .print\\:shadow-none { box-shadow: none !important; }
+                    .print\\:border-none { border: none !important; }
+                    .print\\:bg-transparent { background: transparent !important; }
+                    .print\\:border-gray-300 { border-color: #d1d5db !important; }
+                    .print\\:bg-gray-100 { background-color: #f3f4f6 !important; }
+                    
+                    /* Show only the container and its children */
+                    .space-y-6, .space-y-6 * {
+                        visibility: visible;
+                    }
+                    .space-y-6 {
+                        position: absolute;
+                        left: 0;
+                        top: 0;
+                        width: 100%;
+                    }
+                }
+            `}</style>
+        </div>
+    );
+  };
+
+  const StudentsView = ({
+    students,
   attendance,
   reports,
   recentAttendance,
@@ -852,8 +2079,24 @@ const StudentsView = ({
 
     useEffect(() => {
         if (!supabase) return;
-        const ch = supabase.channel('global-evaluation-updates');
-        ch.subscribe();
+        const ch = supabase
+          .channel('global-evaluation-updates')
+          .on(
+            'broadcast',
+            { event: 'toggle' },
+            (payload: any) => {
+              const data = payload?.payload || {};
+              const idnumber = data.idnumber;
+              const enabled = data.enabled;
+              if (!idnumber) return;
+              const key = String(idnumber).trim();
+              setEvaluationStatuses(prev => ({
+                ...prev,
+                [key]: !!enabled
+              }));
+            }
+          )
+          .subscribe();
         setBroadcastChannel(ch);
         return () => { try { supabase?.removeChannel(ch); } catch {} };
     }, []);
@@ -1519,7 +2762,7 @@ export default function InstructorPage() {
     }
   };
 
-  const [activeTab, setActiveTab] = useState<TabId>("dashboard");
+  const [activeTab, setActiveTab] = useState<TabId>("attendance");
   const [isSidebarOpen, setSidebarOpen] = useState(true);
   const [viewingReport, setViewingReport] = useState<ReportEntry | null>(null);
   const [isAttendanceModalOpen, setAttendanceModalOpen] = useState(false);
@@ -1544,6 +2787,8 @@ export default function InstructorPage() {
   const [attendanceSummary, setAttendanceSummary] = useState<Record<string, number>>({});
   const [activeSessions, setActiveSessions] = useState<Record<string, number>>({});
   const [evaluationStatuses, setEvaluationStatuses] = useState<Record<string, boolean>>({});
+  const [allowApproval, setAllowApproval] = useState<boolean>(true);
+  const [broadcastChannel, setBroadcastChannel] = useState<RealtimeChannel | null>(null);
   const [recentAttendance, setRecentAttendance] = useState<{ idnumber: string; type: "in" | "out"; ts: number }[]>([]);
   const [recentReports, setRecentReports] = useState<{ id: number; idnumber: string; title: string; body: string; ts: number }[]>([]);
   const [evaluation, setEvaluation] = useState<EvaluationDetail | null>(null);
@@ -1564,6 +2809,30 @@ export default function InstructorPage() {
     try { return localStorage.getItem("idnumber") || ""; } catch { return ""; }
   }, []);
   const [myProfile, setMyProfile] = useState<User | null>(null);
+
+  const toggleEvaluation = async (idnumber: string, current: boolean) => {
+    try {
+      const res = await fetch("/api/evaluation-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idnumber, enabled: !current }),
+      });
+      if (res.ok) {
+        setEvaluationStatuses(prev => ({ ...prev, [idnumber]: !current }));
+        if (broadcastChannel) {
+          broadcastChannel.send({
+            type: 'broadcast',
+            event: 'toggle',
+            payload: { idnumber, enabled: !current }
+          });
+        }
+      } else {
+        console.error("Failed to toggle evaluation");
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   // --- Effects ---
 
@@ -1655,6 +2924,26 @@ export default function InstructorPage() {
             const map: Record<string, boolean> = {};
             json.statuses.forEach((s: { idnumber: string; enabled: boolean }) => { map[s.idnumber] = s.enabled; });
             setEvaluationStatuses(map);
+        }
+      } catch {}
+    })();
+    (async () => {
+      if (!myIdnumber) return;
+      try {
+        const res = await fetch("/api/instructor-approval-status");
+        const json = await res.json();
+        if (Array.isArray(json.statuses)) {
+          const map: Record<string, boolean> = {};
+          json.statuses.forEach((s: { idnumber: string; allowed: boolean }) => {
+            if (s && s.idnumber) {
+              map[s.idnumber] = s.allowed ?? true;
+            }
+          });
+          if (Object.prototype.hasOwnProperty.call(map, myIdnumber)) {
+            setAllowApproval(map[myIdnumber]);
+          } else {
+            setAllowApproval(true);
+          }
         }
       } catch {}
     })();
@@ -1760,18 +3049,45 @@ export default function InstructorPage() {
   useEffect(() => {
     if (!supabase) return;
     const ch = supabase
-      .channel('instructor_evaluation_status')
+      .channel('global-evaluation-updates')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'evaluation_status' }, (payload: RealtimePostgresChangesPayload<{ idnumber: string, enabled: boolean }>) => {
         const row = payload.new as { idnumber: string, enabled: boolean } | null;
         if (row && row.idnumber) {
           setEvaluationStatuses(prev => ({ ...prev, [row.idnumber]: row.enabled }));
         }
       })
+      .on('broadcast', { event: 'toggle' }, (payload) => {
+        const { idnumber, enabled } = payload.payload;
+        if (idnumber) {
+          setEvaluationStatuses(prev => ({ ...prev, [String(idnumber).trim()]: enabled }));
+        }
+      })
       .subscribe();
+    setBroadcastChannel(ch);
     return () => {
       try { supabase?.removeChannel(ch); } catch {}
     };
   }, []);
+
+  useEffect(() => {
+    if (!supabase || !myIdnumber) return;
+    const ch = supabase
+      .channel('global-instructor-approval-updates')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'instructor_approval_status' },
+        (payload: RealtimePostgresChangesPayload<{ idnumber: string; allowed: boolean }>) => {
+          const row = payload.new as { idnumber: string; allowed: boolean } | null;
+          if (row && String(row.idnumber) === String(myIdnumber)) {
+            setAllowApproval(row.allowed ?? true);
+          }
+        }
+      )
+      .subscribe();
+    return () => {
+      try { supabase?.removeChannel(ch); } catch {}
+    };
+  }, [myIdnumber]);
 
   // Responsive Check
   useEffect(() => {
@@ -1788,31 +3104,36 @@ export default function InstructorPage() {
     return () => window.removeEventListener("resize", update);
   }, []);
 
-  // Fetch Attendance (Selected)
+  // Fetch Attendance (Global, for all students)
   useEffect(() => {
     (async () => {
-      if (!selected?.idnumber) { setAttendance([]); return; }
-          try {
-            const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(selected.idnumber)}&limit=200`);
-            const json = await res.json();
-            if (res.ok && Array.isArray(json.entries)) {
-              const mapped = json.entries.map((e: ServerAttendanceEntry) => ({
-                type: e.type,
-                timestamp: e.ts,
-                photoDataUrl: e.photourl,
-                status: String(e.status || "").trim().toLowerCase() === "approved" || !!e.approvedby ? "Approved" : "Pending",
-                approvedAt: e.approvedat ? Number(new Date(e.approvedat).getTime()) : undefined,
-                approvedBy: e.approvedby || undefined
-              })) as AttendanceEntry[];
-              setAttendance(mapped);
-            } else {
-              setAttendance([]);
-            }
+      try {
+        const res = await fetch(`/api/attendance?limit=1000`);
+        const json = await res.json();
+        if (res.ok && Array.isArray(json.entries)) {
+          const mapped = json.entries.map((e: ServerAttendanceEntry) => {
+            const sStr = String(e.status || "").trim().toLowerCase();
+            const isRejected = sStr === "rejected";
+            const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
+            return {
+              idnumber: e.idnumber,
+              type: e.type,
+              timestamp: e.ts,
+              photoDataUrl: e.photourl,
+              status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
+              validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
+              validatedBy: e.validated_by || undefined
+            };
+          }) as AttendanceEntry[];
+          setAttendance(mapped);
+        } else {
+          setAttendance([]);
+        }
       } catch {
         setAttendance([]);
       }
     })();
-  }, [selected, refreshTrigger]);
+  }, [refreshTrigger]);
 
   // Realtime Attendance subscription removed - relying on global attendance refreshTrigger
   // which updates whenever any attendance record changes (insert/update/delete)
@@ -2017,128 +3338,614 @@ export default function InstructorPage() {
 
   // --- View Components ---
 
-  const DashboardView = () => {
-    const totalStudents = students.length;
-    const courseDistribution = useMemo(() => {
-      const dist: Record<string, number> = {};
-      students.forEach(s => {
-        const c = s.course || "Unknown";
-        dist[c] = (dist[c] || 0) + 1;
-      });
-      return Object.entries(dist).map(([name, value]) => ({ name, value }));
-    }, [students]);
-    const assignedCoursesCount = useMemo(() => {
-      const raw = (myProfile?.course || "").split(",").map(s => s.trim()).filter(Boolean);
-      return raw.length;
-    }, [myProfile]);
+  const ReportsView = () => {
+    const [allReports, setAllReports] = useState<ReportEntry[]>(cachedReportsData || []);
+    const [loading, setLoading] = useState(!cachedReportsData);
+    const [searchTerm, setSearchTerm] = useState("");
+    const [filterCourse, setFilterCourse] = useState("");
+    const [filterSection, setFilterSection] = useState("");
+    const [selectedReport, setSelectedReport] = useState<ReportEntry | null>(null);
+    const [commentText, setCommentText] = useState("");
+    const [isSavingComment, setIsSavingComment] = useState(false);
+
+    useEffect(() => {
+        // Subscribe to realtime changes for reports
+        if (!supabase) return;
+        const ch = supabase
+            .channel('instructor_reports_global')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'reports' }, (payload) => {
+                // Optimistically update if it's an INSERT or UPDATE
+                if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+                   const newReport = payload.new as any;
+                   
+                   setAllReports(prev => {
+                       const exists = prev.find(r => r.id === newReport.id);
+                       // Preserve comment as reports table update doesn't include it
+                       const comment = exists?.instructorComment;
+                       // Check viewed status from DB column
+                       const isViewed = !!newReport.reviewedby;
+
+                       const mapped: ReportEntry = {
+                            id: newReport.id,
+                            title: newReport.title,
+                            body: newReport.body,
+                            fileName: newReport.fileName,
+                            fileType: newReport.fileType,
+                            fileUrl: newReport.fileUrl,
+                            submittedAt: Number(newReport.submittedAt || newReport.ts),
+                            instructorComment: comment,
+                            idnumber: newReport.idnumber,
+                            isViewedByInstructor: isViewed
+                       };
+
+                       let newReports;
+                       if (exists) {
+                           newReports = prev.map(r => r.id === mapped.id ? mapped : r);
+                       } else {
+                           newReports = [...prev, mapped];
+                       }
+                       cachedReportsData = newReports;
+                       return newReports;
+                   });
+                } else if (payload.eventType === 'DELETE') {
+                    setAllReports(prev => {
+                        const newReports = prev.filter(r => r.id !== payload.old.id);
+                        cachedReportsData = newReports;
+                        return newReports;
+                    });
+                }
+            })
+            .subscribe();
+
+        return () => {
+            supabase?.removeChannel(ch);
+        };
+    }, []);
+
+    const fetchReports = (force = false) => {
+        const now = Date.now();
+        if (!force && cachedReportsData && (now - lastReportsFetchTime < REPORTS_CACHE_DURATION)) {
+            setLoading(false);
+            setAllReports(cachedReportsData);
+            return;
+        }
+        
+        setLoading(true);
+        fetch('/api/reports')
+          .then(res => res.json())
+          .then(data => {
+              if(data.reports && Array.isArray(data.reports)) {
+                  const mapped: ReportEntry[] = data.reports.map((r: any) => ({
+                      id: r.id,
+                      title: r.title,
+                      body: r.body,
+                      fileName: r.fileName,
+                      fileType: r.fileType,
+                      fileUrl: r.fileUrl,
+                      submittedAt: Number(r.submittedAt || r.ts),
+                      instructorComment: r.instructorComment,
+                      idnumber: r.idnumber,
+                      isViewedByInstructor: r.isViewedByInstructor
+                  }));
+                  cachedReportsData = mapped;
+                  lastReportsFetchTime = Date.now();
+                  setAllReports(mapped);
+              }
+          })
+          .finally(() => setLoading(false));
+    };
+
+    useEffect(() => {
+      fetchReports();
+    }, []);
+
+    // Update comment text when selection changes
+    useEffect(() => {
+        if (selectedReport) {
+            setCommentText("");
+        }
+    }, [selectedReport?.id]);
+
+    const handleSaveLocalComment = async (e?: React.MouseEvent) => {
+        if (e) e.preventDefault();
+        if (!selectedReport) return;
+        setIsSavingComment(true);
+        try {
+            const res = await fetch("/api/reports", {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                    id: selectedReport.id, 
+                    instructorComment: commentText,
+                    instructorId: myIdnumber 
+                })
+            });
+            if (res.ok) {
+                const updated = { ...selectedReport, instructorComment: commentText, isViewedByInstructor: true };
+                // Update the modal view immediately without closing
+                setSelectedReport(updated);
+                
+                // Update the list in background
+                setAllReports(prev => {
+                    const newReports = prev.map(r => r.id === selectedReport.id ? updated : r);
+                    cachedReportsData = newReports;
+                    return newReports;
+                });
+            } else {
+                alert("Failed to save comment");
+            }
+        } catch (e) {
+            console.error(e);
+            alert("Error saving comment");
+        } finally {
+            setIsSavingComment(false);
+        }
+    };
+
+    const uniqueCourses = useMemo(() => Array.from(new Set(students.map(s => s.course).filter((c): c is string => !!c))).sort(), [students]);
     
-    const evaluationsOpen = useMemo(() => {
-      const ids = new Set(students.map(s => s.idnumber));
-      let count = 0;
-      Object.entries(evaluationStatuses).forEach(([id, enabled]) => {
-        if (ids.has(id) && enabled) count += 1;
-      });
-      return count;
-    }, [students, evaluationStatuses]);
-    
-    // Active sessions panel removed in favor of recent attendance
+    const uniqueSections = useMemo(() => {
+        const subset = filterCourse ? students.filter(s => s.course === filterCourse) : students;
+        return Array.from(new Set(subset.map(s => s.section).filter((s): s is string => !!s))).sort();
+    }, [students, filterCourse]);
+
+    const [weekOffset, setWeekOffset] = useState(0);
+    const WEEKS_PER_PAGE = 8;
+    const TOTAL_WEEKS = 15;
+
+    // Course-specific deadlines: { "BSIT": { 1: "2023-..." }, "ALL": { ... } }
+    const [courseDeadlines, setCourseDeadlines] = useState<Record<string, Record<number, string>>>({});
+    const [editingDeadline, setEditingDeadline] = useState<{week: number, date: string} | null>(null);
+
+    // Fetch deadlines from API
+    const fetchDeadlines = async () => {
+        try {
+            const res = await fetch("/api/instructor/deadlines");
+            if (res.ok) {
+                const json = await res.json();
+                setCourseDeadlines(json.deadlines || {});
+            }
+        } catch (e) {
+            console.error("Failed to fetch deadlines", e);
+        }
+    };
+
+    useEffect(() => {
+        fetchDeadlines();
+    }, []);
+
+    const handleSaveDeadline = async (course: string, section: string, week: number, date: string) => {
+        try {
+            const res = await fetch("/api/instructor/deadlines", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ course, section, week, date })
+            });
+            if (res.ok) {
+                await fetchDeadlines();
+                setEditingDeadline(null);
+            } else {
+                alert("Failed to save deadline");
+            }
+        } catch (e) {
+            console.error("Error saving deadline", e);
+            alert("Error saving deadline");
+        }
+    };
+
+    const studentReportsMap = useMemo(() => {
+        const map = new Map<string, ReportEntry[]>();
+        allReports.forEach(r => {
+             const id = r.idnumber;
+             if (!id) return;
+             // Only consider submitted reports for the grid
+             if (!r.submittedAt) return;
+             
+             if (!map.has(id)) map.set(id, []);
+             map.get(id)?.push(r);
+        });
+        // Sort by date ascending
+        map.forEach(reports => {
+            reports.sort((a, b) => a.submittedAt - b.submittedAt);
+        });
+        return map;
+    }, [allReports]);
+
+    const filteredStudents = useMemo(() => {
+        return students.filter(s => {
+            if (s.signup_status === 'PENDING') return false;
+            
+            if (filterCourse && s.course !== filterCourse) return false;
+            if (filterSection && s.section !== filterSection) return false;
+
+            if (!searchTerm) return true;
+            
+            const lowerSearch = searchTerm.toLowerCase();
+            const nameMatch = `${s.firstname} ${s.lastname}`.toLowerCase().includes(lowerSearch);
+            const idMatch = s.idnumber.toLowerCase().includes(lowerSearch);
+            
+            if (nameMatch || idMatch) return true;
+
+            const reports = studentReportsMap.get(s.idnumber);
+            if (reports?.some(r => (r.title || "").toLowerCase().includes(lowerSearch))) return true;
+
+            return false;
+        }).sort((a, b) => (a.lastname || "").localeCompare(b.lastname || ""));
+    }, [students, filterCourse, filterSection, searchTerm, studentReportsMap]);
+
+    const visibleWeeks = useMemo(() => {
+        const start = weekOffset;
+        const end = Math.min(start + WEEKS_PER_PAGE, TOTAL_WEEKS);
+        return Array.from({ length: end - start }, (_, i) => start + i + 1);
+    }, [weekOffset]);
+
+    const handlePrevWeeks = () => {
+        setWeekOffset(prev => Math.max(0, prev - WEEKS_PER_PAGE));
+    };
+
+    const handleNextWeeks = () => {
+        setWeekOffset(prev => Math.min(TOTAL_WEEKS - WEEKS_PER_PAGE, prev + WEEKS_PER_PAGE));
+    };
 
     return (
-      <div className="space-y-6 animate-in fade-in duration-500">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-          <p className="text-gray-500">Overview of your students and their activities.</p>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard 
-            title="Total Students" 
-            value={totalStudents} 
-            icon={Users} 
-            color="bg-blue-500" 
-          />
-          <StatCard 
-            title="Courses Managed" 
-            value={assignedCoursesCount || courseDistribution.length} 
-            icon={FileText} 
-            color="bg-orange-500" 
-          />
-          <StatCard 
-            title="Evaluations Open" 
-            value={evaluationsOpen} 
-            icon={UserCog} 
-            color="bg-green-600" 
-          />
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
-            <h3 className="text-lg font-semibold text-gray-900 mb-6">Recent Attendance</h3>
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm text-gray-500">Last 7 days</span>
-              <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200">{recentAttendance.length > 9 ? "9+" : recentAttendance.length}</span>
-            </div>
-            {recentAttendance.length === 0 ? (
-              <div className="p-6 text-center bg-gray-50 rounded-xl border border-dashed border-gray-200 text-gray-500 text-sm">No recent entries</div>
-            ) : (
-              <div className="space-y-3">
-                {recentAttendance.slice(0, 10).map((e, idx) => {
-                  const s = students.find(st => st.idnumber === e.idnumber);
-                  return (
-                    <div key={`${e.idnumber}-${e.ts}-${idx}`} className="flex items-center justify-between p-3 rounded-xl bg-gray-50 border border-gray-100">
-                      <div className="flex items-center gap-3">
-                        <div className="h-10 w-10 rounded-xl bg-orange-100 text-orange-600 flex items-center justify-center font-bold">
-                          {(s?.firstname?.[0] || e.idnumber[0] || "S").toUpperCase()}
-                        </div>
-                        <div>
-                          <div className="font-semibold text-gray-900 text-sm">{s ? `${s.firstname} ${s.lastname}` : e.idnumber}</div>
-                          <div className="text-xs text-gray-500">{new Date(e.ts).toLocaleString()}</div>
-                        </div>
-                      </div>
-                      <div className={`text-xs font-bold px-2 py-0.5 rounded-full ${e.type === "in" ? "bg-green-100 text-green-700 border border-green-200" : "bg-blue-100 text-blue-700 border border-blue-200"}`}>{e.type.toUpperCase()}</div>
+        <div className="space-y-6 animate-in fade-in duration-500">
+            <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-sm flex flex-col gap-3">
+                <div className="flex flex-col md:flex-row items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 w-full md:w-auto">
+                        <select 
+                            value={filterCourse}
+                            onChange={e => { setFilterCourse(e.target.value); setFilterSection(""); }}
+                            className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 bg-gray-50 hover:bg-white transition-all cursor-pointer min-w-[140px]"
+                        >
+                            <option value="">All Courses</option>
+                            {uniqueCourses.map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                        <select 
+                            value={filterSection}
+                            onChange={e => setFilterSection(e.target.value)}
+                            className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 bg-gray-50 hover:bg-white transition-all cursor-pointer min-w-[140px]"
+                        >
+                            <option value="">All Sections</option>
+                            {uniqueSections.map(s => <option key={s} value={s}>{s}</option>)}
+                        </select>
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-          <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
-            <h3 className="text-lg font-semibold text-gray-900 mb-6">Recent Reports</h3>
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm text-gray-500">Last 7 days</span>
-              <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200">{recentReports.length > 9 ? "9+" : recentReports.length}</span>
-            </div>
-            {recentReports.length === 0 ? (
-              <div className="p-6 text-center bg-gray-50 rounded-xl border border-dashed border-gray-200 text-gray-500 text-sm">No recent reports</div>
-            ) : (
-              <div className="space-y-3">
-                {recentReports.slice(0, 10).map((r) => {
-                  const s = students.find(st => st.idnumber === r.idnumber);
-                  return (
-                    <div key={r.id} className="p-3 rounded-xl bg-gray-50 border border-gray-100">
-                      <div className="flex items-center justify-between">
-                        <div className="font-semibold text-gray-900 text-sm">{r.title}</div>
-                        <div className="text-xs text-gray-500">{new Date(r.ts).toLocaleDateString()}</div>
-                      </div>
-                      <div className="text-xs text-gray-500 mt-0.5">{s ? `${s.firstname} ${s.lastname} • ${s.idnumber}` : r.idnumber}</div>
-                      <div className="text-xs text-gray-600 mt-1 line-clamp-2">{r.body || "No content"}</div>
+
+                    <div className="flex items-center gap-2 w-full md:w-auto">
+                        <div className="relative flex-1 md:w-64">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                            <input 
+                                type="text" 
+                                placeholder="Search reports..." 
+                                value={searchTerm}
+                                onChange={e => setSearchTerm(e.target.value)}
+                                className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-gray-300 text-sm font-medium text-gray-900 placeholder-gray-500 bg-gray-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm"
+                            />
+                        </div>
+                        <button 
+                            onClick={() => fetchReports(true)}
+                            className="p-2.5 rounded-xl border border-gray-200 text-gray-500 hover:text-gray-900 hover:bg-gray-50 hover:border-gray-300 transition-all bg-white shadow-sm"
+                            title="Refresh Reports"
+                        >
+                            <RefreshCw size={18} className={loading ? "animate-spin" : ""} />
+                        </button>
                     </div>
-                  );
-                })}
-              </div>
+                </div>
+
+                <div className="h-px w-full bg-gray-100" />
+            </div>
+            
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex-1 min-h-0 flex flex-col">
+                <div className="flex-1 overflow-auto custom-scrollbar">
+                    {loading ? (
+                         <div className="p-8 text-center text-gray-500">Loading reports...</div>
+                    ) : filteredStudents.length === 0 ? (
+                         <div className="p-8 text-center text-gray-500">No students found</div>
+                    ) : (
+                        <table className="w-full text-sm text-left border-collapse">
+                            <thead className="bg-gray-50 text-gray-900 font-bold border-b border-gray-200">
+                                <tr>
+                                    <th className="px-4 py-3 border-r border-gray-200 min-w-[200px]">
+                                        Name
+                                    </th>
+                                    {visibleWeeks.map((week, idx) => (
+                                        <th key={week} className="px-2 py-3 text-center border-r border-gray-200 min-w-[120px] align-top">
+                                            <div className="flex flex-col gap-2 items-center">
+                                                <div className="flex items-center justify-center gap-1 w-full">
+                                                    {idx === 0 && weekOffset > 0 && (
+                                                        <button 
+                                                            onClick={handlePrevWeeks}
+                                                            className="p-1 hover:bg-gray-200 rounded-full text-gray-500 transition-colors"
+                                                        >
+                                                            <ChevronLeft size={16} />
+                                                        </button>
+                                                    )}
+                                                    <span className="text-sm font-bold">{week}</span>
+                                                    {idx === visibleWeeks.length - 1 && weekOffset + WEEKS_PER_PAGE < TOTAL_WEEKS && (
+                                                        <button 
+                                                            onClick={handleNextWeeks}
+                                                            className="p-1 hover:bg-gray-200 rounded-full text-gray-500 transition-colors"
+                                                        >
+                                                            <ChevronRight size={16} />
+                                                        </button>
+                                                    )}
+                                                </div>
+                                                
+                                                {/* Deadline Setter */}
+                                                {(() => {
+                                                     const courseKey = filterCourse || "ALL";
+                                                     const sectionKey = filterSection || "ALL";
+                                                     // Try specific course+section first, then generic course
+                                                     const specificKey = `${courseKey}:::${sectionKey}`;
+                                                     const genericKey = `${courseKey}:::ALL`;
+                                                     
+                                                     const currentDeadline = courseDeadlines[specificKey]?.[week] || (sectionKey === "ALL" ? courseDeadlines[genericKey]?.[week] : undefined);
+                                                     const isEditing = editingDeadline?.week === week;
+                                                     
+                                                     return (
+                                                         <div className="relative w-full flex justify-center">
+                                                            {isEditing ? (
+                                                                <div className="absolute top-0 left-1/2 -translate-x-1/2 bg-white p-3 rounded-xl shadow-xl border border-gray-200 z-50 min-w-[220px] animate-in zoom-in-95 duration-200 text-left">
+                                                                    <div className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-2">
+                                                                        Deadline ({filterCourse || "All"} {filterSection ? `- ${filterSection}` : ""})
+                                                                    </div>
+                                                                    <input 
+                                                                        type="datetime-local" 
+                                                                        className="w-full text-xs p-2 border border-gray-200 rounded-lg mb-2 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none"
+                                                                        value={editingDeadline.date}
+                                                                        onChange={e => setEditingDeadline({...editingDeadline, date: e.target.value})}
+                                                                        autoFocus
+                                                                    />
+                                                                    <div className="flex gap-2">
+                                                                        <button 
+                                                                            onClick={() => {
+                                                                                const c = filterCourse || "ALL";
+                                                                                const s = filterSection || "ALL"; // Use "ALL" if empty
+                                                                                handleSaveDeadline(c, s, week, editingDeadline.date);
+                                                                            }}
+                                                                            className="flex-1 bg-orange-500 text-white text-xs py-1.5 rounded-lg font-medium hover:bg-orange-600 transition-colors"
+                                                                        >
+                                                                            Save
+                                                                        </button>
+                                                                        <button 
+                                                                            onClick={() => setEditingDeadline(null)}
+                                                                            className="flex-1 bg-gray-50 text-gray-600 text-xs py-1.5 rounded-lg font-medium hover:bg-gray-100 border border-gray-200 transition-colors"
+                                                                        >
+                                                                            Cancel
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <button
+                                                                    onClick={() => setEditingDeadline({ week, date: currentDeadline || "" })}
+                                                                    className={`text-[10px] font-medium px-2 py-1 rounded-md border flex items-center justify-center gap-1.5 transition-all w-full max-w-[100px] ${
+                                                                        currentDeadline 
+                                                                            ? "bg-red-50 text-red-600 border-red-200 hover:bg-red-100" 
+                                                                            : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100 hover:text-gray-600 dashed border-gray-300"
+                                                                    }`}
+                                                                >
+                                                                    <Calendar size={10} />
+                                                                    <span className="truncate">
+                                                                        {currentDeadline 
+                                                                            ? new Date(currentDeadline).toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) 
+                                                                            : "Set Due"}
+                                                                    </span>
+                                                                </button>
+                                                            )}
+                                                         </div>
+                                                     );
+                                                })()}
+                                            </div>
+                                        </th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100 border-b border-gray-200">
+                                {filteredStudents.map(s => {
+                                    const reports = studentReportsMap.get(s.idnumber) || [];
+                                    const baseMs = attendanceSummary[s.idnumber] || 0;
+                                    const hours = Math.floor(baseMs / (1000 * 60 * 60));
+                                    
+                                    return (
+                                        <tr key={s.id} className="hover:bg-gray-50 transition-colors">
+                                            <td className="px-4 py-3 font-medium text-gray-900 border-r border-gray-100">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="font-bold text-sm text-gray-900">
+                                                        {s.lastname}, {s.firstname}
+                                                    </div>
+                                                </div>
+                                            </td>
+                                            {visibleWeeks.map((week) => {
+                                                // Adjust index based on week number (Week 1 -> index 0)
+                                                const report = reports[week - 1]; 
+                                                const isReviewed = report && (report.isViewedByInstructor || report.instructorComment);
+                                                return (
+                                                    <td key={week} className="px-2 py-3 text-center border-r border-gray-100">
+                                                        {report ? (
+                                                            <button
+                                                                onClick={() => setSelectedReport(report)}
+                                                                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all shadow-sm whitespace-nowrap flex items-center justify-center gap-1.5 mx-auto w-full max-w-[120px] ${
+                                                                    isReviewed 
+                                                                        ? "bg-green-50 text-green-700 hover:bg-green-100 border-green-200" 
+                                                                        : "bg-orange-50 text-orange-700 hover:bg-orange-100 border-orange-200"
+                                                                }`}
+                                                                title={report.title}
+                                                            >
+                                                                {isReviewed ? (
+                                                                    <>
+                                                                        <CheckCircle2 size={13} className="shrink-0" />
+                                                                        <span>Reviewed</span>
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                        <Clock size={13} className="shrink-0" />
+                                                                        <span>Needs Review</span>
+                                                                    </>
+                                                                )}
+                                                            </button>
+                                                        ) : (
+                                                            <div className="flex justify-center">
+                                                                <div className="w-2 h-2 rounded-full bg-gray-200"></div>
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                );
+                                            })}
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            </div>
+
+            {/* Detail Modal */}
+            {selectedReport && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+                    <div className="relative w-full max-w-4xl max-h-[90vh] rounded-2xl bg-white shadow-2xl overflow-hidden flex flex-col animate-in fade-in zoom-in duration-200">
+                        <button
+                          onClick={() => setSelectedReport(null)}
+                          className="absolute right-4 top-4 text-gray-400 hover:text-gray-600 z-10 p-1 hover:bg-gray-100 rounded-full transition-colors"
+                        >
+                          <X size={24} />
+                        </button>
+                        
+                        <div className="flex flex-col h-full">
+                            {/* Header */}
+                            <div className="p-6 border-b border-gray-100 flex-none bg-gray-50/30">
+                                <div className="flex items-start justify-between mb-4 pr-8">
+                                    <div>
+                                        <h2 className="text-xl font-bold text-gray-900 mb-1">{selectedReport.title}</h2>
+                                        <div className="flex items-center gap-2 text-sm text-gray-500">
+                                            <UserIcon size={14} />
+                                            <span>
+                                                {(() => {
+                                                    const s = students.find(st => st.idnumber === (selectedReport as any).idnumber);
+                                                    return s ? `${s.firstname} ${s.lastname}` : (selectedReport as any).idnumber;
+                                                })()}
+                                            </span>
+                                            <span className="mx-1">•</span>
+                                            <Clock size={14} />
+                                            <span>{new Date(selectedReport.submittedAt).toLocaleString()}</span>
+                                        </div>
+                                    </div>
+                                    {selectedReport.isViewedByInstructor || selectedReport.instructorComment ? 
+                                        <span className="px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 border border-green-200">Reviewed</span> : 
+                                        <span className="px-3 py-1 rounded-full text-xs font-bold bg-yellow-100 text-yellow-700 border border-yellow-200">Needs Review</span>
+                                    }
+                                </div>
+                            </div>
+
+                            <div className="flex-1 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent space-y-6">
+                                <div className="prose prose-sm max-w-none text-gray-700 whitespace-pre-wrap">
+                                    {(() => {
+                                        const primary = (selectedReport.body || "").trim();
+                                        if (primary) return primary;
+                                        const fallback = String((selectedReport as any).text || "").trim();
+                                        if (fallback) return fallback;
+                                        return "No report content provided.";
+                                    })()}
+                                </div>
+
+                                {/* Attachment */}
+                                {selectedReport.fileUrl && (
+                                    <div className="mt-4">
+                                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Attachment</div>
+                                        <a 
+                                            href={selectedReport.fileUrl} 
+                                            target="_blank" 
+                                            rel="noopener noreferrer"
+                                            className="flex items-center gap-3 p-3 rounded-xl border border-gray-200 hover:bg-gray-50 transition-colors group"
+                                        >
+                                            <div className="p-2 bg-orange-100 text-orange-600 rounded-lg group-hover:bg-orange-200 transition-colors">
+                                                <FileText size={20} />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <div className="text-sm font-bold text-gray-900 truncate">{selectedReport.fileName || "Attached File"}</div>
+                                                <div className="text-xs text-gray-500">{selectedReport.fileType || "Document"}</div>
+                                            </div>
+                                            <Download size={18} className="text-gray-400 group-hover:text-gray-600" />
+                                        </a>
+                                    </div>
+                                )}
+
+                                {/* Feedback Section (Moved into scrollable area) */}
+                                <div className="pt-6 border-t border-gray-100">
+                                    {selectedReport.instructorComment ? (
+                                        <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <div className="p-1.5 bg-green-100 text-green-600 rounded-lg">
+                                                    <CheckCircle2 size={16} />
+                                                </div>
+                                                <span className="text-xs font-bold text-gray-900 uppercase tracking-wider">Instructor Feedback</span>
+                                            </div>
+                                            <p className="text-gray-700 text-sm whitespace-pre-wrap pl-1">{selectedReport.instructorComment}</p>
+                                        </div>
+                                    ) : (
+                                        <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+                                            <div className="flex items-center gap-2 mb-3">
+                                                <MessageSquare size={16} className="text-orange-600" />
+                                                <span className="text-sm font-bold text-gray-900">Add Feedback</span>
+                                            </div>
+                                            
+                                            <div className="space-y-2">
+                                                <div className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+                                                    Instructor Comment
+                                                </div>
+                                                <textarea
+                                                    value={commentText}
+                                                    onChange={e => setCommentText(e.target.value)}
+                                                    className="w-full p-4 rounded-xl border-2 border-orange-200 focus:outline-none focus:border-orange-500 focus:ring-4 focus:ring-orange-100 min-h-[140px] text-sm resize-y bg-white placeholder-gray-400 shadow-sm transition-all"
+                                                    placeholder="Write your feedback here..."
+                                                />
+                                            </div>
+                                            
+                                            <div className="flex items-center justify-between mt-3">
+                                                <p className="text-[10px] text-gray-400 px-1 hidden sm:block">
+                                                    Clicking "View" will mark this report as reviewed.
+                                                </p>
+                                                <div className="flex items-center gap-3 ml-auto">
+                                                    <span className="text-xs text-gray-400 font-medium">
+                                                        {commentText.trim() ? "Sending comment..." : "Mark as Viewed"}
+                                                    </span>
+                                                    <button 
+                                                        onClick={handleSaveLocalComment}
+                                                        disabled={isSavingComment}
+                                                        className="px-6 py-2 text-sm font-bold text-white bg-orange-600 hover:bg-orange-700 rounded-xl shadow-md shadow-orange-600/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all active:scale-95"
+                                                    >
+                                                        {isSavingComment ? "Saving..." : "View"}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             )}
-          </div>
         </div>
-      </div>
     );
   };
 
+  const AccountApprovalView = () => {
+    const [searchTerm, setSearchTerm] = useState("");
+    const [filterCourse, setFilterCourse] = useState("");
+    const [filterSection, setFilterSection] = useState("");
+    const [filterStatus, setFilterStatus] = useState("PENDING");
+    const [actionLoading, setActionLoading] = useState<number | null>(null);
+    const [isBulkApproving, setIsBulkApproving] = useState(false);
+    
+    // Selection State
+    const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+    
+    // Confirmation Modal State
+    const [confirmAction, setConfirmAction] = useState<{ type: 'single' | 'bulk', id?: number, action: 'approve' | 'reject' } | null>(null);
+    const [rejectionNote, setRejectionNote] = useState("");
 
-  const UserManagementView = () => {
-    const [activeTab, setActiveTab] = useState<"student" | "supervisor">("student");
-    const [successMessage, setSuccessMessage] = useState<string | null>(null);
-
-    const allUsers = useMemo(() => [...students, ...supervisors], [students, supervisors]);
+    // View Details Modal State
+    const [viewingStudent, setViewingStudent] = useState<User | null>(null);
 
     const { allowedCourses, allowedSections } = useMemo(() => {
       if (!myProfile) return { allowedCourses: [], allowedSections: [] };
@@ -2153,48 +3960,394 @@ export default function InstructorPage() {
       return { allowedCourses: ac, allowedSections: as };
     }, [myProfile, availableCourses, availableSections]);
 
+    const filteredStudents = useMemo(() => {
+        const normalize = (s: string) => s.toLowerCase().trim();
+        return students.filter(s => {
+            // Search filter
+            const search = normalize(searchTerm);
+            const name = normalize(`${s.firstname || ""} ${s.lastname || ""}`);
+            const id = normalize(s.idnumber);
+            const matchesSearch = !search || name.includes(search) || id.includes(search);
+
+            // Course filter
+            const sCourse = normalize(s.course || "");
+            const matchesCourse = !filterCourse || sCourse.includes(normalize(filterCourse));
+
+            // Section filter
+            const sSection = normalize(s.section || "");
+            const matchesSection = !filterSection || sSection.includes(normalize(filterSection));
+
+            // Status filter
+            const sStatus = s.signup_status || 'APPROVED';
+            const matchesStatus = filterStatus === "ALL" || sStatus === filterStatus;
+
+            return matchesSearch && matchesCourse && matchesSection && matchesStatus;
+        });
+    }, [students, searchTerm, filterCourse, filterSection, filterStatus]);
+
+    // Clear selection when filters change
+    useEffect(() => {
+        setSelectedIds(new Set());
+    }, [filterCourse, filterSection, filterStatus, searchTerm]);
+
+    const toggleSelection = (id: number) => {
+        const newSet = new Set(selectedIds);
+        if (newSet.has(id)) {
+            newSet.delete(id);
+        } else {
+            newSet.add(id);
+        }
+        setSelectedIds(newSet);
+    };
+
+    const toggleAll = () => {
+        // Only select pending students
+        const pendingStudents = filteredStudents.filter(s => (s.signup_status || 'APPROVED') !== 'APPROVED');
+        if (selectedIds.size === pendingStudents.length && pendingStudents.length > 0) {
+            setSelectedIds(new Set());
+        } else {
+            setSelectedIds(new Set(pendingStudents.map(s => s.id)));
+        }
+    };
+
+    const performAction = async (ids: number[], action: 'approve' | 'reject', note?: string) => {
+        if (!myProfile) return;
+        
+        try {
+            if (ids.length === 1) setActionLoading(ids[0]);
+            else setIsBulkApproving(true);
+
+            await Promise.all(ids.map(id => 
+                fetch(`/api/users/${id}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ 
+                      signup_status: action === 'approve' ? "APPROVED" : "REJECTED",
+                      actorId: myProfile.idnumber,
+                      actorRole: myProfile.role,
+                      reason: `Instructor ${action}`,
+                      rejectionNote: action === 'reject' ? (note || "") : undefined
+                    })
+                }).then(res => {
+                    if (!res.ok) throw new Error(`Failed to ${action} ${id}`);
+                    return res;
+                })
+            ));
+            
+            setRefreshTrigger(prev => prev + 1);
+            setSelectedIds(new Set());
+        } catch (e) {
+            alert(`Failed to ${action} one or more students`);
+        } finally {
+            setActionLoading(null);
+            setIsBulkApproving(false);
+            setConfirmAction(null);
+        }
+    };
+
     return (
-      <div className="h-full flex flex-col gap-6 max-w-2xl mx-auto w-full min-w-0">
-        {/* Tab Switcher */}
-        <div className="flex bg-gray-100 p-1 rounded-2xl w-full">
-            <button 
-                onClick={() => setActiveTab("student")}
-                className={`flex-1 px-3 py-2.5 rounded-xl text-sm font-bold transition-all ${activeTab === "student" ? "bg-white text-orange-600 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+      <div className="h-full flex flex-col gap-6 w-full min-w-0 relative">
+        <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm flex flex-col md:flex-row gap-4 items-center">
+            <div className="flex-1 relative w-full">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500" size={18} />
+                <input 
+                    type="text" 
+                    placeholder="Search by name or ID..." 
+                    value={searchTerm}
+                    onChange={e => setSearchTerm(e.target.value)}
+                    className="w-full pl-11 pr-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm"
+                />
+            </div>
+            <select 
+                value={filterCourse}
+                onChange={e => setFilterCourse(e.target.value)}
+                className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
             >
-                Add Student
-            </button>
-            <button 
-                onClick={() => setActiveTab("supervisor")}
-                className={`flex-1 px-3 py-2.5 rounded-xl text-sm font-bold transition-all ${activeTab === "supervisor" ? "bg-white text-orange-600 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+                <option value="">All Courses</option>
+                {allowedCourses.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+            </select>
+            <select 
+                value={filterSection}
+                onChange={e => setFilterSection(e.target.value)}
+                className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
             >
-                Add Supervisor
-            </button>
+                <option value="">All Sections</option>
+                {allowedSections.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+            </select>
+            <select 
+                value={filterStatus}
+                onChange={e => setFilterStatus(e.target.value)}
+                className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
+            >
+                <option value="ALL">All Status</option>
+                        <option value="PENDING">Pending</option>
+                        <option value="APPROVED">Approved</option>
+                        <option value="REJECTED">Rejected</option>
+                    </select>
+            
+            {/* Bulk Action Buttons */}
+            {selectedIds.size > 0 && (
+                <div className="flex items-center gap-2 animate-in fade-in zoom-in duration-200">
+                    <button 
+                        onClick={() => setConfirmAction({ type: 'bulk', action: 'approve' })}
+                        disabled={isBulkApproving}
+                        className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-sm font-bold shadow-sm transition-colors disabled:opacity-50 whitespace-nowrap"
+                    >
+                        {isBulkApproving ? 'Processing...' : `Approve (${selectedIds.size})`}
+                    </button>
+                    <button 
+                        onClick={() => setConfirmAction({ type: 'bulk', action: 'reject' })}
+                        disabled={isBulkApproving}
+                        className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-bold shadow-sm transition-colors disabled:opacity-50 whitespace-nowrap"
+                    >
+                        {isBulkApproving ? 'Processing...' : `Reject (${selectedIds.size})`}
+                    </button>
+                </div>
+            )}
         </div>
 
-        {/* Inline Add Form */}
-        <div className="bg-white rounded-3xl border border-gray-200 shadow-sm overflow-visible">
-             <AddUserForm 
-                role={activeTab}
-                onSuccess={() => { 
-                    setRefreshTrigger(prev => prev + 1); 
-                    setSuccessMessage(`${activeTab === 'student' ? 'Student' : 'Supervisor'} has been successfully added to the system.`);
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex-1">
+            {/* Desktop Table */}
+            <div className="overflow-x-auto h-full hidden md:block">
+                <table className="w-full text-sm text-left">
+                    <thead className="bg-gray-50 text-gray-500 font-medium border-b border-gray-100 sticky top-0 z-10">
+                        <tr>
+                            <th className="px-6 py-3 w-10">
+                                <input 
+                                    type="checkbox" 
+                                    className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                                    onChange={toggleAll}
+                                    checked={
+                                        filteredStudents.some(s => (s.signup_status || 'APPROVED') !== 'APPROVED') &&
+                                        selectedIds.size === filteredStudents.filter(s => (s.signup_status || 'APPROVED') !== 'APPROVED').length &&
+                                        filteredStudents.filter(s => (s.signup_status || 'APPROVED') !== 'APPROVED').length > 0
+                                    }
+                                />
+                            </th>
+                            <th className="px-6 py-3">Student</th>
+                            <th className="px-6 py-3">ID Number</th>
+                            <th className="px-6 py-3">Course & Section</th>
+                            <th className="px-6 py-3">Status</th>
+                            <th className="px-6 py-3">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                        {filteredStudents.length === 0 ? (
+                            <tr><td colSpan={6} className="px-6 py-8 text-center text-gray-500">No students found</td></tr>
+                        ) : (
+                            filteredStudents.map(s => {
+                                const isPending = (s.signup_status || 'APPROVED') !== 'APPROVED';
+                                return (
+                                    <tr key={s.id} className={`hover:bg-gray-50/50 ${selectedIds.has(s.id) ? 'bg-orange-50/30' : ''}`}>
+                                        <td className="px-6 py-3">
+                                            {isPending && (
+                                                <input 
+                                                    type="checkbox" 
+                                                    checked={selectedIds.has(s.id)}
+                                                    onChange={() => toggleSelection(s.id)}
+                                                    className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                                                />
+                                            )}
+                                        </td>
+                                        <td className="px-6 py-3 font-medium text-gray-900">
+                                            <button 
+                                                onClick={() => setViewingStudent(s)}
+                                                className="hover:text-orange-600 hover:underline text-left font-bold"
+                                            >
+                                                {s.firstname} {s.lastname}
+                                            </button>
+                                        </td>
+                                        <td className="px-6 py-3 text-gray-600">{s.idnumber}</td>
+                                        <td className="px-6 py-3 text-gray-600">
+                                            {formatCourseSection(s.course, s.section)}
+                                        </td>
+                                        <td className="px-6 py-3">
+                                            <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium border ${
+                                                !isPending
+                                                ? 'bg-green-50 text-green-700 border-green-200' 
+                                                : s.signup_status === 'REJECTED'
+                                                ? 'bg-red-50 text-red-700 border-red-200'
+                                                : 'bg-yellow-50 text-yellow-700 border-yellow-200'
+                                            }`}>
+                                                {s.signup_status || 'APPROVED'}
+                                            </span>
+                                        </td>
+                                        <td className="px-6 py-3">
+                                            {isPending && (
+                                                <div className="flex gap-2">
+                                                    <button 
+                                                        onClick={() => setConfirmAction({ type: 'single', id: s.id, action: 'approve' })}
+                                                        disabled={actionLoading === s.id}
+                                                        className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
+                                                    >
+                                                        {actionLoading === s.id ? '...' : 'Approve'}
+                                                    </button>
+                                                    <button 
+                                                        onClick={() => setConfirmAction({ type: 'single', id: s.id, action: 'reject' })}
+                                                        disabled={actionLoading === s.id}
+                                                        className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
+                                                    >
+                                                        {actionLoading === s.id ? '...' : 'Reject'}
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </td>
+                                    </tr>
+                                );
+                            })
+                        )}
+                    </tbody>
+                </table>
+            </div>
+
+            {/* Mobile Cards */}
+            <div className="md:hidden">
+                {filteredStudents.length === 0 ? (
+                    <div className="px-4 py-8 text-center text-gray-500 text-sm">
+                        No students found
+                    </div>
+                ) : (
+                    <div className="divide-y divide-gray-100">
+                        {filteredStudents.map(s => {
+                            const isPending = (s.signup_status || 'APPROVED') !== 'APPROVED';
+                            const isSelected = selectedIds.has(s.id);
+                            return (
+                                <div 
+                                    key={s.id} 
+                                    className={`p-4 ${isSelected ? 'bg-orange-50/30' : ''}`}
+                                >
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div className="flex-1">
+                                            <button 
+                                                onClick={() => setViewingStudent(s)}
+                                                className="text-sm font-bold text-gray-900 hover:text-orange-600 hover:underline text-left"
+                                            >
+                                                {s.firstname} {s.lastname}
+                                            </button>
+                                            <div className="text-xs text-gray-600 mt-0.5">
+                                                {s.idnumber}
+                                            </div>
+                                            <div className="text-xs text-gray-500 mt-0.5">
+                                                {formatCourseSection(s.course, s.section)}
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-3">
+                                            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border ${
+                                                !isPending
+                                                ? 'bg-green-50 text-green-700 border-green-200' 
+                                                : s.signup_status === 'REJECTED'
+                                                ? 'bg-red-50 text-red-700 border-red-200'
+                                                : 'bg-yellow-50 text-yellow-700 border-yellow-200'
+                                            }`}>
+                                                {s.signup_status || 'APPROVED'}
+                                            </span>
+                                            {isPending && (
+                                                <input 
+                                                    type="checkbox" 
+                                                    checked={isSelected}
+                                                    onChange={() => toggleSelection(s.id)}
+                                                    className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                                                    aria-label="Select for bulk action"
+                                                />
+                                            )}
+                                        </div>
+                                    </div>
+                                    {isPending && (
+                                        <div className="mt-3 flex items-center gap-2">
+                                            <button 
+                                                onClick={() => setConfirmAction({ type: 'single', id: s.id, action: 'approve' })}
+                                                disabled={actionLoading === s.id}
+                                                className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
+                                            >
+                                                {actionLoading === s.id ? '...' : 'Approve'}
+                                            </button>
+                                            <button 
+                                                onClick={() => setConfirmAction({ type: 'single', id: s.id, action: 'reject' })}
+                                                disabled={actionLoading === s.id}
+                                                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
+                                            >
+                                                {actionLoading === s.id ? '...' : 'Reject'}
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+        </div>
+
+        {/* Confirmation Modal */}
+        {confirmAction && (
+            <ConfirmationModal 
+                title={confirmAction.action === 'approve' ? "Approve Student Account(s)?" : "Reject Student Account(s)?"}
+                message={
+                    confirmAction.type === 'bulk'
+                        ? `Are you sure you want to ${confirmAction.action} ${selectedIds.size} selected student(s)?`
+                        : `Are you sure you want to ${confirmAction.action} this student account?`
+                }
+                confirmLabel={`Yes, ${confirmAction.action === 'approve' ? 'Approve' : 'Reject'}`}
+                variant={confirmAction.action === 'approve' ? 'warning' : 'danger'}
+                noteLabel={confirmAction.action === 'reject' ? "Rejection note" : undefined}
+                noteRequired={confirmAction.action === 'reject'}
+                noteValue={confirmAction.action === 'reject' ? rejectionNote : ""}
+                onNoteChange={value => {
+                    if (confirmAction.action === 'reject') {
+                        setRejectionNote(value);
+                    }
                 }}
-                onClose={() => {}} // No-op for inline
-                availableCourses={availableCourses}
-                availableSections={availableSections}
-                users={allUsers}
-                allowedCourses={allowedCourses}
-                allowedSections={allowedSections}
-            />
-        </div>
-
-        {/* Success Modal */}
-        {successMessage && (
-            <SuccessModal 
-                message={successMessage} 
-                onClose={() => setSuccessMessage(null)} 
+                onConfirm={() => {
+                    if (confirmAction.action === 'reject' && (!rejectionNote || !rejectionNote.trim())) {
+                        return;
+                    }
+                    if (confirmAction.type === 'bulk') {
+                        performAction(Array.from(selectedIds), confirmAction.action, rejectionNote);
+                    } else if (confirmAction.id) {
+                        performAction([confirmAction.id], confirmAction.action, rejectionNote);
+                    }
+                    if (confirmAction.action === 'reject') {
+                        setRejectionNote("");
+                    }
+                }}
+                onCancel={() => {
+                    setConfirmAction(null);
+                    setRejectionNote("");
+                }}
             />
         )}
+
+        {/* View Details Modal */}
+        {viewingStudent && (
+            <Modal onClose={() => setViewingStudent(null)} className="max-w-4xl">
+                <ViewUserDetails 
+                    user={viewingStudent} 
+                    users={students} 
+                    onClose={() => setViewingStudent(null)} 
+                />
+            </Modal>
+        )}
+      </div>
+    );
+  };
+
+  const ApprovalRestrictedView = () => {
+    return (
+      <div className="h-full flex items-center justify-center w-full min-w-0">
+        <div className="max-w-md w-full bg-white rounded-2xl border border-gray-200 shadow-sm p-8 text-center">
+          <div className="mx-auto mb-4 h-12 w-12 rounded-full bg-orange-50 text-orange-600 flex items-center justify-center">
+            <ShieldAlert size={28} />
+          </div>
+          <h2 className="text-xl font-bold text-gray-900 mb-2">
+            Account Approval Is Restricted
+          </h2>
+          <p className="text-sm text-gray-600 mb-4">
+            Account approval actions are currently disabled for your instructor account.
+          </p>
+          <p className="text-sm text-gray-600">
+            Please contact your coordinator if you need access to manage account approvals.
+          </p>
+        </div>
       </div>
     );
   };
@@ -2376,9 +4529,9 @@ export default function InstructorPage() {
   // --- Render Layout ---
 
   const menuItems: { id: TabId; label: string; icon: React.ComponentType<{ size?: number; className?: string }> }[] = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { id: "students", label: "Students", icon: Users },
-    { id: "users", label: "User Management", icon: UserCog },
+    { id: "attendance", label: "Attendance Monitoring", icon: ClipboardCheck },
+    { id: "reports", label: "Reports", icon: FileText },
+    { id: "approval", label: "Account approval", icon: UserCheck },
     { id: "profile", label: "Profile", icon: UserIcon },
   ];
 
@@ -2416,7 +4569,7 @@ export default function InstructorPage() {
                 onClick={() => { 
                   setActiveTab(item.id); 
                   if(isMobile) setSidebarOpen(false); 
-                  if (item.id === "students") setBadgeVersion(v => v + 1);
+                  if (item.id === "attendance") setBadgeVersion(v => v + 1);
                 }}
                 className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all duration-200 font-medium ${
                   isActive 
@@ -2429,20 +4582,6 @@ export default function InstructorPage() {
                   {item.label}
                 </div>
                 <div className="flex items-center gap-2">
-                  {item.id === "students" && (
-                    (() => {
-                      const total = combinedBadgeCount;
-                      return (
-                        <>
-                          {total > 0 && (
-                            <span className="px-2 py-0.5 rounded-full text-[11px] font-bold border bg-red-50 text-red-700 border-red-200">
-                              {total > 9 ? "9+" : total}
-                            </span>
-                          )}
-                        </>
-                      );
-                    })()
-                  )}
                   {isActive && <ChevronRight size={16} className={isActive ? "text-white" : "text-gray-400"} />}
                 </div>
               </button>
@@ -2489,37 +4628,25 @@ export default function InstructorPage() {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Top Header (Mobile Only / Breadcrumbs) */}
         <header className="bg-white border-b border-gray-200 h-16 flex items-center justify-between px-4 lg:px-8">
-          <div className="flex items-center gap-4">
-            <div className="relative lg:hidden">
-              <button 
-                onClick={() => setSidebarOpen(!isSidebarOpen)}
-                className="p-2 hover:bg-gray-100 rounded-lg text-gray-600"
-              >
-                <Menu size={24} />
-              </button>
-              <div className="absolute -top-1 -right-1 flex items-center gap-1">
-                {(() => {
-                  const total = combinedBadgeCount;
-                  return total > 0 ? (
-                    <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold border bg-red-50 text-red-700 border-red-200 shadow-sm">
-                      {total > 9 ? "9+" : total}
-                    </span>
-                  ) : null;
-                })()}
+            <div className="flex items-center gap-4">
+              <div className="relative lg:hidden">
+                <button 
+                  onClick={() => setSidebarOpen(!isSidebarOpen)}
+                  className="p-2 hover:bg-gray-100 rounded-lg text-gray-600"
+                >
+                  <Menu size={24} />
+                </button>
               </div>
+              <div />
             </div>
-            <div className="hidden lg:block text-sm text-gray-400 font-medium">
-              Portal / <span className="text-gray-900 capitalize">{activeTab.replace('-', ' ')}</span>
-            </div>
-          </div>
           <div />
         </header>
 
         {/* View Area */}
         <main className="flex-1 overflow-auto p-4 lg:p-8">
-          {activeTab === "dashboard" && <DashboardView />}
-          {activeTab === "students" && <StudentsView students={students} attendance={attendance} reports={reports} recentAttendance={recentAttendance} recentReports={recentReports} myIdnumber={myIdnumber as string} selected={selected} setSelected={setSelected} viewingReport={viewingReport} setViewingReport={(r) => { setViewingReport(r); setBadgeVersion(v => v + 1); }} setReports={setReports} isAttendanceModalOpen={isAttendanceModalOpen} setAttendanceModalOpen={(open) => { setAttendanceModalOpen(open); if (!open) setBadgeVersion(v => v + 1); }} isReportsModalOpen={isReportsModalOpen} setReportsModalOpen={(open) => { setReportsModalOpen(open); if (!open) setBadgeVersion(v => v + 1); }} evaluationStatuses={evaluationStatuses} setEvaluationStatuses={setEvaluationStatuses} activeSessions={activeSessions} attendanceSummary={attendanceSummary} evaluation={evaluation} onViewedChange={() => setBadgeVersion(v => v + 1)} />}
-          {activeTab === "users" && <UserManagementView />}
+          {activeTab === "attendance" && <AttendanceMonitoringView students={students} attendance={attendance} onNavigateToApproval={() => setActiveTab("approval")} attendanceSummary={attendanceSummary} evaluationStatuses={evaluationStatuses} toggleEvaluation={toggleEvaluation} />}
+          {activeTab === "reports" && <ReportsView />}
+          {activeTab === "approval" && (allowApproval ? <AccountApprovalView /> : <ApprovalRestrictedView />)}
           {activeTab === "profile" && <ProfileView />}
         </main>
       </div>

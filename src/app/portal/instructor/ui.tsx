@@ -20,6 +20,7 @@ export interface User {
   courseIds?: number[];
   sectionIds?: number[];
   supervisorid?: string;
+  signup_status?: string;
 }
 
 export interface Course {
@@ -35,10 +36,10 @@ export interface Section {
 
 // --- Helper Components ---
 
-export function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+export function Modal({ children, onClose, className }: { children: React.ReactNode; onClose: () => void; className?: string }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-      <div className="relative w-full max-w-lg max-h-[85vh] rounded-2xl bg-white shadow-2xl overflow-y-auto animate-in fade-in zoom-in duration-200">
+      <div className={`relative w-full max-h-[85vh] rounded-2xl bg-white shadow-2xl overflow-y-auto animate-in fade-in zoom-in duration-200 ${className || "max-w-lg"}`}>
         <button
           onClick={onClose}
           className="absolute right-4 top-4 text-gray-400 hover:text-gray-600 z-10 p-1 hover:bg-gray-100 rounded-full transition-colors"
@@ -76,22 +77,71 @@ export function ConfirmationModal({
   onConfirm, 
   onCancel,
   title = "Are you sure?",
-  confirmLabel = "Yes, Add User"
+  confirmLabel = "Yes, Add User",
+  variant = "warning",
+  noteLabel,
+  noteRequired,
+  noteValue,
+  onNoteChange
 }: { 
   message: string; 
   onConfirm: () => void; 
   onCancel: () => void;
   title?: string;
   confirmLabel?: string;
+  variant?: "warning" | "danger" | "success";
+  noteLabel?: string;
+  noteRequired?: boolean;
+  noteValue?: string;
+  onNoteChange?: (value: string) => void;
 }) {
+  const styles = {
+    warning: {
+      bg: "bg-orange-50",
+      text: "text-orange-500",
+      ring: "ring-orange-50/50",
+      btn: "bg-[#F97316] hover:bg-[#ea6a12] shadow-orange-500/20"
+    },
+    danger: {
+      bg: "bg-red-50",
+      text: "text-red-500",
+      ring: "ring-red-50/50",
+      btn: "bg-red-600 hover:bg-red-700 shadow-red-500/20"
+    },
+    success: {
+      bg: "bg-green-50",
+      text: "text-green-500",
+      ring: "ring-green-50/50",
+      btn: "bg-green-600 hover:bg-green-700 shadow-green-500/20"
+    }
+  };
+  
+  const currentStyle = styles[variant] || styles.warning;
+
+  const showNoteField = Boolean(noteLabel);
+  const canConfirm = !noteRequired || (noteValue && noteValue.trim().length > 0);
+
   return (
     <Modal onClose={onCancel}>
       <div className="flex flex-col items-center justify-center p-8 text-center">
-        <div className="w-20 h-20 bg-orange-50 text-orange-500 rounded-full flex items-center justify-center mb-6 ring-8 ring-orange-50/50">
+        <div className={`w-20 h-20 ${currentStyle.bg} ${currentStyle.text} rounded-full flex items-center justify-center mb-6 ring-8 ${currentStyle.ring}`}>
           <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
         </div>
         <h3 className="text-2xl font-bold text-gray-900 mb-2">{title}</h3>
-        <p className="text-gray-500 mb-8 max-w-sm mx-auto leading-relaxed">{message}</p>
+        <p className="text-gray-500 mb-6 max-w-sm mx-auto leading-relaxed">{message}</p>
+        {showNoteField && (
+          <div className="w-full max-w-md mx-auto mb-6 text-left">
+            <label className="block text-sm font-semibold text-gray-700 mb-1">
+              {noteLabel}{noteRequired ? " *" : ""}
+            </label>
+            <textarea
+              value={noteValue || ""}
+              onChange={e => onNoteChange && onNoteChange(e.target.value)}
+              className="w-full min-h-[90px] rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all resize-none"
+              placeholder={noteRequired ? "Required. Explain the reason for rejection..." : "Optional note..."}
+            />
+          </div>
+        )}
         <div className="flex gap-4">
           <button
             onClick={onCancel}
@@ -101,11 +151,71 @@ export function ConfirmationModal({
           </button>
           <button
             onClick={onConfirm}
-            className="min-w-[120px] py-3 px-6 bg-[#F97316] hover:bg-[#ea6a12] text-white font-bold rounded-xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-orange-500/20"
+            disabled={!canConfirm}
+            className={`min-w-[120px] py-3 px-6 text-white font-bold rounded-xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg ${currentStyle.btn} ${!canConfirm ? "opacity-60 cursor-not-allowed hover:scale-100" : ""}`}
           >
             {confirmLabel}
           </button>
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+export function AlertModal({ 
+  message, 
+  onClose,
+  title = "Notice",
+  btnLabel = "Close",
+  variant = "warning"
+}: { 
+  message: string; 
+  onClose: () => void; 
+  title?: string;
+  btnLabel?: string;
+  variant?: "warning" | "danger" | "success";
+}) {
+  const styles = {
+    warning: {
+      bg: "bg-orange-50",
+      text: "text-orange-500",
+      ring: "ring-orange-50/50",
+      btn: "bg-[#F97316] hover:bg-[#ea6a12] shadow-orange-500/20"
+    },
+    danger: {
+      bg: "bg-red-50",
+      text: "text-red-500",
+      ring: "ring-red-50/50",
+      btn: "bg-red-600 hover:bg-red-700 shadow-red-500/20"
+    },
+    success: {
+      bg: "bg-green-50",
+      text: "text-green-500",
+      ring: "ring-green-50/50",
+      btn: "bg-green-600 hover:bg-green-700 shadow-green-500/20"
+    }
+  };
+  
+  const currentStyle = styles[variant] || styles.warning;
+
+  return (
+    <Modal onClose={onClose}>
+      <div className="flex flex-col items-center justify-center p-8 text-center">
+        <div className={`w-20 h-20 ${currentStyle.bg} ${currentStyle.text} rounded-full flex items-center justify-center mb-6 ring-8 ${currentStyle.ring}`}>
+          {variant === 'success' ? (
+             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          ) : (
+             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+          )}
+        </div>
+        <h3 className="text-2xl font-bold text-gray-900 mb-2">{title}</h3>
+        <p className="text-gray-500 mb-8 max-w-sm mx-auto leading-relaxed">{message}</p>
+        <button
+          onClick={onClose}
+          className={`min-w-[120px] py-3 px-6 text-white font-bold rounded-xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg ${currentStyle.btn}`}
+        >
+          {btnLabel}
+        </button>
       </div>
     </Modal>
   );
@@ -808,6 +918,7 @@ export function UsersView({
   onEdit, 
   onView, 
   onDelete,
+  onApprove,
   hideAddButton = false
 }: { 
   role: RoleType; 
@@ -816,21 +927,27 @@ export function UsersView({
   onEdit: (user: User) => void;
   onView: (user: User) => void;
   onDelete: (user: User) => void;
+  onApprove?: (user: User) => void;
   hideAddButton?: boolean;
 }) {
   const [search, setSearch] = useState("");
   const title = role.charAt(0).toUpperCase() + role.slice(1) + "s";
 
-  const filteredUsers = useMemo(() => {
+  const { activeUsers, pendingUsers } = useMemo(() => {
     const s = search.toLowerCase();
     const targetRole = role.toLowerCase();
     
-    return users.filter(u => 
-      u.role?.toLowerCase() === targetRole &&
+    const roleUsers = users.filter(u => u.role?.toLowerCase() === targetRole);
+    
+    const filterFn = (u: User) => 
       (u.idnumber?.toLowerCase().includes(s) || 
        u.firstname?.toLowerCase().includes(s) || 
-       u.lastname?.toLowerCase().includes(s))
-    );
+       u.lastname?.toLowerCase().includes(s));
+
+    const pending = roleUsers.filter(u => u.signup_status === 'PENDING').filter(filterFn);
+    const active = roleUsers.filter(u => u.signup_status !== 'PENDING').filter(filterFn);
+
+    return { activeUsers: active, pendingUsers: pending };
   }, [users, role, search]);
 
   return (
@@ -869,7 +986,58 @@ export function UsersView({
 
       {/* List */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50/30">
-        {filteredUsers.length === 0 ? (
+        {/* Pending Section */}
+        {pendingUsers.length > 0 && (
+          <div className="mb-6">
+            <div className="flex items-center gap-2 mb-3 px-2">
+              <div className="h-2 w-2 rounded-full bg-orange-500 animate-pulse"></div>
+              <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider">Pending Approval ({pendingUsers.length})</h3>
+            </div>
+            <div className="space-y-3">
+              {pendingUsers.map((user) => (
+                <div key={user.id} className="group flex items-center justify-between p-4 rounded-2xl bg-orange-50 border border-orange-200 shadow-sm">
+                  <div className="flex items-center gap-4 overflow-hidden">
+                    <div className="flex-shrink-0 h-12 w-12 rounded-full bg-white text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-lg">
+                      {(user.firstname?.[0] || user.idnumber[0]).toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-bold text-gray-900 text-sm sm:text-base truncate">
+                          {user.firstname} {user.lastname}
+                        </h3>
+                        <span className="px-2 py-0.5 rounded-md bg-orange-100 text-orange-700 text-xs font-bold">PENDING</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs sm:text-sm text-gray-500">
+                        <span className="font-medium text-gray-600 bg-white/50 px-2 py-0.5 rounded-md">{user.idnumber}</span>
+                        {user.course && <span className="truncate">{user.course} - {user.section}</span>}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {onApprove && (
+                      <button 
+                        onClick={() => onApprove(user)}
+                        className="px-4 py-2 bg-[#F97316] text-white text-sm font-bold rounded-xl hover:bg-[#EA580C] shadow-sm hover:shadow transition-all"
+                      >
+                        Approve
+                      </button>
+                    )}
+                    <button 
+                      onClick={() => onDelete(user)}
+                      className="px-4 py-2 bg-white border border-red-200 text-red-600 text-sm font-bold rounded-xl hover:bg-red-50 transition-all"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="my-6 border-t border-gray-200/60 dashed"></div>
+          </div>
+        )}
+
+        {/* Active Users */}
+        {activeUsers.length === 0 && pendingUsers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-gray-400">
             <div className="p-4 rounded-full bg-gray-100 mb-3">
               <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
@@ -877,7 +1045,7 @@ export function UsersView({
             <p className="font-medium">No {role}s found matching your criteria.</p>
           </div>
         ) : (
-          filteredUsers.map((user) => (
+          activeUsers.map((user) => (
             <div key={user.id} className="group flex items-center justify-between p-4 rounded-2xl bg-white border border-gray-100 hover:border-orange-200 hover:shadow-md transition-all duration-200">
               <div className="flex items-center gap-4 overflow-hidden">
                 <div className="flex-shrink-0 h-12 w-12 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-lg">

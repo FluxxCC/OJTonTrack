@@ -5,9 +5,11 @@ interface AttendanceEntry {
   type: "in" | "out";
   timestamp: number;
   photoDataUrl?: string;
+  photourl?: string;
+  photoUrl?: string;
   status?: string;
-  approvedBy?: string;
-  approvedAt?: number;
+  validatedBy?: string;
+  validatedAt?: number;
 }
 
 interface AttendanceDetailsModalProps {
@@ -17,6 +19,7 @@ interface AttendanceDetailsModalProps {
 }
 
 export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceDetailsModalProps) {
+  const photoSrc = entry.photoDataUrl || entry.photourl || entry.photoUrl;
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
       <div className="relative w-full max-w-md md:max-w-lg max-h-[90vh] rounded-2xl bg-white shadow-2xl overflow-hidden flex flex-col animate-in fade-in zoom-in duration-200">
@@ -35,9 +38,9 @@ export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceD
         <div className="overflow-y-auto p-4">
           {/* Photo */}
           <div className="aspect-[4/3] md:aspect-video w-full bg-gray-100 rounded-xl overflow-hidden mb-4 md:mb-6 border border-gray-200 shadow-inner flex items-center justify-center relative group">
-            {entry.photoDataUrl ? (
+            {photoSrc ? (
               <img 
-                src={entry.photoDataUrl} 
+                src={photoSrc} 
                 className="w-full h-full object-contain" 
                 alt="Attendance Log" 
               />
@@ -126,9 +129,9 @@ export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceD
                     : 'Pending approval'}
                 </span>
               </div>
-              {entry.approvedAt && entry.status === 'Approved' && (
+              {entry.validatedAt && entry.status === 'Approved' && (
                 <span className="text-[11px] text-green-700">
-                  {new Date(entry.approvedAt).toLocaleString()}
+                  {new Date(entry.validatedAt).toLocaleString()}
                 </span>
               )}
             </div>

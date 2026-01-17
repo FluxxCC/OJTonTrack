@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
-import { getSupabaseAdmin } from "../../../lib/supabaseClient";
+import { getSupabaseAdmin } from "@/lib/supabaseClient";
 const webPush: any = require("web-push");
 
 function configureCloudinary() {
@@ -24,17 +24,84 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const idnumber = String(url.searchParams.get("idnumber") || "").trim();
     const limit = Number(url.searchParams.get("limit") || 50);
-    if (!idnumber) {
-      return NextResponse.json({ error: "idnumber is required" }, { status: 400 });
-    }
-    const { data, error } = await admin
+    
+    let query = admin
       .from("attendance")
-      .select("id,idnumber,role,course,type,ts,photourl,status,createdat,approvedby,approvedat")
-      .eq("idnumber", idnumber)
+      .select("id,idnumber,role,course,type,ts,photourl,status,createdat,validated_by,validated_at")
       .order("ts", { ascending: false })
       .limit(Math.max(1, Math.min(200, limit)));
+
+    if (idnumber) {
+      query = query.eq("idnumber", idnumber);
+    }
+
+    const { data, error } = await query;
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ entries: data || [] });
+
+    const rows = (data || []).map((row: any) => ({ ...row }));
+
+    const byDay = new Map<string, any[]>();
+    rows.forEach((row: any) => {
+      const d = new Date(row.ts);
+      const key = `${row.idnumber || ""}-${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key)!.push(row);
+    });
+
+    Array.from(byDay.values()).forEach(group => {
+      group.sort((a, b) => Number(a.ts) - Number(b.ts));
+      const n = group.length;
+      for (let i = 0; i < n; i++) {
+        const row = group[i];
+        if (!row.photourl && row.type === "out") {
+          let candidate: string | null = null;
+          for (let j = i - 1; j >= 0; j--) {
+            if (group[j].photourl) {
+              candidate = group[j].photourl;
+              break;
+            }
+          }
+          if (!candidate) {
+            for (let j = i + 1; j < n; j++) {
+              if (group[j].photourl) {
+                candidate = group[j].photourl;
+                break;
+              }
+            }
+          }
+          if (candidate) {
+            row.photourl = candidate;
+          }
+        }
+      }
+    });
+
+    const entries = rows.map((row: any) => {
+      const rawType = String(row.type || "").trim().toLowerCase();
+      let type: "in" | "out" = "in";
+      if (rawType.includes("out")) {
+        type = "out";
+      } else if (rawType.includes("in")) {
+        type = "in";
+      }
+
+      return {
+        ...row,
+        type,
+        approvedby: row.validated_by,
+        approvedat: row.validated_at,
+        status:
+          row.status === "VALIDATED"
+            ? "Approved"
+            : row.status === "REJECTED"
+            ? "Rejected"
+            : row.status === "RAW"
+            ? "Pending"
+            : row.status,
+      };
+    });
+
+    return NextResponse.json({ entries });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unexpected error";
     return NextResponse.json({ error: msg }, { status: 500 });
@@ -45,14 +112,22 @@ export async function POST(req: Request) {
   try {
     const admin = getSupabaseAdmin();
     if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
-    configureCloudinary();
     const body = await req.json().catch(() => ({}));
     const idnumber = String(body?.idnumber || "").trim();
     const type = String(body?.type || "").trim().toLowerCase();
     const photoDataUrl = String(body?.photoDataUrl || "");
-    if (!idnumber || !photoDataUrl || !["in", "out"].includes(type)) {
-      return NextResponse.json({ error: "idnumber, type (in|out), and photoDataUrl are required" }, { status: 400 });
+    const manualTimestamp = body?.timestamp ? Number(body.timestamp) : null;
+    const validatedBy = body?.validated_by ? String(body.validated_by).trim() : null;
+
+    if (!idnumber || !["in", "out"].includes(type)) {
+      return NextResponse.json({ error: "idnumber and type (in|out) are required" }, { status: 400 });
     }
+    
+    // Require photo if not manual entry (validatedBy implies manual entry by supervisor)
+    if (!photoDataUrl && !validatedBy) {
+         return NextResponse.json({ error: "photoDataUrl is required for student logs" }, { status: 400 });
+    }
+
     const userRes = await admin
       .from("users")
       .select("idnumber, role, course, supervisorid, firstname, lastname")
@@ -63,17 +138,24 @@ export async function POST(req: Request) {
     const user = userRes.data;
     if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
 
-    const uploadRes = await cloudinary.uploader.upload(photoDataUrl, {
-      folder: "ojtontrack/attendance",
-      overwrite: false,
-      resource_type: "image",
-    });
-    const photourl = uploadRes.secure_url || uploadRes.url;
-    if (!photourl) {
-      return NextResponse.json({ error: "Failed to upload photo" }, { status: 500 });
+    let photourl = "";
+    if (photoDataUrl) {
+      try {
+        configureCloudinary();
+        const uploadRes = await cloudinary.uploader.upload(photoDataUrl, {
+          folder: "ojtontrack/attendance",
+          overwrite: false,
+          resource_type: "image",
+        });
+        photourl = uploadRes.secure_url || uploadRes.url || photoDataUrl;
+      } catch (e) {
+        console.error("Cloudinary upload failed, falling back to raw data URL", e);
+        photourl = photoDataUrl;
+      }
     }
 
-    const ts = Date.now();
+    const ts = manualTimestamp || Date.now();
+
     const createdat = new Date().toISOString();
     const payload = {
       idnumber,
@@ -82,11 +164,11 @@ export async function POST(req: Request) {
       type,
       ts,
       photourl,
-      storage: "cloudinary",
-      status: "Pending",
+      storage: photoDataUrl ? "cloudinary" : "manual",
+      status: validatedBy ? "VALIDATED" : "RAW",
+      validated_by: validatedBy,
+      validated_at: validatedBy ? createdat : null,
       createdat,
-      approvedby: null,
-      approvedat: null,
     };
 
     const insertRes = await admin.from("attendance").insert(payload).select("id").maybeSingle();
@@ -172,6 +254,62 @@ export async function POST(req: Request) {
   }
 }
 
+export async function PUT(req: Request) {
+  try {
+    const admin = getSupabaseAdmin();
+    if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
+    
+    const body = await req.json().catch(() => ({}));
+    const { id, ts, type, adminId, adminRole } = body;
+    
+    if (!id || !ts || !type || !adminId) {
+      return NextResponse.json({ error: "Missing required fields (id, ts, type, adminId)" }, { status: 400 });
+    }
+
+    // 1. Get old record
+    const { data: oldRecord, error: fetchError } = await admin
+      .from("attendance")
+      .select("*")
+      .eq("id", id)
+      .single();
+    
+    if (fetchError || !oldRecord) {
+      return NextResponse.json({ error: "Record not found" }, { status: 404 });
+    }
+
+    // 2. Update record
+    const { error: updateError } = await admin
+      .from("attendance")
+      .update({ ts, type, status: "ADJUSTED" }) // Mark as adjusted
+      .eq("id", id);
+    
+    if (updateError) {
+      return NextResponse.json({ error: updateError.message }, { status: 500 });
+    }
+
+    // 3. Log the change
+    const changes = [];
+    if (oldRecord.ts !== ts) changes.push(`Time: ${new Date(oldRecord.ts).toLocaleString()} -> ${new Date(ts).toLocaleString()}`);
+    if (oldRecord.type !== type) changes.push(`Type: ${oldRecord.type} -> ${type}`);
+
+    await admin.from("system_audit_logs").insert({
+      actor_idnumber: adminId,
+      actor_role: adminRole || "superadmin",
+      action: "EDIT_ATTENDANCE",
+      target_table: "attendance",
+      target_id: Number(id),
+      before_data: { ts: oldRecord.ts, type: oldRecord.type },
+      after_data: { ts, type },
+      reason: changes.join(", ")
+    });
+
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Unexpected error";
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}
+
 export async function PATCH(req: Request) {
   try {
     const admin = getSupabaseAdmin();
@@ -179,18 +317,23 @@ export async function PATCH(req: Request) {
     const body = await req.json().catch(() => ({}));
     const id = Number(body?.id || 0);
     const approve = !!body?.approve;
-    const approvedby = String(body?.approvedby || "").trim();
+    const reject = !!body?.reject;
+    const validated_by = String(body?.validated_by || body?.approvedby || "").trim();
     if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
-    if (approve && !approvedby) return NextResponse.json({ error: "approvedby is required when approving" }, { status: 400 });
+    if ((approve || reject) && !validated_by) return NextResponse.json({ error: "validated_by is required when validating" }, { status: 400 });
     const updates: Record<string, unknown> = {};
     if (approve) {
-      updates.status = "Approved";
-      updates.approvedby = approvedby;
-      updates.approvedat = new Date().toISOString();
+      updates.status = "VALIDATED";
+      updates.validated_by = validated_by;
+      updates.validated_at = new Date().toISOString();
+    } else if (reject) {
+      updates.status = "REJECTED";
+      updates.validated_by = validated_by;
+      updates.validated_at = new Date().toISOString();
     } else {
-      updates.status = "Pending";
-      updates.approvedby = null;
-      updates.approvedat = null;
+      updates.status = "RAW";
+      updates.validated_by = null;
+      updates.validated_at = null;
     }
     const { data: attendanceData, error } = await admin.from("attendance").update(updates).eq("id", id).select("idnumber, type, ts").single();
     

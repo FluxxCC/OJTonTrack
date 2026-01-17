@@ -1,6 +1,7 @@
 "use client";
 import React, { useState, Suspense } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import citeLogo from "../../../assets/CITE.png";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff } from "lucide-react";
@@ -118,10 +119,23 @@ function CredentialsForm() {
               <button
                   type="submit"
                   disabled={loading}
-                  className="w-full bg-[#F97316] hover:bg-[#EA580C] text-white font-bold py-3.5 rounded-xl transition-colors mt-2 cursor-pointer disabled:opacity-70 disabled:cursor-not-allowed"
+                  className="w-full bg-[#F97316] hover:bg-[#EA580C] text-white font-bold py-3 px-4 rounded-xl shadow-lg shadow-orange-500/20 active:scale-95 transition-all flex items-center justify-center gap-2"
               >
-                  {loading ? "Authenticating..." : "Continue"}
+                  {loading ? (
+                      <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+                  ) : "Sign In"}
               </button>
+
+              {role === 'student' && (
+                <div className="text-center mt-4">
+                  <p className="text-gray-500 text-sm">
+                    Don't have an account?{" "}
+                    <Link href="/auth/signup" className="text-[#F97316] font-bold hover:underline">
+                      Sign Up
+                    </Link>
+                  </p>
+                </div>
+              )}
         </form>
 
         <div className="mt-8 text-center">

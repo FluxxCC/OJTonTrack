@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
-import { getSupabaseAdmin } from "../../../lib/supabaseClient";
+import { getSupabaseAdmin } from "@/lib/supabaseClient";
 
 function configureCloudinary() {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME || "";
@@ -38,15 +38,16 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const idnumber = String(url.searchParams.get("idnumber") || "").trim();
 
-    if (!idnumber) {
-      return NextResponse.json({ error: "idnumber is required" }, { status: 400 });
+    let query = admin
+      .from("reports")
+      .select("id, title, text, files, ts, submittedat, status, idnumber, reviewedby")
+      .order("ts", { ascending: false });
+
+    if (idnumber) {
+      query = query.eq("idnumber", idnumber);
     }
 
-    const { data, error } = await admin
-      .from("reports")
-      .select("id, title, text, files, ts, submittedat, status")
-      .eq("idnumber", idnumber)
-      .order("ts", { ascending: false });
+    const { data, error } = await query;
 
     if (error) {
       console.error("Error fetching reports:", error);
@@ -56,6 +57,7 @@ export async function GET(req: Request) {
     // Fetch instructor comments for these reports
     const reportIds = (data || []).map((r: any) => String(r.id));
     let commentsMap: Record<string, string> = {};
+    let viewedMap: Record<string, boolean> = {};
     
     if (reportIds.length > 0) {
         const { data: comments } = await admin
@@ -68,6 +70,7 @@ export async function GET(req: Request) {
         if (comments) {
             comments.forEach((c: any) => {
                 commentsMap[c.reportid] = c.text;
+                viewedMap[c.reportid] = true;
             });
         }
     }
@@ -97,8 +100,10 @@ export async function GET(req: Request) {
         fileType,
         fileUrl,
         instructorComment: commentsMap[String(row.id)] || null,
+        isViewedByInstructor: viewedMap[String(row.id)] || !!(row as any).reviewedby,
         submittedAt: row.ts ? Number(row.ts) : (row.submittedat ? new Date(row.submittedat).getTime() : Date.now()),
         status: (row as any).status,
+        idnumber: (row as any).idnumber,
       };
     });
 
@@ -138,35 +143,53 @@ export async function PATCH(req: Request) {
         return NextResponse.json({ error: "Report not found" }, { status: 404 });
     }
 
-    const { error } = await admin
-      .from("report_comments")
-      .insert({
-        reportid: String(id),
-        idnumber: reportData.idnumber,
-        text: instructorComment,
-        byid: instructorId || "instructor", // Fallback if not provided
-        byrole: "instructor",
-        ts: Date.now(),
-        unreadforstudent: true
-      });
+    // Update reviewedby and reviewedat in reports table
+    const { error: updateError } = await admin
+        .from("reports")
+        .update({
+            reviewedby: instructorId || "instructor",
+            reviewedat: new Date().toISOString()
+        })
+        .eq("id", id);
 
-    if (error) {
-      console.error("Error adding report comment:", error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (updateError) {
+        console.error("Error updating report reviewed status:", updateError);
+        // Continue anyway as comment insertion is more important if present
     }
 
-    // Create Notification
-    try {
-      await admin.from("notifications").insert({
-        idnumber: reportData.idnumber,
-        title: "New Report Comment",
-        message: "An instructor has commented on your report.",
-        type: "report_comment",
-        is_read: false,
-        created_at: new Date().toISOString()
-      });
-    } catch (err) {
-      console.error("Failed to create notification:", err);
+    if (instructorComment && instructorComment.trim().length > 0) {
+        const { error } = await admin
+          .from("report_comments")
+          .insert({
+            reportid: String(id),
+            idnumber: reportData.idnumber,
+            text: instructorComment,
+            byid: instructorId || "instructor", // Fallback if not provided
+            byrole: "instructor",
+            ts: Date.now(),
+            unreadforstudent: true
+          });
+
+        if (error) {
+          console.error("Error adding report comment:", error);
+          return NextResponse.json({ error: error.message }, { status: 500 });
+        }
+    }
+
+    // Create Notification only if there is a comment text
+    if (instructorComment && instructorComment.trim().length > 0) {
+      try {
+        await admin.from("notifications").insert({
+          idnumber: reportData.idnumber,
+          title: "New Report Comment",
+          message: "An instructor has commented on your report.",
+          type: "report_comment",
+          is_read: false,
+          created_at: new Date().toISOString()
+        });
+      } catch (err) {
+        console.error("Failed to create notification:", err);
+      }
     }
 
     return NextResponse.json({ success: true });

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSupabaseAdmin } from "../../../../lib/supabaseClient";
+import { getSupabaseAdmin } from "@/lib/supabaseClient";
 
 export async function POST(req: Request) {
   try {
@@ -18,7 +18,7 @@ export async function POST(req: Request) {
     }
     const { data, error } = await admin
       .from("users")
-      .select("id, idnumber, password, role, firstname, lastname, email, email_verified")
+      .select("id, idnumber, password, role, firstname, lastname, email, email_verified, signup_status")
       .eq("idnumber", idnumber)
       .limit(1)
       .maybeSingle();
@@ -39,6 +39,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ 
         error: `Access Denied: You are trying to log in to the ${expectedRole} portal, but your account is registered as a ${normalizedRole}.` 
       }, { status: 403 });
+    }
+
+    // Student Approval Check
+    if (normalizedRole === 'student') {
+      const status = data.signup_status || 'PENDING';
+      if (status !== 'APPROVED') {
+        return NextResponse.json({ 
+          error: "Your account is currently pending approval. Please contact your instructor." 
+        }, { status: 403 });
+      }
     }
 
     const res = NextResponse.json({

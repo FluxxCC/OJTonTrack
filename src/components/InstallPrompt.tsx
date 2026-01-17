@@ -11,8 +11,6 @@ type BeforeInstallPromptEvent = {
 export default function InstallPrompt() {
   const pathname = usePathname();
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [show, setShow] = useState(false);
-  const [isIOS] = useState(() => /iPad|iPhone|iPod/.test(navigator.userAgent));
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
@@ -29,12 +27,7 @@ export default function InstallPrompt() {
       alreadyShown = sessionStorage.getItem("install_prompt_done") === "1";
     } catch {}
 
-    if (alreadyShown) {
-      setDismissed(true);
-      return;
-    }
-
-    setShow(true);
+    if (alreadyShown) return;
     window.addEventListener("beforeinstallprompt", handler as EventListener);
     return () => window.removeEventListener("beforeinstallprompt", handler as EventListener);
   }, [pathname]);
@@ -47,11 +40,11 @@ export default function InstallPrompt() {
     deferredPrompt.prompt();
     await deferredPrompt.userChoice;
     setDeferredPrompt(null);
-    setShow(false);
+    setDismissed(true);
+    try { sessionStorage.setItem("install_prompt_done", "1"); } catch {}
   };
 
   const handleDismiss = () => {
-    setShow(false);
     setDismissed(true);
     try { sessionStorage.setItem("install_prompt_done", "1"); } catch {}
   };
@@ -60,7 +53,7 @@ export default function InstallPrompt() {
   if (pathname !== "/") return null;
   if (isStandalone) return null;
   if (dismissed) return null;
-  if (!show) return null;
+  if (!deferredPrompt) return null;
 
   return (
     <div className="fixed bottom-4 right-4 z-50 animate-in fade-in slide-in-from-bottom-4 duration-500">
