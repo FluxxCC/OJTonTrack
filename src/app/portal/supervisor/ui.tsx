@@ -30,7 +30,7 @@ import {
 } from 'lucide-react';
 
 // --- Types ---
-export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; photourl?: string; photoUrl?: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number };
+export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; photourl?: string; photoUrl?: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; idnumber?: string };
 export type ServerAttendanceEntry = {
   id: number;
   type: "in" | "out";
@@ -40,6 +40,17 @@ export type ServerAttendanceEntry = {
   validated_by?: string | null;
   validated_at?: string | null;
 };
+export type AttendanceQueryResult = {
+  id: number;
+  type: "in" | "out";
+  ts: number;
+  photourl: string;
+  status: string;
+  validated_by?: string | null;
+  validated_at?: string | null;
+  idnumber: string;
+};
+
 export type User = {
   id: number;
   idnumber: string;
@@ -149,28 +160,88 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
 
   // Load global settings
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(`schedule_default`);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        // Migration/Safety check for new fields
-        const next = {
-          amIn: parsed.amIn || "08:00",
-          amOut: parsed.amOut || "12:00",
-          amOutTime: parsed.amOutTime || parsed.amOut || "12:00",
-          pmIn: parsed.pmIn || "13:00",
-          pmInTime: parsed.pmInTime || parsed.pmIn || "13:00",
-          pmOut: parsed.pmOut || "17:00"
-        };
-        setTimeSettings(next);
-        setInitialSettings({
-          amIn: next.amIn,
-          amOut: next.amOut,
-          pmIn: next.pmIn,
-          pmOut: next.pmOut
-        });
-      } else {
-        // Default
+    const loadSchedule = async () => {
+      try {
+        const res = await fetch("/api/shifts");
+        const json = await res.json();
+
+        if (res.ok && Array.isArray(json.shifts) && json.shifts.length > 0) {
+          let amIn = "08:00";
+          let amOut = "12:00";
+          let pmIn = "13:00";
+          let pmOut = "17:00";
+
+          json.shifts.forEach((s: any) => {
+            const name = (s.shift_name || "").toLowerCase();
+            if (name.includes("morning")) {
+              amIn = s.official_start || amIn;
+              amOut = s.official_end || amOut;
+            } else if (name.includes("afternoon")) {
+              pmIn = s.official_start || pmIn;
+              pmOut = s.official_end || pmOut;
+            }
+          });
+
+          const next = {
+            amIn,
+            amOut,
+            amOutTime: amOut,
+            pmIn,
+            pmInTime: pmIn,
+            pmOut
+          };
+          
+          setTimeSettings(next);
+          setInitialSettings({
+            amIn: next.amIn,
+            amOut: next.amOut,
+            pmIn: next.pmIn,
+            pmOut: next.pmOut
+          });
+          return;
+        }
+      } catch (e) {
+        console.error("Failed to fetch schedule from API", e);
+      }
+
+      // Fallback to localStorage or defaults if API fails
+      try {
+        const stored = localStorage.getItem(`schedule_default`);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          const next = {
+            amIn: parsed.amIn || "08:00",
+            amOut: parsed.amOut || "12:00",
+            amOutTime: parsed.amOutTime || parsed.amOut || "12:00",
+            pmIn: parsed.pmIn || "13:00",
+            pmInTime: parsed.pmInTime || parsed.pmIn || "13:00",
+            pmOut: parsed.pmOut || "17:00"
+          };
+          setTimeSettings(next);
+          setInitialSettings({
+            amIn: next.amIn,
+            amOut: next.amOut,
+            pmIn: next.pmIn,
+            pmOut: next.pmOut
+          });
+        } else {
+          const next = { 
+            amIn: "08:00", 
+            amOut: "12:00", 
+            amOutTime: "12:00",
+            pmIn: "13:00", 
+            pmInTime: "13:00",
+            pmOut: "17:00"
+          };
+          setTimeSettings(next);
+          setInitialSettings({
+            amIn: next.amIn,
+            amOut: next.amOut,
+            pmIn: next.pmIn,
+            pmOut: next.pmOut
+          });
+        }
+      } catch {
         const next = { 
           amIn: "08:00", 
           amOut: "12:00", 
@@ -187,23 +258,9 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
           pmOut: next.pmOut
         });
       }
-    } catch {
-      const next = { 
-        amIn: "08:00", 
-        amOut: "12:00", 
-        amOutTime: "12:00",
-        pmIn: "13:00", 
-        pmInTime: "13:00",
-        pmOut: "17:00"
-      };
-      setTimeSettings(next);
-      setInitialSettings({
-        amIn: next.amIn,
-        amOut: next.amOut,
-        pmIn: next.pmIn,
-        pmOut: next.pmOut
-      });
-    }
+    };
+
+    loadSchedule();
   }, []);
 
   const handleSave = async () => {
@@ -226,62 +283,22 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
       } catch {
         supervisorId = "";
       }
-      localStorage.setItem(`schedule_default`, JSON.stringify(timeSettings));
-      students.forEach(s => {
-        if (s.idnumber) {
-          localStorage.setItem(`schedule_${s.idnumber}`, JSON.stringify(timeSettings));
-        }
+
+      const res = await fetch("/api/shifts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amIn: timeSettings.amIn,
+          amOut: timeSettings.amOut,
+          pmIn: timeSettings.pmIn,
+          pmOut: timeSettings.pmOut
+        }),
       });
 
-      let savedToDb = false;
-
-      if (supabase) {
-        const today = new Date();
-        const effectiveDate = today.toISOString().split("T")[0];
-        const rows = [
-          {
-            shift_name: "Morning Shift",
-            official_start: timeSettings.amIn,
-            official_end: timeSettings.amOut,
-            supervisor_id: supervisorId || null,
-            effective_date: effectiveDate,
-          },
-          {
-            shift_name: "Afternoon Shift",
-            official_start: timeSettings.pmIn,
-            official_end: timeSettings.pmOut,
-            supervisor_id: supervisorId || null,
-            effective_date: effectiveDate,
-          },
-        ];
-
-        const { error } = await supabase
-          .from("shifts")
-          .upsert(rows, { onConflict: "shift_name" });
-
-        if (error) {
-          console.error("Failed to save schedule via Supabase client", error.message || error);
-        } else {
-          savedToDb = true;
-        }
-      }
-
-      if (!savedToDb) {
-        const res = await fetch("/api/shifts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            amIn: timeSettings.amIn,
-            amOut: timeSettings.amOut,
-            pmIn: timeSettings.pmIn,
-            pmOut: timeSettings.pmOut
-          }),
-        });
-
-        if (!res.ok) {
-          const json = await res.json().catch(() => ({}));
-          console.error("Failed to save schedule to database", json?.error || res.statusText);
-        }
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        console.error("Failed to save schedule to database", json?.error || res.statusText);
+        return;
       }
 
       setSuccessModal(true);
@@ -640,13 +657,14 @@ export function EvaluationModal({
 }
 
 export function StudentAttendanceDetailView({
-  student, attendance, onBack, onValidate, onRefresh
+  student, attendance, onBack, onValidate, onRefresh, scheduleConfig
 }: {
   student: User;
   attendance: AttendanceEntry[];
   onBack: () => void;
   onValidate: (entry: AttendanceEntry, action: 'approve' | 'reject' | 'reset') => void;
   onRefresh?: () => void;
+  scheduleConfig: { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn: string; otOut: string } | null;
 }) {
   const [logs, setLogs] = useState<AttendanceEntry[]>(attendance);
   const [now, setNow] = useState(() => Date.now());
@@ -656,14 +674,7 @@ export function StudentAttendanceDetailView({
   const [otHours, setOtHours] = useState(0);
   const [otMinutes, setOtMinutes] = useState(0);
   const [isSavingOt, setIsSavingOt] = useState(false);
-  const [scheduleSettings, setScheduleSettings] = useState<{
-    amIn: string;
-    amOut: string;
-    pmIn: string;
-    pmOut: string;
-    overtimeIn: string;
-    overtimeOut: string;
-  } | null>(null);
+  // scheduleSettings state removed, using props instead
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [isBulkValidating, setIsBulkValidating] = useState(false);
   const [monthFilter, setMonthFilter] = useState("");
@@ -673,22 +684,8 @@ export function StudentAttendanceDetailView({
     setSelectedIds(new Set());
   }, [attendance]);
 
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 60000);
-    return () => clearInterval(id);
-  }, []);
+  // LocalStorage effect removed as we now use passed scheduleConfig
 
-  useEffect(() => {
-    try {
-        const key = `schedule_${student.idnumber}`;
-        const saved = localStorage.getItem(key) || localStorage.getItem("schedule_default");
-        if (saved) {
-            setScheduleSettings(JSON.parse(saved));
-        }
-    } catch (e) {
-        console.error("Failed to load schedule settings", e);
-    }
-  }, [student.idnumber]);
 
   useEffect(() => {
     if (!supabase) return;
@@ -952,7 +949,10 @@ export function StudentAttendanceDetailView({
       const processedDays = Array.from(grouped.values())
           .sort((a, b) => b.date.getTime() - a.date.getTime())
           .map(day => {
-              const dayLogs = day.logs.sort((a, b) => a.timestamp - b.timestamp);
+              const otAuthLog = day.logs.find(l => l.photoDataUrl && l.photoDataUrl.startsWith("OT_AUTH:"));
+              const processingLogs = day.logs.filter(l => !l.photoDataUrl?.startsWith("OT_AUTH:"));
+
+              const dayLogs = processingLogs.sort((a, b) => a.timestamp - b.timestamp);
 
               const baseDate = new Date(day.date);
               baseDate.setHours(0, 0, 0, 0);
@@ -973,14 +973,14 @@ export function StudentAttendanceDetailView({
                   otEnd: buildShift("18:00"),
               };
 
-              if (scheduleSettings) {
+              if (scheduleConfig) {
                   schedule = {
-                      amIn: buildShift(scheduleSettings.amIn || "07:00"),
-                      amOut: buildShift(scheduleSettings.amOut || "11:00"),
-                      pmIn: buildShift(scheduleSettings.pmIn || "13:00"),
-                      pmOut: buildShift(scheduleSettings.pmOut || "17:00"),
-                      otStart: buildShift(scheduleSettings.overtimeIn || "17:00"),
-                      otEnd: buildShift(scheduleSettings.overtimeOut || "18:00"),
+                      amIn: buildShift(scheduleConfig.amIn || "07:00"),
+                      amOut: buildShift(scheduleConfig.amOut || "11:00"),
+                      pmIn: buildShift(scheduleConfig.pmIn || "13:00"),
+                      pmOut: buildShift(scheduleConfig.pmOut || "17:00"),
+                      otStart: buildShift(scheduleConfig.otIn || "17:00"),
+                      otEnd: buildShift(scheduleConfig.otOut || "18:00"),
                   };
               }
 
@@ -992,15 +992,22 @@ export function StudentAttendanceDetailView({
                   windowEnd: number,
                   requireApproved: boolean
               ) => {
-                  const earlyWindowStart = windowStart - 30 * 60 * 1000;
                   let currentIn: number | null = null;
                   let duration = 0;
+                  
+                  // 30 mins buffer for start, 4 hours for end (clamped)
+                  const BUFFER_START_MS = 30 * 60 * 1000;
+                  const BUFFER_END_MS = 4 * 60 * 60 * 1000;
+                  const searchStart = windowStart - BUFFER_START_MS;
+                  const searchEnd = windowEnd + BUFFER_END_MS;
 
                   logs.forEach(log => {
+                      // Filter out logs that are outside the buffer window
+                      if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
+
                       if (requireApproved && log.status !== "Approved") return;
                       if (log.type === "in") {
                           if (log.timestamp > windowEnd) return;
-                          if (log.timestamp < earlyWindowStart) return;
                           const effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
                           currentIn = effectiveIn;
                       } else if (log.type === "out") {
@@ -1012,13 +1019,6 @@ export function StudentAttendanceDetailView({
                           currentIn = null;
                       }
                   });
-
-                  if (!requireApproved && currentIn !== null) {
-                      const effectiveOut = clamp(now, windowStart, windowEnd);
-                      if (effectiveOut > currentIn) {
-                          duration += effectiveOut - currentIn;
-                      }
-                  }
 
                   return duration;
               };
@@ -1063,11 +1063,11 @@ export function StudentAttendanceDetailView({
 
               const overtimeMs = dayTotalOt;
 
-              return { date: day.date, s1, s2, s3, s4, s5, s6, dayTotalMs, overtimeMs };
+              return { date: day.date, s1, s2, s3, s4, s5, s6, dayTotalMs, overtimeMs, otAuthLog };
           });
 
       return { days: processedDays, overallTotal: totalMsAll, overallValidated: totalValidatedMsAll };
-  }, [filteredLogs, scheduleSettings, now]);
+  }, [filteredLogs, scheduleConfig, now]);
 
   const selectedPairCount = useMemo(() => {
     let count = 0;
@@ -1338,13 +1338,13 @@ export function StudentAttendanceDetailView({
                                                     onClick={() => {
                                                         const pmOutTime = day.s4 
                                                             ? new Date(day.s4.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-                                                            : scheduleSettings?.pmOut || "17:00";
+                                                            : scheduleConfig?.pmOut || "17:00";
                                                         setOvertimeModal({ isOpen: true, date: day.date, defaultStart: pmOutTime });
                                                         setOtInTime(pmOutTime);
                                                         setOtHours(1);
                                                         setOtMinutes(0);
                                                     }}
-                                                    className="w-8 h-8 rounded-full bg-gray-50 text-gray-500 hover:bg-gray-100 hover:text-gray-900 flex items-center justify-center transition-colors mx-auto"
+                                                    className="w-8 h-8 rounded-full bg-orange-50 text-orange-600 hover:bg-orange-100 hover:text-orange-700 flex items-center justify-center transition-colors mx-auto"
                                                     title="Add Overtime"
                                                 >
                                                     <Plus size={16} />
@@ -1532,21 +1532,25 @@ export function StudentAttendanceDetailView({
                                         <div className="flex items-center justify-between mb-2">
                                             <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Overtime</div>
                                             {!day.s5 && (
+                                                (day as any).otAuthLog ? (
+                                                    <span className="text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded">Authorized</span>
+                                                ) : (
                                                 <button
                                                     onClick={() => {
                                                         const pmOutTime = day.s4 
                                                             ? new Date(day.s4.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-                                                            : scheduleSettings?.pmOut || "17:00";
+                                                            : scheduleConfig?.pmOut || "17:00";
                                                         setOvertimeModal({ isOpen: true, date: day.date, defaultStart: pmOutTime });
                                                         setOtInTime(pmOutTime);
                                                         setOtHours(1);
                                                         setOtMinutes(0);
                                                     }}
-                                                    className="w-8 h-8 rounded-full bg-gray-50 text-gray-500 hover:bg-gray-100 hover:text-gray-900 flex items-center justify-center transition-colors"
+                                                    className="w-8 h-8 rounded-full bg-orange-50 text-orange-600 hover:bg-orange-100 hover:text-orange-700 flex items-center justify-center transition-colors"
                                                     title="Add Overtime"
                                                 >
                                                     <Plus size={16} />
                                                 </button>
+                                                )
                                             )}
                                         </div>
                                         <div className="grid grid-cols-2 gap-3">
@@ -1926,6 +1930,44 @@ export function DashboardView({
   const [loading, setLoading] = useState(false);
   const [selectedModalData, setSelectedModalData] = useState<{ student: User; attendance: AttendanceEntry[] } | null>(null);
   const [isFetchingModalData, setIsFetchingModalData] = useState(false);
+  const [scheduleConfig, setScheduleConfig] = useState<{
+    amIn: string; amOut: string;
+    pmIn: string; pmOut: string;
+    otIn: string; otOut: string;
+  } | null>(null);
+
+  useEffect(() => {
+    const fetchSchedule = async () => {
+      try {
+        const res = await fetch('/api/shifts');
+        const data = await res.json();
+        if (data.shifts) {
+          const config = {
+            amIn: "07:00", amOut: "11:00",
+            pmIn: "13:00", pmOut: "17:00",
+            otIn: "17:00", otOut: "18:00"
+          };
+          data.shifts.forEach((s: any) => {
+            if (s.shift_name === "Morning Shift") {
+              config.amIn = s.official_start || "07:00";
+              config.amOut = s.official_end || "11:00";
+            } else if (s.shift_name === "Afternoon Shift") {
+              config.pmIn = s.official_start || "13:00";
+              config.pmOut = s.official_end || "17:00";
+            } else if (s.shift_name === "Overtime Shift") {
+              config.otIn = s.official_start || "17:00";
+              config.otOut = s.official_end || "18:00";
+            }
+          });
+          setScheduleConfig(config);
+        }
+      } catch (e) {
+        console.error("Failed to fetch schedule", e);
+      }
+    };
+    fetchSchedule();
+  }, []);
+
   const [previewImage, setPreviewImage] = useState<{ url: string; timestamp?: number; status?: string } | null>(null);
 
   // Filter States
@@ -1987,6 +2029,16 @@ export function DashboardView({
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [isBulkValidating, setIsBulkValidating] = useState(false);
+  const [overtimeModal, setOvertimeModal] = useState<{
+    isOpen: boolean;
+    student: User | null;
+    date: Date | null;
+    defaultStart?: string;
+  }>({ isOpen: false, student: null, date: null });
+  const [otInTime, setOtInTime] = useState("");
+  const [otHours, setOtHours] = useState(1);
+  const [otMinutes, setOtMinutes] = useState(0);
+  const [isSavingOt, setIsSavingOt] = useState(false);
   
   // Helpers
   const formatTime = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
@@ -2065,6 +2117,63 @@ export function DashboardView({
     
     setSelectedIds(new Set());
     setIsBulkValidating(false);
+  };
+
+  const handleSaveOvertime = async () => {
+    if (!overtimeModal.student || !overtimeModal.date || !otInTime || (otHours === 0 && otMinutes === 0)) return;
+    setIsSavingOt(true);
+    try {
+      const supervisorId = myIdnumber || localStorage.getItem("idnumber") || "";
+
+      const [inH, inM] = otInTime.split(":").map(Number);
+
+      const tsIn = new Date(overtimeModal.date);
+      tsIn.setHours(inH, inM, 0, 0);
+
+      const durationMs = otHours * 60 * 60 * 1000 + otMinutes * 60 * 1000;
+      const tsOut = new Date(tsIn.getTime() + durationMs);
+
+      // Create a special Authorization Record instead of manual logs
+      const authPayload = {
+        end: tsOut.getTime()
+      };
+      const authString = `OT_AUTH:${JSON.stringify(authPayload)}`;
+
+      await fetch("/api/attendance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idnumber: overtimeModal.student.idnumber,
+          type: "in",
+          timestamp: tsIn.getTime(),
+          validated_by: supervisorId,
+          photoDataUrl: authString
+        }),
+      });
+
+      // Update local state to reflect the new authorization immediately
+      const newAuth: any = {
+        id: undefined,
+        idnumber: overtimeModal.student.idnumber,
+        type: "in",
+        timestamp: tsIn.getTime(),
+        photoDataUrl: authString,
+        status: "Approved" as const,
+        validatedAt: Date.now(),
+      };
+
+      setAttendanceData(prev => [...prev, newAuth]);
+
+      alert("Overtime authorized successfully! The student can now time in.");
+      setOvertimeModal({ isOpen: false, student: null, date: null });
+      setOtInTime("");
+      setOtHours(0);
+      setOtMinutes(0);
+    } catch (e) {
+      alert("Failed to authorize overtime");
+    } finally {
+      setIsSavingOt(false);
+    }
   };
 
   const studentSummaries = useMemo(() => {
@@ -2147,15 +2256,19 @@ export function DashboardView({
               windowEnd: number,
               requireApproved: boolean
           ) => {
-              const earlyWindowStart = windowStart - 30 * 60 * 1000;
               let currentIn: number | null = null;
               let duration = 0;
+              // 30 mins buffer as per business rule
+              const BUFFER_START_MS = 30 * 60 * 1000;
+              const BUFFER_END_MS = 4 * 60 * 60 * 1000;
+              const searchStart = windowStart - BUFFER_START_MS;
+              const searchEnd = windowEnd + BUFFER_END_MS;
 
               logs.forEach(log => {
+                  if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
                   if (requireApproved && log.status !== "Approved") return;
                   if (log.type === "in") {
                       if (log.timestamp > windowEnd) return;
-                      if (log.timestamp < earlyWindowStart) return;
                       const effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
                       currentIn = effectiveIn;
                   } else if (log.type === "out") {
@@ -2168,11 +2281,12 @@ export function DashboardView({
                   }
               });
 
-              if (!requireApproved && currentIn !== null) {
-                  const effectiveOut = clamp(Date.now(), windowStart, windowEnd);
-                  if (effectiveOut > currentIn) {
-                      duration += effectiveOut - currentIn;
-                  }
+              if (currentIn !== null) {
+                  // Live calculation removed to enforce strict pairing
+                  // const effectiveOut = clamp(Date.now(), windowStart, windowEnd);
+                  // if (effectiveOut > currentIn) {
+                  //     duration += effectiveOut - currentIn;
+                  // }
               }
 
               return duration;
@@ -2190,27 +2304,52 @@ export function DashboardView({
           
           // Capture Today's Slots
           if (date.toLocaleDateString() === todayStr) {
-             const classifySegment = (ts: number) => new Date(ts).getHours() < 12 ? "morning" : "afternoon";
-             const morningSegLogs = dayLogs.filter(l => classifySegment(l.timestamp) === "morning");
-             const afternoonSegLogs = dayLogs.filter(l => classifySegment(l.timestamp) === "afternoon");
+             // Smart Pairing Logic
+            const otAuthLog = dayLogs.find(l => l.photoDataUrl && l.photoDataUrl.startsWith("OT_AUTH:"));
+            const processingLogs = dayLogs.filter(l => !l.photoDataUrl?.startsWith("OT_AUTH:"));
 
-             todaySlots = {
-                 s1: morningSegLogs.find(l => l.type === "in") || null,
-                 s2: [...morningSegLogs].filter(l => l.type === "out").pop() || null,
-                 s3: afternoonSegLogs.find(l => l.type === "in") || null,
-                 s4: [...afternoonSegLogs].filter(l => l.type === "out").pop() || null,
-                 s5: (() => {
-                      const overtimeLogs = dayLogs.filter(l => l.timestamp >= schedule.otStart && l.timestamp <= schedule.otEnd);
-                      return overtimeLogs.find(l => l.type === "in") || null;
-                 })(),
-                 s6: (() => {
-                      const overtimeLogs = dayLogs.filter(l => l.timestamp >= schedule.otStart && l.timestamp <= schedule.otEnd);
-                      return [...overtimeLogs].filter(l => l.type === "out").pop() || null;
-                 })(),
-                 todayTotalMs: dayRaw
-             };
-          }
-      });
+            const sortedLogs = [...processingLogs].sort((a, b) => a.timestamp - b.timestamp);
+            const noonCutoff = new Date(date).setHours(12, 30, 0, 0);
+
+            // 1. Identify Start Points (INs)
+            const s1 = sortedLogs.find(l => l.type === "in" && l.timestamp < noonCutoff) || null;
+             const s3 = sortedLogs.find(l => l.type === "in" && l.timestamp >= noonCutoff) || null;
+             
+             // OT IN: strictly after PM IN (if exists), else just after OT Start
+             const s5 = sortedLogs.find(l => 
+                 l.type === "in" && 
+                 l.timestamp >= schedule.otStart && 
+                 (!s3 || l.timestamp > s3.timestamp)
+             ) || null;
+
+             // 2. Identify End Points (OUTs) based on Pairs
+             
+             // s2 (AM OUT): Last OUT after s1 but before s3 (if s3 exists)
+             let s2: AttendanceEntry | null = null;
+             if (s1) {
+                 const searchEnd = s3 ? s3.timestamp : (new Date(date).setHours(23, 59, 59, 999));
+                 const candidates = sortedLogs.filter(l => l.type === "out" && l.timestamp > s1.timestamp && l.timestamp < searchEnd);
+                 s2 = candidates.pop() || null;
+             }
+
+             // s4 (PM OUT): Last OUT after s3 but before s5 (if s5 exists)
+             let s4: AttendanceEntry | null = null;
+             if (s3) {
+                 const searchEnd = s5 ? s5.timestamp : (new Date(date).setHours(23, 59, 59, 999));
+                 const candidates = sortedLogs.filter(l => l.type === "out" && l.timestamp > s3.timestamp && l.timestamp < searchEnd);
+                 s4 = candidates.pop() || null;
+             }
+
+             // s6 (OT OUT): Last OUT after s5
+             let s6: AttendanceEntry | null = null;
+             if (s5) {
+                 const candidates = sortedLogs.filter(l => l.type === "out" && l.timestamp > s5.timestamp);
+                 s6 = candidates.pop() || null;
+            }
+
+            todaySlots = { s1, s2, s3, s4, s5, s6, todayTotalMs: dayRaw, otAuthLog };
+         }
+     });
 
       return {
         student,
@@ -2242,7 +2381,7 @@ export function DashboardView({
           .limit(5000);
         
         if (!error && data && mounted) {
-           const mapped: AttendanceEntry[] & { idnumber: string } = data.map((e: any) => {
+           const mapped: AttendanceEntry[] = data.map((e: AttendanceQueryResult) => {
              const sStr = String(e.status || "").trim().toLowerCase();
              const isRejected = sStr === "rejected";
              const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
@@ -2254,7 +2393,7 @@ export function DashboardView({
              photoDataUrl: e.photourl,
             status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
             validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined
-          }}) as any;
+          }});
            setAttendanceData(mapped);
         }
       } catch (e) {
@@ -2286,7 +2425,7 @@ export function DashboardView({
       if (action === 'reject') newStatus = "Rejected";
       
       const updateEntry = (e: AttendanceEntry) => 
-        e.id === entry.id ? { ...e, status: newStatus as any, validatedAt: action === 'reset' ? undefined : Date.now() } : e;
+        e.id === entry.id ? { ...e, status: newStatus as AttendanceEntry["status"], validatedAt: action === 'reset' ? undefined : Date.now() } : e;
 
       setAttendanceData(prev => prev.map(updateEntry));
       
@@ -2324,6 +2463,7 @@ export function DashboardView({
           <StudentAttendanceDetailView 
               student={selectedModalData.student}
               attendance={selectedModalData.attendance}
+              scheduleConfig={scheduleConfig}
               onBack={() => setSelectedModalData(null)}
               onValidate={handleValidation}
               onRefresh={() => handleViewStudentAttendance(selectedModalData.student)}
@@ -2470,12 +2610,64 @@ export function DashboardView({
                 studentSummaries.map(({ student, totalMs, todaySlots }) => {
                   const todayMs = todaySlots?.todayTotalMs || 0;
                   const renderSlot = (
-                    slot: any,
+                    slot: AttendanceEntry | null,
                     pairIn?: AttendanceEntry | null,
                     pairOut?: AttendanceEntry | null,
-                    isInCell?: boolean
+                    isInCell?: boolean,
+                    isOvertime?: boolean
                   ) => {
                     if (!slot) {
+                      if (isOvertime && isInCell) {
+                        // Check if Auth Log exists
+                        if (todaySlots?.otAuthLog) {
+                             return (
+                                 <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-green-600 font-bold bg-green-50">
+                                     Authorized
+                                 </td>
+                             );
+                        }
+
+                        let defaultStart = "17:00";
+                        try {
+                          const key = `schedule_${student.idnumber}`;
+                          const saved = localStorage.getItem(key) || localStorage.getItem("schedule_default");
+                          if (saved) {
+                            const parsed = JSON.parse(saved);
+                            defaultStart = parsed.overtimeIn || parsed.pmOut || defaultStart;
+                          }
+                        } catch {}
+
+                        if (todaySlots?.s4) {
+                          defaultStart = new Date(todaySlots.s4.timestamp).toLocaleTimeString("en-GB", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          });
+                        }
+
+                        return (
+                          <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-gray-700">
+                            <button
+                              onClick={() => {
+                                const today = new Date();
+                                today.setHours(0, 0, 0, 0);
+                                setOvertimeModal({
+                                  isOpen: true,
+                                  student,
+                                  date: today,
+                                  defaultStart,
+                                });
+                                setOtInTime(defaultStart);
+                                setOtHours(1);
+                                setOtMinutes(0);
+                              }}
+                              className="w-8 h-8 rounded-full bg-orange-50 text-orange-600 hover:bg-orange-100 hover:text-orange-700 flex items-center justify-center transition-colors mx-auto"
+                              title="Add Overtime"
+                            >
+                              <Plus size={16} />
+                            </button>
+                          </td>
+                        );
+                      }
                       return (
                         <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-gray-300">
                           -
@@ -2566,12 +2758,12 @@ export function DashboardView({
                           </div>
                         </button>
                       </td>
-                      {renderSlot(todaySlots?.s1, todaySlots?.s1, todaySlots?.s2, true)}
-                      {renderSlot(todaySlots?.s2, todaySlots?.s1, todaySlots?.s2, false)}
-                      {renderSlot(todaySlots?.s3, todaySlots?.s3, todaySlots?.s4, true)}
-                      {renderSlot(todaySlots?.s4, todaySlots?.s3, todaySlots?.s4, false)}
-                      {renderSlot(todaySlots?.s5, todaySlots?.s5, todaySlots?.s6, true)}
-                      {renderSlot(todaySlots?.s6, todaySlots?.s5, todaySlots?.s6, false)}
+                      {renderSlot(todaySlots?.s1, todaySlots?.s1, todaySlots?.s2, true, false)}
+                      {renderSlot(todaySlots?.s2, todaySlots?.s1, todaySlots?.s2, false, false)}
+                      {renderSlot(todaySlots?.s3, todaySlots?.s3, todaySlots?.s4, true, false)}
+                      {renderSlot(todaySlots?.s4, todaySlots?.s3, todaySlots?.s4, false, false)}
+                      {renderSlot(todaySlots?.s5, todaySlots?.s5, todaySlots?.s6, true, true)}
+                      {renderSlot(todaySlots?.s6, todaySlots?.s5, todaySlots?.s6, false, true)}
                       <td className="px-4 py-3 text-center font-bold text-gray-900">
                         {todayMs > 0 ? formatHours(todayMs) : "-"}
                       </td>
@@ -2674,6 +2866,110 @@ export function DashboardView({
                   alt="Attendance Log"
                   className="max-w-full max-h-[80vh] object-contain"
                 />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {overtimeModal.isOpen && overtimeModal.student && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+                <h3 className="font-bold text-gray-900">Set Overtime</h3>
+                <button
+                  onClick={() => setOvertimeModal({ isOpen: false, student: null, date: null })}
+                  className="p-2 hover:bg-gray-200 rounded-full text-gray-500"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <p className="text-sm text-gray-500">
+                  Set overtime for{" "}
+                  <span className="font-bold text-gray-900">
+                    {overtimeModal.date?.toLocaleDateString()}
+                  </span>
+                  .
+                  This will manually add validated entries.
+                </p>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Time In</label>
+                  <input
+                    type="time"
+                    value={otInTime}
+                    min={overtimeModal.defaultStart}
+                    onClick={e => e.currentTarget.showPicker()}
+                    onChange={e => setOtInTime(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Duration</label>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <div className="relative">
+                        <input
+                          type="number"
+                          min="0"
+                          value={otHours}
+                          onChange={e => setOtHours(Math.max(0, parseInt(e.target.value) || 0))}
+                          className="w-full rounded-xl border border-gray-300 pl-3 pr-12 py-2 text-sm focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">
+                          hrs
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex-1">
+                      <div className="relative">
+                        <input
+                          type="number"
+                          min="0"
+                          max="59"
+                          value={otMinutes}
+                          onChange={e =>
+                            setOtMinutes(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))
+                          }
+                          className="w-full rounded-xl border border-gray-300 pl-3 pr-12 py-2 text-sm focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">
+                          mins
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2 text-right">
+                    Ends at:{" "}
+                    <span className="font-bold text-gray-900">
+                      {(() => {
+                        if (!otInTime) return "--:--";
+                        const [h, m] = otInTime.split(":").map(Number);
+                        const date = new Date();
+                        date.setHours(h, m, 0, 0);
+                        date.setMinutes(date.getMinutes() + otHours * 60 + otMinutes);
+                        return date.toLocaleTimeString("en-GB", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        });
+                      })()}
+                    </span>
+                  </p>
+                </div>
+                <div className="flex justify-end gap-3 pt-4">
+                  <button
+                    onClick={() => setOvertimeModal({ isOpen: false, student: null, date: null })}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveOvertime}
+                    disabled={isSavingOt || !otInTime || (otHours === 0 && otMinutes === 0)}
+                    className="px-4 py-2 text-sm font-bold text-white bg-orange-600 hover:bg-orange-700 rounded-lg shadow-md shadow-orange-200 transition-all disabled:opacity-70 disabled:cursor-not-allowed"
+                  >
+                    {isSavingOt ? "Saving..." : "Save Overtime"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>

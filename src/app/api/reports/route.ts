@@ -56,8 +56,8 @@ export async function GET(req: Request) {
 
     // Fetch instructor comments for these reports
     const reportIds = (data || []).map((r: any) => String(r.id));
-    let commentsMap: Record<string, string> = {};
-    let viewedMap: Record<string, boolean> = {};
+    const commentsMap: Record<string, string> = {};
+    const viewedMap: Record<string, boolean> = {};
     
     if (reportIds.length > 0) {
         const { data: comments } = await admin
@@ -80,20 +80,30 @@ export async function GET(req: Request) {
       let fileName = undefined;
       let fileType = undefined;
       let fileUrl = undefined;
+      let week = undefined;
+
+      const extractWeek = (obj: any) => {
+        if (obj && typeof obj === 'object' && 'week' in obj) return Number(obj.week);
+        return undefined;
+      };
+
       if (row.files && Array.isArray(row.files) && row.files.length > 0) {
-        const f = row.files[0] as ReportFile;
+        const f = row.files[0] as any;
         fileName = f?.name;
         fileType = f?.type;
         fileUrl = f?.url;
+        week = extractWeek(f);
       } else if (row.files && typeof row.files === "object") {
-        const f = row.files as ReportFile;
+        const f = row.files as any;
         fileName = f?.name;
         fileType = f?.type;
         fileUrl = f?.url;
+        week = extractWeek(f);
       }
 
       return {
         id: row.id,
+        week,
         title: row.title || "(Untitled)",
         body: row.text,
         fileName,
@@ -210,7 +220,7 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => ({}));
     console.log("Received report submission:", JSON.stringify(body, null, 2));
 
-    const { id, idnumber, title, body: text, fileName, fileType, fileData, isDraft } = body;
+    const { id, idnumber, title, body: text, fileName, fileType, fileData, isDraft, week } = body;
 
     if (!idnumber) {
       console.error("Missing idnumber in report submission");
@@ -246,7 +256,11 @@ export async function POST(req: Request) {
 
     if (userError) console.warn("Could not fetch user course:", userError);
 
-    const files = fileName ? [{ name: fileName, type: fileType, url: fileUrl }] : [];
+    const weekNum = week ? Number(week) : undefined;
+    const files = fileName 
+        ? [{ name: fileName, type: fileType, url: fileUrl, week: weekNum }] 
+        : (weekNum ? [{ week: weekNum }] : []);
+    
     const ts = Date.now();
     const submittedat = new Date().toISOString();
     const status = isDraft ? "draft" : "submitted";

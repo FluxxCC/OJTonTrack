@@ -8,7 +8,7 @@ import { AttendanceDetailsModal } from "@/components/AttendanceDetailsModal";
 import { supabase } from "@/lib/supabaseClient";
 
 export type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; approvedAt?: number };
-export type ReportEntry = { id?: number; title: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string; isViewedByInstructor?: boolean };
+export type ReportEntry = { id?: number; title: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string; isViewedByInstructor?: boolean; week?: number; };
 type ServerAttendanceEntry = { 
   type: "in" | "out"; 
   ts: number; 
@@ -213,7 +213,7 @@ export function DashboardView({
 
   const recent = useMemo(() => {
     const byDate = new Map<string, { in?: number; out?: number; inEntry?: AttendanceEntry; outEntry?: AttendanceEntry; durationMs?: number; status: "Pending" | "Approved" }>();
-    const sorted = attendance.slice().sort((a,b) => a.timestamp - b.timestamp);
+    const sorted = attendance.filter(l => !l.photoDataUrl?.startsWith("OT_AUTH:")).sort((a,b) => a.timestamp - b.timestamp);
     for (let i=0;i<sorted.length;i++) {
       const e = sorted[i];
       const dateKey = new Date(e.timestamp).toDateString();
@@ -1180,34 +1180,43 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
           const otOutMs = otOut ? otOut.getTime() : null;
           const hasOvertime = otInMs !== null && otOutMs !== null;
 
-          if (nowMs >= pmOutMs) {
-            if (!hasOvertime) {
-              setLateInPmOutText(`You cannot time in beyond ${formatDisplayTime(effectiveSchedule.pmOut || "")}.`);
-              setShowLateInModal(true);
-              setSubmitting(false);
-              return;
-            }
-            const overtimeWindowStart = otInMs! - 30 * 60 * 1000;
-            const overtimeWindowEnd = otOutMs!;
-            if (nowMs < overtimeWindowStart || nowMs >= overtimeWindowEnd) {
-              setLateInPmOutText(`You cannot time in beyond ${formatDisplayTime(effectiveSchedule.pmOut || "")}.`);
-              setShowLateInModal(true);
-              setSubmitting(false);
-              return;
-            }
-            return;
-          }
+          // Check for dynamic overtime authorization
+          const todayAuth = attendance.find(l => {
+              if (!l.photoDataUrl?.startsWith("OT_AUTH:")) return false;
+              const d = new Date(l.timestamp);
+              return d.toDateString() === now.toDateString();
+          });
 
-          if (nowMs >= morningWindowStart && nowMs < morningWindowEnd) {
-          } else if (nowMs >= afternoonWindowStart && nowMs < afternoonWindowEnd) {
-          } else {
-            setLateInPmOutText("You can time in 30 minutes before your official time in.");
-            setShowLateInModal(true);
-            setSubmitting(false);
-            return;
+          if (!todayAuth) {
+            if (nowMs >= pmOutMs) {
+                if (!hasOvertime) {
+                setLateInPmOutText(`You cannot time in beyond ${formatDisplayTime(effectiveSchedule.pmOut || "")}.`);
+                setShowLateInModal(true);
+                setSubmitting(false);
+                return;
+                }
+                const overtimeWindowStart = otInMs! - 30 * 60 * 1000;
+                const overtimeWindowEnd = otOutMs!;
+                if (nowMs < overtimeWindowStart || nowMs >= overtimeWindowEnd) {
+                setLateInPmOutText(`You cannot time in beyond ${formatDisplayTime(effectiveSchedule.pmOut || "")}.`);
+                setShowLateInModal(true);
+                setSubmitting(false);
+                return;
+                }
+            } else {
+                if (nowMs >= morningWindowStart && nowMs < morningWindowEnd) {
+                } else if (nowMs >= afternoonWindowStart && nowMs < afternoonWindowEnd) {
+                } else {
+                    setLateInPmOutText("You can time in 30 minutes before your official time in.");
+                    setShowLateInModal(true);
+                    setSubmitting(false);
+                    return;
+                }
+            }
           }
         } else {
           const todayLogs = attendance.filter(l => {
+            if (l.photoDataUrl && l.photoDataUrl.startsWith("OT_AUTH:")) return false;
             const d = new Date(l.timestamp);
             return (
               d.getFullYear() === now.getFullYear() &&
@@ -1279,7 +1288,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     }
 
     const now = new Date();
-    let effectiveSchedule = dbSchedule || schedule;
+    const effectiveSchedule = dbSchedule || schedule;
     if (!effectiveSchedule) {
       await addEntry("out");
       return;
@@ -1396,41 +1405,50 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
           return d.getTime();
         };
 
-        const classifySegment = (ts: number) => {
-          const h = new Date(ts).getHours();
-          return h < 12 ? "morning" : "afternoon";
-        };
-
         const src = dbSchedule || schedule;
 
-        const morningLogs = sorted.filter(log => classifySegment(log.timestamp) === "morning");
-        const afternoonLogs = sorted.filter(log => classifySegment(log.timestamp) === "afternoon");
+        // Smart Pairing Logic
+        const noonCutoff = new Date(baseDate).setHours(12, 30, 0, 0);
 
-        let overtimeLogs: AttendanceEntry[] = [];
-        if (src && src.otIn && src.otOut) {
-          const otStart = buildShift(src.otIn);
-          const otEnd = buildShift(src.otOut);
-          overtimeLogs = sorted.filter(
-            log => log.timestamp >= otStart && log.timestamp <= otEnd
-          );
+        // 1. Identify Start Points (INs)
+        const s1 = sorted.find(l => l.type === "in" && l.timestamp < noonCutoff) || null;
+        const s3 = sorted.find(l => l.type === "in" && l.timestamp >= noonCutoff) || null;
+        
+        // OT IN: strictly after PM IN (if exists), else just after OT Start
+        let s5: AttendanceEntry | null = null;
+        if (src && src.otIn) {
+            const otStart = buildShift(src.otIn);
+            s5 = sorted.find(l => 
+                l.type === "in" && 
+                l.timestamp >= otStart && 
+                (!s3 || l.timestamp > s3.timestamp)
+            ) || null;
         }
 
-        const pickInOut = (logs: AttendanceEntry[]) => {
-          const inEntry = logs.find(l => l.type === "in") || null;
-          const outEntry = [...logs].reverse().find(l => l.type === "out") || null;
-          return { inEntry, outEntry };
-        };
+        // 2. Identify End Points (OUTs) based on Pairs
+        
+        // s2 (AM OUT): Last OUT after s1 but before s3 (if s3 exists)
+        let s2: AttendanceEntry | null = null;
+        if (s1) {
+            const searchEnd = s3 ? s3.timestamp : (new Date(baseDate).setHours(23, 59, 59, 999));
+            const candidates = sorted.filter(l => l.type === "out" && l.timestamp > s1.timestamp && l.timestamp < searchEnd);
+            s2 = candidates.pop() || null;
+        }
 
-        const morningPair = pickInOut(morningLogs);
-        const afternoonPair = pickInOut(afternoonLogs);
-        const overtimePair = pickInOut(overtimeLogs);
+        // s4 (PM OUT): Last OUT after s3 but before s5 (if s5 exists)
+        let s4: AttendanceEntry | null = null;
+        if (s3) {
+            const searchEnd = s5 ? s5.timestamp : (new Date(baseDate).setHours(23, 59, 59, 999));
+            const candidates = sorted.filter(l => l.type === "out" && l.timestamp > s3.timestamp && l.timestamp < searchEnd);
+            s4 = candidates.pop() || null;
+        }
 
-        const s1 = morningPair.inEntry;
-        const s2 = morningPair.outEntry;
-        const s3 = afternoonPair.inEntry;
-        const s4 = afternoonPair.outEntry;
-        const s5 = overtimePair.inEntry;
-        const s6 = overtimePair.outEntry;
+        // s6 (OT OUT): Last OUT after s5
+        let s6: AttendanceEntry | null = null;
+        if (s5) {
+            const candidates = sorted.filter(l => l.type === "out" && l.timestamp > s5.timestamp);
+            s6 = candidates.pop() || null;
+        }
 
         const hasSchedule =
           !!src &&
@@ -1863,6 +1881,30 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                   className="hidden" 
                 />
                 
+                {(() => {
+                    const todayAuth = attendance.find(l => {
+                        if (!l.photoDataUrl?.startsWith("OT_AUTH:")) return false;
+                        const d = new Date(l.timestamp);
+                        return d.toDateString() === new Date().toDateString();
+                    });
+                    if (todayAuth) {
+                        return (
+                          <div className="w-full max-w-md mb-4">
+                            <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-center">
+                              <div className="text-[11px] font-semibold text-green-700 uppercase tracking-wide flex items-center justify-center gap-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                Overtime Authorized
+                              </div>
+                              <div className="mt-1 text-xs text-green-600">
+                                You have been authorized for overtime today. You can now Time In.
+                              </div>
+                            </div>
+                          </div>
+                        );
+                    }
+                    return null;
+                })()}
+
                 {officialScheduleText && (
                   <div className="w-full max-w-md mb-4">
                     <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-center">
@@ -2111,36 +2153,266 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   );
 }
 
-export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftUpdate }: { idnumber: string; reports: ReportEntry[]; drafts?: ReportEntry[]; onUpdate: (next: ReportEntry[]) => void; onDraftUpdate: (drafts: ReportEntry[]) => void }) {
+function ReportDetailsModal({ report, onClose }: { report: ReportEntry; onClose: () => void }) {
+  return (
+    <div 
+      className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
+      onClick={onClose}
+    >
+      <div 
+        className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl animate-in zoom-in-95 duration-200"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+           <div className="flex items-center gap-3">
+              <div className="h-10 w-10 bg-green-100 text-green-600 rounded-full flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-gray-900">Report Details</h2>
+                <p className="text-xs text-gray-500 font-medium">Week {report.week}</p>
+              </div>
+           </div>
+           <button 
+             onClick={onClose}
+             className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-all"
+           >
+             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+           </button>
+        </div>
+        
+        <div className="p-6 overflow-y-auto custom-scrollbar space-y-6">
+           {/* Header Info */}
+           <div className="flex items-start justify-between">
+              <div>
+                 <h3 className="text-xl font-bold text-gray-900">{report.title}</h3>
+                 <p className="text-sm text-gray-500 mt-1">Submitted on {new Date(report.submittedAt).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</p>
+              </div>
+              <span className="px-3 py-1 rounded-full bg-green-50 text-green-700 text-xs font-bold uppercase tracking-wide border border-green-100">
+                Submitted
+              </span>
+           </div>
+
+           {/* Attachment */}
+           {report.fileName && (
+              <div className="p-4 rounded-xl border border-gray-200 bg-gray-50 flex items-center justify-between group hover:border-[#F97316] hover:bg-orange-50/10 transition-all">
+                <div className="flex items-center gap-3">
+                   <div className="h-10 w-10 bg-white border border-gray-200 rounded-lg flex items-center justify-center text-[#F97316]">
+                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                   </div>
+                   <div>
+                     <p className="text-sm font-bold text-gray-900 group-hover:text-[#F97316] transition-colors">{report.fileName}</p>
+                     <p className="text-xs text-gray-500">Attachment</p>
+                   </div>
+                </div>
+                <a href={report.fileUrl || "#"} target="_blank" rel="noopener noreferrer" className="px-4 py-2 bg-white border border-gray-200 text-[#F97316] rounded-lg text-sm font-semibold hover:bg-[#F97316] hover:text-white transition-colors shadow-sm">
+                   Download
+                </a>
+              </div>
+           )}
+
+           {/* Content */}
+           <div className="space-y-2">
+              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Report Content</h4>
+              <div className="bg-gray-50 rounded-xl p-6 border border-gray-100 min-h-[150px] text-gray-700 whitespace-pre-wrap leading-relaxed">
+                {report.body || "No text content."}
+              </div>
+           </div>
+
+           {/* Instructor Feedback */}
+           {report.instructorComment && (
+              <div className="pt-6 border-t border-gray-100 animate-in slide-in-from-bottom-2">
+                 <div className="flex items-center gap-2 mb-4">
+                    <div className="h-8 w-8 rounded-full bg-red-50 text-red-600 flex items-center justify-center border border-red-100">
+                       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900">Instructor Feedback</h3>
+                 </div>
+                 <div className="bg-red-50/50 rounded-xl p-5 border border-red-100 text-gray-800 shadow-sm relative">
+                    <div className="absolute top-0 left-6 -mt-2 h-4 w-4 bg-red-50 border-t border-l border-red-100 transform rotate-45"></div>
+                    {report.instructorComment}
+                 </div>
+              </div>
+           )}
+        </div>
+        
+        <div className="p-4 border-t border-gray-100 bg-gray-50/50 flex justify-end">
+           <button 
+             onClick={onClose}
+             className="px-6 py-2.5 bg-white border border-gray-200 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-colors shadow-sm"
+           >
+             Close
+           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function ReportsView({ 
+  idnumber, 
+  reports, 
+  drafts = [], 
+  deadlines = [],
+  onUpdate, 
+  onDraftUpdate 
+}: { 
+  idnumber: string; 
+  reports: ReportEntry[]; 
+  drafts?: ReportEntry[]; 
+  deadlines?: { week: number; date: string }[];
+  onUpdate: (next: ReportEntry[]) => void; 
+  onDraftUpdate: (drafts: ReportEntry[]) => void 
+}) {
+  const [selectedWeek, setSelectedWeek] = useState<number | null>(null);
+  const [viewingReport, setViewingReport] = useState<ReportEntry | null>(null);
+  
+  // Editor State
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [file, setFile] = useState<File | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [existingFile, setExistingFile] = useState<{name: string, type: string} | null>(null);
+  const [draftId, setDraftId] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
+
   const allowedTypes = new Set([
     "application/pdf",
     "application/msword",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ]);
-  const [showEditor, setShowEditor] = useState(false);
-  const [viewing, setViewing] = useState<ReportEntry | null>(null);
-  const [showAllReports, setShowAllReports] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [filterDate, setFilterDate] = useState("");
-  const [draftId, setDraftId] = useState<number | null>(null);
-  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
-  const [existingFile, setExistingFile] = useState<{name: string, type: string} | null>(null);
-  const [viewingComment, setViewingComment] = useState<ReportEntry | null>(null);
 
-  const safeReports = Array.isArray(reports) ? reports : [];
-  const safeDrafts = Array.isArray(drafts) ? drafts : [];
+  // Helper to determine week status
+  const slots = useMemo(() => {
+    const sortedReports = [...reports].sort((a, b) => a.submittedAt - b.submittedAt);
+    const sortedDeadlines = [...(deadlines || [])].sort((a, b) => a.week - b.week);
+    
+    const result = sortedDeadlines.map((d, index) => {
+      // Determine date range
+      const deadlineDate = new Date(d.date);
+      deadlineDate.setHours(23, 59, 59, 999);
 
-  const filteredReports = safeReports.filter(r => {
-    const matchesSearch = (r.title || "").toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesDate = filterDate ? new Date(r.submittedAt).toLocaleDateString() === new Date(filterDate).toLocaleDateString() : true;
-    return matchesSearch && matchesDate;
-  });
+      let startDate: Date;
+      if (index === 0) {
+        startDate = new Date(deadlineDate);
+        startDate.setDate(startDate.getDate() - 6);
+        startDate.setHours(0, 0, 0, 0);
+      } else {
+        const prev = new Date(sortedDeadlines[index - 1].date);
+        startDate = new Date(prev);
+        startDate.setDate(startDate.getDate() + 1);
+        startDate.setHours(0, 0, 0, 0);
+      }
+      
+      // Find report for this week
+      const report = sortedReports.find(r => r.week === d.week) || 
+                     sortedReports.find(r => !r.week && r.submittedAt >= startDate.getTime() && r.submittedAt <= deadlineDate.getTime());
 
+      const isSubmitted = !!report;
+      
+      // Check locks - sequential flow
+      let isPrevSubmitted = true;
+      if (index > 0) {
+          const prevD = sortedDeadlines[index - 1];
+          const prevEndDate = new Date(prevD.date);
+          prevEndDate.setHours(23, 59, 59, 999);
+          const prevStartDate = new Date(prevEndDate);
+          prevStartDate.setDate(prevStartDate.getDate() - 6);
+          prevStartDate.setHours(0, 0, 0, 0);
+          
+          const prevReport = sortedReports.find(r => r.week === prevD.week) || 
+                             sortedReports.find(r => !r.week && r.submittedAt >= prevStartDate.getTime() && r.submittedAt <= prevEndDate.getTime());
+          isPrevSubmitted = !!prevReport;
+      }
+      
+      const isLocked = index > 0 && !isPrevSubmitted;
+      
+      const now = new Date();
+      const isFuture = now < startDate;
+      
+      let status: "Submitted" | "Pending" | "Overdue" | "Locked" | "Future" = "Pending";
+      if (isSubmitted) status = "Submitted";
+      else if (isLocked) status = "Locked";
+      else if (isFuture) status = "Future";
+      else if (now > deadlineDate) status = "Overdue";
+      
+      return {
+        week: d.week,
+        start: startDate,
+        end: deadlineDate,
+        report,
+        status,
+        isLocked: status === "Locked"
+      };
+    });
+
+    // If the last slot is Submitted, append a synthetic "Next Week" slot so the user has a place to land
+    const lastSlot = result[result.length - 1];
+    if (lastSlot && lastSlot.status === "Submitted") {
+        const nextWeek = lastSlot.week + 1;
+        
+        // Calculate dates for next week
+        const nextStart = new Date(lastSlot.end);
+        nextStart.setDate(nextStart.getDate() + 1); // Start next day
+        nextStart.setHours(0, 0, 0, 0);
+        
+        const nextEnd = new Date(nextStart);
+        nextEnd.setDate(nextEnd.getDate() + 6); // 7 days duration
+        nextEnd.setHours(23, 59, 59, 999);
+        
+        // Check if report already exists for this future week
+        const report = sortedReports.find(r => r.week === nextWeek);
+        const isSubmitted = !!report;
+        
+        result.push({
+           week: nextWeek,
+           start: nextStart,
+           end: nextEnd,
+           report,
+           status: isSubmitted ? "Submitted" : "Future",
+           isLocked: false // Always unlocked if previous is submitted
+        });
+    }
+
+    return result;
+  }, [reports, deadlines]);
+
+  // Auto-select logic
+  useEffect(() => {
+    // 1. If currently selected week has a report (Submitted), move away from it.
+    // We strictly prevent the editor from showing submitted reports.
+    if (selectedWeek !== null) {
+      const current = slots.find(s => s.week === selectedWeek);
+      // Check if report exists (regardless of status label)
+      if (current && current.report) {
+         // Try to find ANY non-submitted week (Pending, Overdue, Future, Locked)
+         // We treat Locked as actionable now since we unlocked them in UI for drafting.
+         const nextActionable = slots.find(s => !s.report);
+         
+         if (nextActionable) {
+            setSelectedWeek(nextActionable.week);
+         } else {
+            // If all have reports, deselect. This triggers the fallback "Future" slot.
+            setSelectedWeek(null);
+         }
+         return;
+      }
+    }
+
+    // 2. Initial selection if nothing selected
+    if (selectedWeek === null && slots.length > 0) {
+      // Priority: First without report (Pending/Overdue/Future/Locked)
+      const firstActionable = slots.find(s => !s.report);
+      
+      if (firstActionable) {
+        setSelectedWeek(firstActionable.week);
+      }
+      // If all have reports, do nothing (selectedWeek remains null, showing dummy Future slot).
+    }
+  }, [slots, selectedWeek]);
+
+  // Editor Handlers
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setError(null);
     const f = e.target.files?.[0] || null;
@@ -2160,7 +2432,61 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
     setFile(f);
   };
 
+  const clearForm = () => {
+    setTitle("");
+    setBody("");
+    setFile(null);
+    setExistingFile(null);
+    setDraftId(null);
+    setDraftSavedAt(null);
+    setError(null);
+  };
+
+  const loadDraft = (d: ReportEntry) => {
+    setTitle(d.title || "");
+    setBody(d.body || "");
+    setFile(null);
+    setExistingFile(d.fileName ? {name: d.fileName, type: d.fileType || ""} : null);
+    setDraftId(d.id || null);
+    setDraftSavedAt(d.submittedAt);
+    setError(null);
+    setSelectedWeek(d.week || null);
+  };
+
+  // Auto-load content (Draft) whenever selectedWeek changes
+  // NOTE: We intentionally DO NOT load submitted reports into the editor anymore.
+  // The editor is strictly for drafting/submitting. Submitted reports are viewed in Modals.
+  useEffect(() => {
+    if (!selectedWeek) return;
+
+    const slot = slots.find(s => s.week === selectedWeek);
+    if (!slot) return;
+
+    // If it's a submitted slot, we don't want to show it in the editor.
+    // The auto-select logic should have redirected us away, but if we are here, clear the form.
+    if (slot.report) {
+       clearForm();
+    } else {
+       // Check for draft
+       const draft = drafts.find(d => d.week === selectedWeek);
+       if (draft) {
+          setTitle(draft.title || "");
+          setBody(draft.body || "");
+          setFile(null);
+          setExistingFile(draft.fileName ? {name: draft.fileName, type: draft.fileType || ""} : null);
+          setDraftId(draft.id || null);
+          setDraftSavedAt(draft.submittedAt);
+          setError(null);
+       } else {
+          // New blank report
+          clearForm();
+       }
+    }
+  }, [selectedWeek, drafts, slots]);
+
+
   const saveDraft = async () => {
+    if (!selectedWeek) return;
     setSubmitting(true);
     try {
       const payload: any = {
@@ -2169,11 +2495,10 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
         body: body.trim(),
         fileName: file?.name || existingFile?.name,
         fileType: file?.type || existingFile?.type,
-        isDraft: true
+        isDraft: true,
+        week: selectedWeek
       };
-      if (draftId) {
-        payload.id = draftId;
-      }
+      if (draftId) payload.id = draftId;
 
       const res = await fetch("/api/reports", {
         method: "POST",
@@ -2186,7 +2511,6 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
       
       const savedReport = json.report;
       
-      // Update drafts list
       const existingIndex = drafts.findIndex(d => d.id === savedReport.id);
       let newDrafts = [...drafts];
       if (existingIndex >= 0) {
@@ -2195,10 +2519,10 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
         newDrafts = [savedReport, ...newDrafts];
       }
       onDraftUpdate(newDrafts);
-      
       setError(null);
-      clearForm();
-      setShowEditor(false);
+      // Don't clear form on save draft, just update ID
+      setDraftId(savedReport.id);
+      setDraftSavedAt(Date.now());
     } catch (e) {
       setError("Failed to save draft.");
     } finally {
@@ -2206,80 +2530,8 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
     }
   };
 
-  const loadDraft = (d: ReportEntry) => {
-    setTitle(d.title || "");
-    setBody(d.body || "");
-    setFile(null);
-    setExistingFile(d.fileName ? {name: d.fileName, type: d.fileType || ""} : null);
-    setDraftId(d.id || null);
-    setDraftSavedAt(d.submittedAt);
-    setError(null);
-  };
-
-  const deleteDraft = async (e: React.MouseEvent, id: number) => {
-    e.stopPropagation();
-    if(!confirm("Delete this draft?")) return;
-    try {
-        await fetch(`/api/reports?id=${id}`, { method: "DELETE" });
-        const newDrafts = drafts.filter(d => d.id !== id);
-        onDraftUpdate(newDrafts);
-        if (draftId === id) {
-            clearForm();
-        }
-    } catch(e) {
-        console.error(e);
-    }
-  };
-
-  const submitDraftDirectly = async (e: React.MouseEvent, d: ReportEntry) => {
-    e.stopPropagation();
-    if(!confirm("Submit this draft?")) return;
-    
-    setSubmitting(true);
-    try {
-        const payload: any = {
-            idnumber,
-            title: d.title,
-            body: d.body,
-            fileName: d.fileName,
-            fileType: d.fileType,
-            isDraft: false,
-            id: d.id
-        };
-        
-        const res = await fetch("/api/reports", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-        
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error || "Failed to submit draft");
-        
-        onUpdate([json.report, ...reports]);
-        const newDrafts = drafts.filter(x => x.id !== d.id);
-        onDraftUpdate(newDrafts);
-        
-        if (draftId === d.id) clearForm();
-        
-    } catch(e) {
-        setError("Failed to submit draft directly.");
-    } finally {
-        setSubmitting(false);
-    }
-  };
-
-  const clearForm = () => {
-    setTitle("");
-    setBody("");
-    setFile(null);
-    setExistingFile(null);
-    setDraftId(null);
-    setDraftSavedAt(null);
-    setError(null);
-  };
-
   const submit = async () => {
+    if (!selectedWeek) return;
     setError(null);
     const t = title.trim();
     const b = body.trim();
@@ -2301,8 +2553,9 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
         body: b,
         fileName: file?.name || existingFile?.name,
         fileType: file?.type || existingFile?.type,
-        fileData: fileData, // Send base64 data
-        isDraft: false
+        fileData: fileData,
+        isDraft: false,
+        week: selectedWeek
       };
       if (draftId) payload.id = draftId;
 
@@ -2313,15 +2566,13 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
       });
       
       const json = await res.json();
-      console.log("Report submit response:", json);
       if (!res.ok) throw new Error(json.error || "Failed to submit report");
       
       onUpdate([json.report, ...reports]);
       if (draftId) {
-        onDraftUpdate(safeDrafts.filter(d => d.id !== draftId));
+        onDraftUpdate(drafts.filter(d => d.id !== draftId));
       }
       clearForm();
-      setShowEditor(false);
     } catch (e) {
        const msg = e instanceof Error ? e.message : "Failed to submit report";
        setError(msg);
@@ -2330,598 +2581,294 @@ export function ReportsView({ idnumber, reports, drafts = [], onUpdate, onDraftU
     }
   };
 
+  const currentSlot = useMemo(() => slots.find(s => s.week === selectedWeek), [slots, selectedWeek]);
+  
+  // FALLBACK: If no slot is selected, simulate a "Next Week" slot so the editor is ALWAYS visible.
+  // This removes the "No Week Selected" state entirely.
+  const activeSlot = currentSlot || {
+      week: (slots[slots.length-1]?.week || 0) + 1,
+      status: "Future" as const,
+      start: new Date(), // Dummy dates, won't be critical for just showing the editor
+      end: new Date(),
+      report: null,
+      isLocked: false
+  };
+
   return (
-    <div className="w-full space-y-6">
-      {error && (
-        <div className="rounded-xl bg-red-50 border border-red-100 p-4 flex items-center gap-3 text-red-700 animate-in fade-in slide-in-from-top-2">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-          <span className="text-sm font-medium">{error}</span>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Compose Section */}
-        <div className="lg:col-span-2 space-y-6">
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
-               <div className="flex items-center gap-2">
-                 <div className={`h-2 w-2 rounded-full ${draftId ? 'bg-[#F97316] animate-pulse' : 'bg-[#F97316]'}`}></div>
-                 <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                    {draftId ? "Editing Draft" : "Compose Report"}
-                 </div>
-               </div>
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-in fade-in duration-500">
+      
+      {/* Left Column - Main Editor / Viewer */}
+      <div className="lg:col-span-2 space-y-6">
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden min-h-[600px] flex flex-col">
+            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
                <div className="flex items-center gap-3">
-                 {draftId && (
-                    <button 
-                       onClick={clearForm}
-                       className="p-1 rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all"
-                       title="Cancel Editing"
-                    >
-                       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                    </button>
-                 )}
-                 {draftSavedAt ? (
-                   <div className="text-[10px] font-semibold text-gray-500 bg-white px-2 py-1 rounded border border-gray-100">
-                     Draft saved {new Date(draftSavedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                   </div>
-                 ) : (
-                   <div className="text-[10px] font-semibold text-gray-400 bg-white px-2 py-1 rounded border border-gray-100">
-                     No draft saved
-                   </div>
-                 )}
-                 <div className="text-xs text-gray-400 font-mono bg-white px-2 py-1 rounded border border-gray-100">Week {reports.length + 1}</div>
+                 <div className={`h-2.5 w-2.5 rounded-full ${
+                    activeSlot.status === "Submitted" ? "bg-green-500" :
+                    activeSlot.status === "Overdue" ? "bg-red-500" :
+                    activeSlot.status === "Pending" ? "bg-[#F97316]" : "bg-gray-400"
+                 }`}></div>
+                 <h2 className="text-lg font-bold text-gray-800 uppercase tracking-wide">
+                   {activeSlot.report ? "Report Details" : "Compose Report"}
+                 </h2>
                </div>
+               <span className="text-sm font-semibold text-gray-500">Week {activeSlot.week}</span>
             </div>
-            <div className="p-6 space-y-6">
-               <div>
-                 <label className="block text-sm font-bold text-gray-700 mb-1.5">Report Title</label>
-                 <input 
-                   value={title} 
-                   onChange={e => setTitle(e.target.value)}
-                   disabled={!!file}
-                   placeholder={!!file ? "Title will be the filename" : "e.g. Week 5 Accomplishment Report"}
-                   className={`w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all shadow-sm ${!!file ? "bg-gray-100 cursor-not-allowed opacity-70" : ""}`}
-                 />
-               </div>
-               
-               <div>
-                 <label className="block text-sm font-bold text-gray-700 mb-1.5">Content</label>
-                 <textarea 
-                  value={body}
-                  onChange={e => setBody(e.target.value)}
-                  disabled={!!file}
-                  placeholder={!!file ? "Text editing is disabled when a file is attached." : "Describe your activities, learnings, and accomplishments this week..."}
-                  className={`w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all min-h-[300px] resize-y shadow-sm ${!!file ? "bg-gray-100 cursor-not-allowed opacity-70" : ""}`}
-                />
-               </div>
 
-               <div>
-                 <label className="block text-sm font-bold text-gray-700 mb-1.5">Attachment (Optional)</label>
-                 {!file ? (
-                    <div className="relative group">
-                      <input 
-                        type="file" 
-                        onChange={onFileChange}
-                        accept=".pdf,.doc,.docx"
-                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                      />
-                      <div className="w-full rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 p-8 flex flex-col items-center justify-center text-center group-hover:border-[#F97316] group-hover:bg-orange-50/30 transition-all">
-                        <div className="p-3 rounded-full bg-white shadow-sm mb-3 text-gray-400 group-hover:text-[#F97316] transition-colors">
-                           <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-                        </div>
-                        <p className="text-sm font-semibold text-gray-700 group-hover:text-gray-900">Click to upload or drag and drop</p>
-                        <p className="text-xs text-gray-500 mt-1">PDF or Word documents up to 10MB</p>
-                      </div>
-                    </div>
-                 ) : (
-                    <div className="flex items-center justify-between p-4 rounded-xl border border-blue-100 bg-blue-50/50">
-                       <div className="flex items-center gap-3 min-w-0">
-                          <div className="p-2 rounded-lg bg-white border border-blue-100 shadow-sm text-blue-600">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-sm font-semibold text-gray-900 truncate">{file.name}</p>
-                            <p className="text-xs text-gray-500">{(file.size / 1024).toFixed(0)} KB</p>
-                          </div>
-                       </div>
-                       <button onClick={() => setFile(null)} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="Remove file">
-                         <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                       </button>
-                    </div>
-                 )}
-              </div>
-            </div>
-            <div className="px-6 py-4 bg-gray-50 border-t border-gray-100 flex flex-col sm:flex-row gap-3 sm:gap-4 justify-between items-center">
-              <div className="flex items-center gap-3 w-full sm:w-auto">
-                <button
-                  onClick={saveDraft}
-                  disabled={submitting}
-                  className="flex-1 sm:flex-none rounded-xl bg-white text-[#F97316] font-semibold text-sm py-2.5 px-5 border border-[#F97316] hover:bg-orange-50 transition-all active:scale-95 disabled:opacity-70 shadow-sm hover:shadow-md flex items-center justify-center gap-2"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3v4a1 1 0 0 1-1 1H7l-4 4V5a2 2 0 0 1 2-2z"/><path d="M12 22a8 8 0 0 0 8-8"/></svg>
-                  <span>Save Draft</span>
-                </button>
-                <button
-                  onClick={clearForm}
-                  disabled={submitting}
-                  className="flex-1 sm:flex-none rounded-xl bg-gray-100 text-gray-700 font-semibold text-sm py-2.5 px-5 border border-gray-200 hover:bg-gray-200 transition-all active:scale-95 disabled:opacity-70 shadow-sm flex items-center justify-center gap-2"
-                >
-                  {draftId ? (
-                    <>
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
-                      <span>Cancel Edit</span>
-                    </>
-                  ) : (
-                    <>
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                      <span>Clear</span>
-                    </>
-                  )}
-                </button>
-              </div>
-              <button 
-                onClick={submit}
-                disabled={submitting}
-                className="w-full sm:w-auto rounded-xl bg-[#F97316] text-white font-semibold text-sm py-2.5 px-6 hover:bg-[#EA580C] transition-all active:scale-95 disabled:opacity-70 disabled:cursor-wait shadow-sm hover:shadow-md flex items-center justify-center gap-2"
-              >
-                {submitting ? (
-                  <>
-                    <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                    <span>Submitting...</span>
-                  </>
-                ) : (
-                  <>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-                    <span>Submit Report</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Sidebar Section */}
-        <div className="space-y-6">
-           {/* Drafts Card */}
-           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
-                 <div className="flex items-center gap-2">
-                   <div className="h-2 w-2 rounded-full bg-yellow-400"></div>
-                   <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">My Drafts</div>
-                 </div>
-                 <span className="text-xs font-bold text-gray-400">{drafts.length}</span>
-              </div>
-              <div className="p-4 max-h-[400px] overflow-y-auto custom-scrollbar bg-gray-50/30">
-                 {drafts.length === 0 ? (
-                    <div className="py-10 text-center flex flex-col items-center">
-                       <div className="h-12 w-12 rounded-full bg-gray-100 flex items-center justify-center text-gray-300 mb-3">
-                          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                       </div>
-                       <p className="text-sm font-semibold text-gray-600">No drafts saved</p>
-                       <p className="text-xs text-gray-400 mt-1 max-w-[150px]">Your unfinished reports will be saved here automatically</p>
-                    </div>
-                 ) : (
-                    <div className="space-y-3">
-                       {drafts.map((d, idx) => (
-                          <div 
-                             key={d.id || idx} 
-                             className={`group relative rounded-xl border transition-all duration-200 overflow-hidden ${
-                                draftId === d.id 
-                                ? 'bg-white border-[#F97316] ring-1 ring-[#F97316] shadow-md' 
-                                : 'bg-white border-gray-200 hover:border-orange-200 hover:shadow-md'
-                             }`}
-                          >
-                             {/* Active Indicator */}
-                             {draftId === d.id && (
-                                <div className="absolute top-0 left-0 w-1 h-full bg-[#F97316]"></div>
-                             )}
-
-                             <div className="p-4">
-                                <div className="flex justify-between items-start mb-2">
-                                   <div className="min-w-0 flex-1 mr-3 cursor-pointer" onClick={() => loadDraft(d)}>
-                                      <h4 className={`text-sm font-bold truncate mb-1 transition-colors ${draftId === d.id ? 'text-[#F97316]' : 'text-gray-900 group-hover:text-[#F97316]'}`}>
-                                         {d.title || "Untitled Draft"}
-                                      </h4>
-                                      <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">
-                                         {d.body || "No content preview available."}
-                                      </p>
-                                   </div>
-                                </div>
-
-                                <div className="flex items-center justify-between pt-3 border-t border-gray-50 mt-2">
-                                   <span className="text-[10px] font-medium text-gray-400 flex items-center gap-1.5">
-                                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                                      {new Date(d.submittedAt).toLocaleDateString(undefined, {month:'short', day:'numeric'})}
-                                   </span>
-                                   
-                                   <div className="flex items-center gap-2">
-                                      {/* Delete Button */}
-                                      {d.id && (
-                                          <button 
-                                             onClick={(e) => { e.stopPropagation(); deleteDraft(e, d.id!); }}
-                                             className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                                             title="Delete Draft"
-                                          >
-                                             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                                          </button>
-                                      )}
-
-                                      {/* Edit/Submit Actions */}
-                                      {draftId === d.id ? (
-                                         <span className="text-[10px] font-bold text-[#F97316] bg-orange-50 px-2.5 py-1 rounded-lg flex items-center gap-1.5 border border-orange-100">
-                                            <span className="w-1.5 h-1.5 rounded-full bg-[#F97316] animate-pulse"></span>
-                                            Editing
-                                         </span>
-                                      ) : (
-                                         <div className="flex items-center gap-2">
-                                            <button
-                                                onClick={() => loadDraft(d)}
-                                                className="text-[10px] font-bold text-gray-600 bg-gray-50 hover:bg-gray-100 hover:text-gray-900 px-3 py-1.5 rounded-lg border border-gray-200 transition-all"
-                                            >
-                                                Edit
-                                            </button>
-                                            {d.id && (
-                                                <button 
-                                                   onClick={(e) => submitDraftDirectly(e, d)}
-                                                   className="text-[10px] font-bold text-white bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded-lg shadow-sm hover:shadow transition-all flex items-center gap-1"
-                                                >
-                                                   <span>Submit</span>
-                                                   <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                                                </button>
-                                            )}
-                                         </div>
-                                      )}
-                                   </div>
-                                </div>
-                             </div>
-                          </div>
-                       ))}
-                    </div>
-                 )}
-              </div>
-           </div>
-
-           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-full max-h-[600px]">
-              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
-                 <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Recent Reports</div>
-                 <button onClick={() => setShowAllReports(true)} className="text-xs font-bold text-[#F97316] hover:text-[#EA580C] transition-colors hover:underline">View All</button>
-              </div>
-              <div className="p-3 overflow-y-auto custom-scrollbar flex-1">
-                 {safeReports.length === 0 ? (
-                    <div className="py-12 text-center flex flex-col items-center">
-                       <div className="p-4 rounded-full bg-gray-50 text-gray-300 mb-3">
-                          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                       </div>
-                       <p className="text-sm font-medium text-gray-500">No reports yet</p>
-                       <p className="text-xs text-gray-400 mt-1">Submitted reports will appear here</p>
-                    </div>
-                 ) : (
-                    <div className="space-y-2">
-                      {safeReports.slice(0, 5).map((r, idx) => (
-                         <div key={idx} onClick={() => setViewing(r)} className="p-3 rounded-xl hover:bg-orange-50 cursor-pointer group transition-all border border-transparent hover:border-orange-100 relative">
-                             <div className="flex justify-between items-start mb-1">
-                                <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
-                                   {(r.instructorComment || r.isViewedByInstructor) && (
-                                     <div className="flex items-center gap-1">
-                                        {r.instructorComment ? (
-                                           <button
-                                              onClick={(e) => { e.stopPropagation(); setViewingComment(r); }} 
-                                              className="flex-shrink-0 text-red-500 animate-pulse hover:bg-red-50 rounded-full p-1 -ml-1 transition-all" 
-                                              title="View Instructor Feedback"
-                                           >
-                                              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-                                           </button>
-                                        ) : (
-                                           <span className="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded border border-green-100 whitespace-nowrap">Viewed</span>
-                                        )}
-                                     </div>
-                                   )}
-                                   <h4 className="text-sm font-bold text-gray-800 line-clamp-1 group-hover:text-[#F97316] transition-colors">{r.title || "Untitled Report"}</h4>
-                                </div>
-                                <span className="text-[10px] text-gray-400 whitespace-nowrap font-medium">{new Date(r.submittedAt).toLocaleDateString(undefined, {month:'short', day:'numeric'})}</span>
-                             </div>
-                             {r.fileName ? (
-                                <div className="flex items-center gap-3 p-3 rounded-lg bg-orange-50 border border-orange-100 mb-2">
-                                   <div className="h-8 w-8 rounded-lg bg-orange-100 flex items-center justify-center text-orange-600 flex-shrink-0">
-                                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                                   </div>
-                                   <div className="min-w-0">
-                                      <div className="text-xs font-bold text-gray-900 truncate">{r.fileName}</div>
-                                      <div className="text-[10px] text-gray-500">Attached Document</div>
-                                   </div>
-                                </div>
-                             ) : (
-                                <p className="text-xs text-gray-500 line-clamp-2 mb-2 leading-relaxed">{r.body || "No text content."}</p>
-                             )}
-                             <div className="flex items-center gap-2">
-                                <div className="text-[10px] px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-semibold">Submitted</div>
-                             </div>
-                             <div className="absolute right-3 bottom-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F97316" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                             </div>
-                          </div>
-                       ))}
-                    </div>
-                 )}
-              </div>
-           </div>
-           
-
-        </div>
-      </div>
-
-    {showAllReports && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center px-4 sm:px-6">
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowAllReports(false)} aria-hidden="true" />
-        <div
-          className="relative w-full max-w-4xl rounded-2xl bg-white shadow-2xl p-6 sm:p-10 max-h-[90vh] overflow-hidden flex flex-col"
-          role="dialog"
-          aria-modal="true"
-          aria-label="All Reports"
-        >
-          <div className="mb-6 flex items-center justify-between border-b border-gray-100 pb-4 shrink-0">
-            <h2 className="text-xl sm:text-2xl font-bold text-gray-900">All Submitted Reports</h2>
-            <button 
-              onClick={() => setShowAllReports(false)}
-              className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
-          </div>
-
-          <div className="mb-6 flex flex-col sm:flex-row gap-4 shrink-0">
-            <div className="flex-1">
-              <label className="text-xs font-bold text-gray-700 uppercase tracking-wide mb-1 block">Search Title</label>
-              <input 
-                type="text" 
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by title..." 
-                className="w-full rounded-lg border border-gray-400 px-4 py-2.5 text-sm font-medium text-gray-900 placeholder:text-gray-500 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
-              />
-            </div>
-            <div className="w-full sm:w-auto">
-              <label className="text-xs font-bold text-gray-700 uppercase tracking-wide mb-1 block">Filter by Date</label>
-              <input 
-                type="date" 
-                value={filterDate}
-                onChange={(e) => setFilterDate(e.target.value)}
-                className="w-full sm:w-48 rounded-lg border border-gray-400 px-4 py-2.5 text-sm font-medium text-gray-900 placeholder:text-gray-500 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all bg-white"
-              />
-            </div>
-            {(searchQuery || filterDate) && (
-               <div className="flex items-end">
-                 <button 
-                   onClick={() => { setSearchQuery(""); setFilterDate(""); }}
-                   className="mb-[1px] px-4 py-2.5 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                 >
-                   Clear
-                 </button>
-               </div>
-            )}
-          </div>
-
-          <div className="flex-1 overflow-y-auto min-h-0 custom-scrollbar">
-            {filteredReports.length > 0 ? (
-              <div className="space-y-3">
-                {filteredReports.slice().reverse().map((r, idx) => (
-                  <div 
-                    key={idx} 
-                    onClick={() => setViewing(r)}
-                    className="group relative p-5 rounded-2xl border border-gray-200 bg-white hover:border-[#F97316]/30 hover:shadow-md hover:shadow-orange-500/5 transition-all cursor-pointer"
-                  >
-                    <div className="flex justify-between items-start gap-4">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1.5">
-                          {(r.instructorComment || r.isViewedByInstructor) && (
-                            <>
-                              {r.instructorComment ? (
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); setViewingComment(r); }}
-                                  className="flex-shrink-0 inline-flex items-center justify-center h-6 w-6 rounded-full bg-red-50 text-red-600 border border-red-100 shadow-sm hover:bg-red-100 transition-colors" 
-                                  title="View Instructor Feedback"
-                                >
-                                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-                                </button>
-                              ) : (
-                                <span className="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded border border-green-100 whitespace-nowrap uppercase tracking-wide">Viewed</span>
-                              )}
-                            </>
-                          )}
-                          <h3 className="text-base font-bold text-gray-900 group-hover:text-[#F97316] transition-colors truncate">
-                            {r.title || "(Untitled)"}
-                          </h3>
-                          {r.fileName && (
-                            <span className="flex-shrink-0 inline-flex items-center justify-center h-5 w-5 rounded bg-gray-100 text-gray-500" title="Has attachment">
-                               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                            </span>
-                          )}
-                        </div>
-                        
-                        {r.fileName ? (
-                           <div className="flex items-center gap-3 p-3 rounded-lg bg-orange-50 border border-orange-100 mb-3">
-                              <div className="h-10 w-10 rounded-lg bg-orange-100 flex items-center justify-center text-orange-600 flex-shrink-0">
-                                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                              </div>
-                              <div className="min-w-0">
-                                 <div className="text-sm font-bold text-gray-900 truncate">{r.fileName}</div>
-                                 <div className="text-xs text-gray-500">Attached Document</div>
-                              </div>
+            <div className="p-6 flex-1 flex flex-col">
+               {/* LOCKED STATE - BYPASSED for Drafting */}
+               {activeSlot.isLocked && false ? (
+                  <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
+                     <div className="h-16 w-16 bg-gray-100 rounded-full flex items-center justify-center text-gray-400 mb-4">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                     </div>
+                     <h3 className="text-xl font-bold text-gray-900 mb-2">Report Locked</h3>
+                     <p className="text-gray-500 max-w-md">
+                        This report is currently locked. Please submit your report for the previous week to unlock this one.
+                     </p>
+                  </div>
+               ) : (
+                  /* EDIT / VIEW-IN-EDITOR MODE */
+                  <div className="space-y-6 flex-1 flex flex-col">
+                     {activeSlot.report && (
+                        <div className="bg-green-50 border border-green-200 rounded-xl p-4 flex items-center gap-3 text-green-800">
+                           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                           <div className="text-sm font-medium">
+                              Report Submitted. <button onClick={() => setViewingReport(activeSlot.report!)} className="underline font-bold hover:text-green-900">View Details</button>
                            </div>
-                        ) : (
-                           <p className="text-sm text-gray-500 line-clamp-2 mb-3 leading-relaxed">
-                             {r.body || "No text content provided."}
-                           </p>
-                        )}
-
-                        <div className="flex flex-wrap items-center gap-3 text-xs">
-                          <span className="px-2 py-1 rounded-md bg-green-50 text-green-700 font-bold border border-green-100 uppercase tracking-wide text-[10px]">
-                            Submitted
-                          </span>
-                          <span className="text-gray-300 hidden sm:inline">•</span>
-                          <div className="flex items-center gap-3 text-gray-500 font-medium">
-                            <span>{new Date(r.submittedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span>
-                            <span className="w-1 h-1 rounded-full bg-gray-300"></span>
-                            <span>{new Date(r.submittedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                          </div>
                         </div>
-                      </div>
+                     )}
 
-                      {/* Chevron that appears/moves on hover */}
-                      <div className="text-gray-300 group-hover:text-[#F97316] group-hover:translate-x-1 transition-all self-center">
-                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                      </div>
-                    </div>
+                     {error && (
+                        <div className="rounded-xl bg-red-50 border border-red-100 p-4 flex items-center gap-3 text-red-700">
+                          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                          <span className="text-sm font-medium">{error}</span>
+                        </div>
+                     )}
+
+                     <div>
+                       <label className="block text-sm font-bold text-gray-700 mb-1.5">Report Title</label>
+                       <input 
+                         value={title} 
+                         onChange={e => setTitle(e.target.value)}
+                         disabled={!!file || !!activeSlot.report}
+                         placeholder={!!file ? "Title will be the filename" : "e.g. Week " + activeSlot.week + " Accomplishment Report"}
+                         className={`w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all shadow-sm ${!!file || !!activeSlot.report ? "bg-gray-100 cursor-not-allowed opacity-70" : ""}`}
+                       />
+                     </div>
+                     
+                     <div className="flex-1">
+                       <label className="block text-sm font-bold text-gray-700 mb-1.5">Content</label>
+                       <textarea 
+                        value={body}
+                        onChange={e => setBody(e.target.value)}
+                        disabled={!!file || !!activeSlot.report}
+                        placeholder={!!file ? "Text editing is disabled when a file is attached." : "Describe your activities, learnings, and accomplishments this week..."}
+                        className={`w-full h-full min-h-[250px] rounded-xl border border-gray-200 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all resize-none shadow-sm ${!!file || !!activeSlot.report ? "bg-gray-100 cursor-not-allowed opacity-70" : ""}`}
+                      />
+                     </div>
+
+                     <div>
+                       <label className="block text-sm font-bold text-gray-700 mb-1.5">Attachment (Optional)</label>
+                       {!file && !existingFile ? (
+                          activeSlot.report ? (
+                             <div className="p-4 rounded-xl border border-gray-200 bg-gray-50 text-gray-400 text-sm text-center">
+                                No attachment
+                             </div>
+                          ) : (
+                             <div className="relative group">
+                               <input 
+                                 type="file" 
+                                 onChange={onFileChange}
+                                 accept=".pdf,.doc,.docx"
+                                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                               />
+                               <div className="w-full rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 p-6 flex flex-col items-center justify-center text-center group-hover:border-[#F97316] group-hover:bg-orange-50/30 transition-all">
+                                 <div className="p-2 rounded-full bg-white shadow-sm mb-2 text-gray-400 group-hover:text-[#F97316] transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                                 </div>
+                                 <p className="text-sm font-semibold text-gray-700">Click to upload or drag and drop</p>
+                                 <p className="text-xs text-gray-400 mt-1">PDF or Word documents up to 10MB</p>
+                               </div>
+                             </div>
+                          )
+                       ) : (
+                          <div className="flex items-center justify-between p-4 rounded-xl border border-blue-100 bg-blue-50/50">
+                             <div className="flex items-center gap-3 min-w-0">
+                                <div className="p-2 rounded-lg bg-white border border-blue-100 shadow-sm text-blue-600">
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="text-sm font-semibold text-gray-900 truncate">{file ? file.name : existingFile?.name}</p>
+                                </div>
+                             </div>
+                             {!activeSlot.report && (
+                                <button onClick={() => { setFile(null); setExistingFile(null); }} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                </button>
+                             )}
+                          </div>
+                       )}
+                     </div>
+
+                     <div className="pt-6 border-t border-gray-100 flex justify-between items-center mt-auto">
+                        {!activeSlot.report ? (
+                           <>
+                              <div className="flex items-center gap-2">
+                                 <button onClick={saveDraft} disabled={submitting} className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 font-bold text-sm hover:bg-gray-50 hover:text-[#F97316] transition-all">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                                    Save Draft
+                                 </button>
+                                 <button onClick={clearForm} className="px-4 py-2.5 rounded-xl text-gray-400 font-bold text-sm hover:bg-gray-50 hover:text-gray-600 transition-all">
+                                    Clear
+                                 </button>
+                              </div>
+                              <button onClick={submit} disabled={submitting} className="px-6 py-2.5 rounded-xl bg-[#F97316] text-white font-bold text-sm hover:bg-[#EA580C] transition-all shadow-sm disabled:opacity-70 flex items-center gap-2">
+                                {submitting && <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>}
+                                Submit Report
+                              </button>
+                           </>
+                        ) : (
+                           <div className="text-sm text-gray-500 italic w-full text-center">
+                              This report has been submitted and cannot be edited.
+                           </div>
+                        )}
+                     </div>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div className="flex flex-col items-center justify-center h-48 text-gray-400">
-                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" className="mb-4 opacity-50"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                <p>No reports found matching your filters.</p>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    )}
-    {viewing && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center px-4 sm:px-6">
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setViewing(null)} aria-hidden="true" />
-        <div
-          className="relative w-full max-w-3xl rounded-2xl bg-white shadow-2xl flex flex-col max-h-[90vh] overflow-hidden animate-in zoom-in-95 duration-200"
-          role="dialog"
-          aria-modal="true"
-          aria-label="View Report"
-        >
-          {/* Modal Header */}
-          <div className="flex items-start justify-between p-6 sm:p-8 border-b border-gray-100 bg-gray-50/50">
-            <div className="pr-8">
-              <div className="flex items-center gap-3 flex-wrap">
-                 <h1 className="text-xl sm:text-2xl font-bold text-gray-900 leading-tight">{viewing.title}</h1>
-                 {viewing.instructorComment && (
-                    <button 
-                       onClick={() => setViewingComment(viewing)}
-                       className="px-3 py-1 rounded-full bg-red-50 text-red-600 text-xs font-bold border border-red-100 flex items-center gap-1.5 hover:bg-red-100 transition-colors"
-                    >
-                       <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-                       Feedback Available
-                    </button>
-                 )}
-              </div>
-              <div className="mt-2 flex items-center gap-3 text-sm text-gray-500">
-                <span className="flex items-center gap-1.5">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
-                  {new Date(viewing.submittedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}
-                </span>
-                <span className="text-gray-300">•</span>
-                <span className="flex items-center gap-1.5">
-                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                   {new Date(viewing.submittedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </span>
-              </div>
+               )}
             </div>
-            <button 
-              onClick={() => setViewing(null)} 
-              className="p-2 -mr-2 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-full transition-colors"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
           </div>
-          
-          {/* Modal Content */}
-          <div className="flex-1 overflow-y-auto p-6 sm:p-8 space-y-8 custom-scrollbar">
-            {/* Attachment Card */}
-            {viewing.fileName && (
-              <div className="p-4 rounded-xl border border-gray-200 bg-gray-50 flex items-center justify-between group hover:border-[#F97316]/30 hover:bg-orange-50/30 transition-all">
-                <div className="flex items-center gap-4 min-w-0">
-                   <div className="h-12 w-12 rounded-lg bg-white border border-gray-200 shadow-sm flex items-center justify-center text-[#F97316]">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                   </div>
-                   <div className="min-w-0">
-                      <div className="text-sm font-bold text-gray-900 truncate">{viewing.fileName}</div>
-                      <div className="text-xs text-gray-500">Attached Document</div>
-                   </div>
-                </div>
-                <a 
-                   href={viewing.fileUrl || "#"} 
-                   target="_blank" 
-                   rel="noopener noreferrer"
-                   className={`px-4 py-2 text-sm font-semibold border rounded-lg shadow-sm transition-all flex items-center gap-2 ${
-                     viewing.fileUrl 
-                       ? "text-[#F97316] bg-white border-gray-200 hover:bg-[#F97316] hover:text-white hover:border-[#F97316]" 
-                       : "text-gray-400 bg-gray-50 border-gray-200 cursor-not-allowed"
-                   }`}
-                   onClick={(e) => !viewing.fileUrl && e.preventDefault()}
-                >
-                   <span>Download</span>
-                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                </a>
-              </div>
-            )}
+      </div>
 
-            {/* Report Body */}
-            <div>
-              <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4">Report Content</h3>
-              <div className="prose prose-gray max-w-none">
-                {viewing.body ? (
-                  <p className="text-gray-800 text-base leading-relaxed whitespace-pre-wrap">{viewing.body}</p>
+      {/* Right Column - Sidebar */}
+      <div className="space-y-6">
+         
+         {/* My Drafts */}
+         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+             <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+               <div className="flex items-center gap-2">
+                 <div className="h-2 w-2 rounded-full bg-[#F97316]"></div>
+                 <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">My Drafts</span>
+               </div>
+               <span className="px-2 py-0.5 rounded-full bg-gray-200 text-gray-600 text-[10px] font-bold">{drafts.length}</span>
+             </div>
+             <div className="p-4">
+                {drafts.length === 0 ? (
+                  <div className="text-center py-8">
+                     <div className="h-10 w-10 bg-gray-50 rounded-full flex items-center justify-center text-gray-300 mx-auto mb-3">
+                       <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                     </div>
+                     <p className="text-sm font-medium text-gray-900">No drafts saved</p>
+                     <p className="text-xs text-gray-500 mt-1">Your unfinished reports will be saved here automatically</p>
+                  </div>
                 ) : (
-                  <div className="py-8 text-center bg-gray-50 rounded-xl border border-dashed border-gray-200 text-gray-400 italic">
-                    No text content provided in this report.
+                  <div className="space-y-3">
+                    {drafts.map(draft => (
+                       <button 
+                         key={draft.id} 
+                         onClick={() => loadDraft(draft)}
+                         className="w-full text-left p-3 rounded-xl border border-gray-100 hover:border-orange-200 hover:bg-orange-50 transition-all group"
+                       >
+                         <div className="flex justify-between items-start mb-1">
+                            <span className="text-xs font-bold text-[#F97316]">Week {draft.week}</span>
+                            <span className="text-[10px] text-gray-400">{new Date(draft.submittedAt).toLocaleDateString()}</span>
+                         </div>
+                         <p className="text-sm font-bold text-gray-900 truncate">{draft.title || "Untitled Report"}</p>
+                       </button>
+                    ))}
                   </div>
                 )}
-              </div>
-            </div>
-          </div>
+             </div>
+         </div>
 
-          {/* Modal Footer */}
-          <div className="p-6 border-t border-gray-100 bg-gray-50/50 flex justify-end">
-            <button 
-              onClick={() => setViewing(null)} 
-              className="px-6 py-2.5 bg-gray-900 hover:bg-black text-white text-sm font-semibold rounded-xl shadow-sm transition-all active:scale-95"
-            >
-              Close Viewer
-            </button>
-          </div>
-        </div>
+         {/* Weekly Reports List */}
+         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+             <div className="px-5 py-4 border-b border-gray-100 bg-gray-50/50">
+               <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">Weekly Reports</span>
+             </div>
+             <div className="max-h-[600px] overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                {slots.length === 0 ? (
+                  <div className="text-center py-8 text-gray-400">
+                    <p>No deadlines set</p>
+                  </div>
+                ) : (
+                  slots.map(slot => (
+                     <button
+                       key={slot.week}
+                       onClick={() => {
+                        if (slot.status === "Submitted" && slot.report) {
+                          setViewingReport(slot.report);
+                        } else {
+                          setSelectedWeek(slot.week);
+                        }
+                      }}
+                       className={`w-full text-left p-4 rounded-xl border transition-all duration-200 relative overflow-hidden ${
+                         selectedWeek === slot.week 
+                           ? "border-[#F97316] ring-1 ring-[#F97316] bg-orange-50/30" 
+                           : "border-gray-100 hover:border-orange-200 hover:shadow-sm bg-white"
+                       }`}
+                     >
+                       <div className="flex justify-between items-start mb-2">
+                          <div className="flex items-center gap-2">
+                             <span className={`text-xs font-bold uppercase ${selectedWeek === slot.week ? "text-[#F97316]" : "text-gray-500"}`}>Week {slot.week}</span>
+                             {slot.report?.instructorComment && (
+                                <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse"></span>
+                             )}
+                          </div>
+                          
+                          {slot.status === "Submitted" ? (
+                             <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-bold uppercase tracking-wide">Submitted</span>
+                          ) : slot.status === "Overdue" ? (
+                             <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-wide">Overdue</span>
+                          ) : slot.status === "Pending" ? (
+                             <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-[10px] font-bold uppercase tracking-wide">Action Required</span>
+                          ) : (
+                             <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-bold uppercase tracking-wide">Locked</span>
+                          )}
+                       </div>
+                       
+                       <div className={`text-sm font-bold mb-1 ${slot.isLocked ? "text-gray-400" : "text-gray-900"}`}>
+                          {slot.start.toLocaleDateString(undefined, {month: 'short', day: 'numeric'})} - {slot.end.toLocaleDateString(undefined, {month: 'short', day: 'numeric'})}
+                       </div>
+                       
+                       <div className="text-xs text-gray-500 mb-3">
+                          Deadline: {slot.end.toLocaleDateString(undefined, {weekday: 'long', month: 'long', day: 'numeric'})}
+                       </div>
+                       
+                       <div className={`text-xs font-bold flex items-center gap-1 ${
+                          slot.status === "Submitted" ? "text-green-600" : 
+                          slot.isLocked ? "text-gray-400" : "text-[#F97316]"
+                       }`}>
+                          {slot.status === "Submitted" ? (
+                             <>
+                               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                               View Report
+                             </>
+                          ) : slot.isLocked ? (
+                             <>
+                               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                               Locked
+                             </>
+                          ) : (
+                             <>
+                               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                               Submit Report
+                             </>
+                          )}
+                       </div>
+                     </button>
+                  ))
+                )}
+             </div>
+         </div>
       </div>
-    )}
 
-    {viewingComment && (
-      <div className="fixed inset-0 z-[60] flex items-center justify-center px-4 sm:px-6">
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setViewingComment(null)} aria-hidden="true" />
-        <div className="relative w-full max-w-lg rounded-2xl bg-white shadow-2xl p-6 sm:p-8 animate-in zoom-in-95 duration-200" role="dialog" aria-modal="true">
-            <div className="flex items-center gap-3 mb-6">
-                <div className="h-10 w-10 rounded-full bg-red-50 flex items-center justify-center text-red-600">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-                </div>
-                <h2 className="text-xl font-bold text-gray-900">Instructor Feedback</h2>
-            </div>
-            
-            <div className="bg-gray-50 rounded-xl p-5 border border-gray-100">
-                <div className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Comment</div>
-                <p className="text-gray-800 text-base leading-relaxed whitespace-pre-wrap">
-                    {viewingComment.instructorComment}
-                </p>
-                <div className="mt-4 pt-4 border-t border-gray-200 flex justify-between items-center">
-                    <span className="text-xs text-gray-400"> regarding report: </span>
-                    <span className="text-xs font-bold text-gray-600 truncate max-w-[200px]">{viewingComment.title}</span>
-                </div>
-            </div>
-
-            <div className="mt-8 flex justify-end">
-                <button 
-                    onClick={() => setViewingComment(null)} 
-                    className="px-6 py-2.5 bg-gray-900 text-white font-semibold rounded-xl hover:bg-black transition-all shadow-lg shadow-gray-200"
-                >
-                    Close Feedback
-                </button>
-            </div>
-        </div>
-      </div>
-    )}
-  </div>
+      {viewingReport && (
+        <ReportDetailsModal 
+          report={viewingReport} 
+          onClose={() => setViewingReport(null)} 
+        />
+      )}
+    </div>
   );
 }
 

@@ -520,7 +520,6 @@ export function TimeEntryView({ users }: { users: User[] }) {
             windowEnd: number,
             requireApproved?: boolean
           ) => {
-            const earlyWindowStart = windowStart - 30 * 60 * 1000;
             let currentIn: number | null = null;
             let duration = 0;
 
@@ -531,7 +530,6 @@ export function TimeEntryView({ users }: { users: User[] }) {
             logsToUse.forEach((log) => {
               if (log.type === "in") {
                 if (log.ts > windowEnd) return;
-                if (log.ts < earlyWindowStart) return;
                 const effectiveIn = clamp(log.ts, windowStart, windowEnd);
                 currentIn = effectiveIn;
               } else if (log.type === "out") {

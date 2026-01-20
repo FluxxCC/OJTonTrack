@@ -22,14 +22,7 @@ function timeStringToMinutes(raw: string | null | undefined): number {
 
 type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved"; validatedAt?: number };
 type ReportEntryLegacy = { text: string; fileName?: string; fileType?: string; submittedAt: number; timestamp?: number };
-type StoredSchedule = {
-  amIn?: string;
-  amOut?: string;
-  pmIn?: string;
-  pmOut?: string;
-  overtimeIn?: string;
-  overtimeOut?: string;
-};
+
 type User = {
   id: number;
   idnumber: string;
@@ -44,7 +37,21 @@ type User = {
   location?: string;
 };
 
-type ServerAttendanceEntry = { type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null };
+type AttendanceEntryRaw = {
+  id: string;
+  type: "in" | "out";
+  ts: number;
+  photourl: string;
+  status?: string;
+  validated_by?: string;
+  validated_at?: string;
+};
+
+type ShiftRaw = {
+  official_start?: string;
+  official_end?: string;
+  shift_name?: string;
+};
 
 export default function StudentDashboardPage() {
   const router = useRouter();
@@ -53,12 +60,20 @@ export default function StudentDashboardPage() {
   const [attendance, setAttendance] = useState<AttendanceEntry[]>([]);
   const [reports, setReports] = useState<ReportEntry[]>([]);
   const [targetHours, setTargetHours] = useState<number>(486);
-  const [dbSchedule, setDbSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
   const [schedule, setSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const idnumber = useMemo(() => {
     if (typeof window === "undefined") return "";
     try { return localStorage.getItem("idnumber") || ""; } catch { return ""; }
   }, []);
+
+  /*
+  useEffect(() => {
+    setInterval(() => {
+      setNow(Date.now());
+    }, 60000);
+  }, []);
+  */
 
   useEffect(() => {
     if (!idnumber) return;
@@ -68,7 +83,7 @@ export default function StudentDashboardPage() {
         const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=50`);
         const json = await res.json();
         if (active && res.ok && Array.isArray(json.entries)) {
-          const mapped = json.entries.map((e: any) => {
+          const mapped = json.entries.map((e: AttendanceEntryRaw) => {
             const sStr = String(e.status || "").trim().toLowerCase();
             const isRejected = sStr === "rejected";
             const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
@@ -145,105 +160,23 @@ export default function StudentDashboardPage() {
     return `${hours}h ${minutes}m ${seconds}s`;
   };
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/shifts", { cache: "no-store" });
-        const json = await res.json();
-        const data = json.shifts;
-        if (!Array.isArray(data) || data.length === 0) return;
-        const rows = data.filter((r: any) => r && (r.official_start || r.official_end));
-        if (rows.length === 0) return;
-        const sorted = rows
-          .slice()
-          .sort(
-            (a: any, b: any) =>
-              timeStringToMinutes(a.official_start || "") -
-              timeStringToMinutes(b.official_start || "")
-          );
-        let amRow = sorted[0];
-        let pmRow = sorted[1] || sorted[0];
-        const findByName = (match: (name: string) => boolean) =>
-          rows.find((r: any) => {
-            const n = String(r.shift_name || "").toLowerCase().trim();
-            return match(n);
-          });
-        const amCandidate = findByName((n) => n.includes("am") || n.includes("morning"));
-        const pmCandidate = findByName((n) => n.includes("pm") || n.includes("afternoon"));
-        const otCandidate = findByName((n) => n === "overtime shift" || n === "overtime");
-        if (amCandidate && pmCandidate) {
-          amRow = amCandidate;
-          pmRow = pmCandidate;
-        }
-        let finalOtRow = otCandidate;
-        if (finalOtRow && (finalOtRow === amRow || finalOtRow === pmRow)) {
-          finalOtRow = undefined;
-        }
-        const amInNorm = normalizeTimeString(amRow.official_start || "");
-        const amOutNorm = normalizeTimeString(amRow.official_end || "");
-        const pmInNorm = normalizeTimeString(pmRow.official_start || "");
-        const pmOutNorm = normalizeTimeString(pmRow.official_end || "");
-        const otInNorm = normalizeTimeString(finalOtRow?.official_start || "");
-        const otOutNorm = normalizeTimeString(finalOtRow?.official_end || "");
-        if (!amInNorm || !amOutNorm || !pmInNorm || !pmOutNorm) return;
-        const next = {
-          amIn: amInNorm,
-          amOut: amOutNorm,
-          pmIn: pmInNorm,
-          pmOut: pmOutNorm,
-          otIn: otInNorm || undefined,
-          otOut: otOutNorm || undefined,
-        };
-        if (!cancelled) {
-          setDbSchedule(next);
-        }
-      } catch {}
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        let fromLocal: StoredSchedule | null = null;
-
-        if (typeof window !== "undefined") {
-          const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
-          const saved = localStorage.getItem(key) || localStorage.getItem("schedule_default");
-          if (saved) {
-            const parsed = JSON.parse(saved) as StoredSchedule;
-            fromLocal = parsed;
-          }
-        }
-
-        if (fromLocal) {
-          const next = {
-            amIn: fromLocal.amIn || "",
-            amOut: fromLocal.amOut || "",
-            pmIn: fromLocal.pmIn || "",
-            pmOut: fromLocal.pmOut || "",
-            otIn: fromLocal.overtimeIn,
-            otOut: fromLocal.overtimeOut,
-          };
-          if (!cancelled) setSchedule(next);
-          return;
-        }
-
         const res = await fetch("/api/shifts", { cache: "no-store" });
         const json = await res.json();
         const rows = Array.isArray(json.shifts)
-          ? json.shifts.filter((r: any) => r && (r.official_start || r.official_end))
+          ? json.shifts.filter((r: ShiftRaw) => r && (r.official_start || r.official_end))
           : [];
         if (!rows.length) return;
 
         const sorted = rows
           .slice()
           .sort(
-            (a: any, b: any) =>
+            (a: ShiftRaw, b: ShiftRaw) =>
               timeStringToMinutes(a.official_start || "") -
               timeStringToMinutes(b.official_start || "")
           );
@@ -252,7 +185,7 @@ export default function StudentDashboardPage() {
         let pmRow = sorted[1] || sorted[0];
 
         const findByName = (match: (name: string) => boolean) =>
-          rows.find((r: any) => {
+          rows.find((r: ShiftRaw) => {
             const n = String(r.shift_name || "").toLowerCase().trim();
             return match(n);
           });
@@ -290,20 +223,6 @@ export default function StudentDashboardPage() {
 
         if (!cancelled) {
           setSchedule(next);
-          if (typeof window !== "undefined") {
-            const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
-            const payload = {
-              amIn: next.amIn,
-              amOut: next.amOut,
-              pmIn: next.pmIn,
-              pmOut: next.pmOut,
-              overtimeIn: next.otIn,
-              overtimeOut: next.otOut,
-            };
-            try {
-              localStorage.setItem(key, JSON.stringify(payload));
-            } catch {}
-          }
         }
       } catch {}
     })();
@@ -327,7 +246,7 @@ export default function StudentDashboardPage() {
     Array.from(grouped.values()).forEach(day => {
       const dayLogs = day.logs.slice().sort((a, b) => a.timestamp - b.timestamp);
 
-      const effectiveSchedule = dbSchedule || schedule;
+      const effectiveSchedule = schedule;
 
       if (!effectiveSchedule || (!effectiveSchedule.amIn && !effectiveSchedule.pmIn && !effectiveSchedule.otIn)) {
         let dayRawMs = 0;
@@ -352,6 +271,19 @@ export default function StudentDashboardPage() {
             approvedInTs = null;
           }
         });
+
+        if (inTs !== null) {
+          const liveDuration = now - inTs;
+          if (liveDuration > 0) {
+            dayRawMs += liveDuration;
+          }
+        }
+        if (approvedInTs !== null) {
+          const liveValidatedDuration = now - approvedInTs;
+          if (liveValidatedDuration > 0) {
+            dayValidatedRawMs += liveValidatedDuration;
+          }
+        }
 
         totalMsAll += dayRawMs;
         totalValidatedMsAll += dayValidatedRawMs;
@@ -383,17 +315,24 @@ export default function StudentDashboardPage() {
         requireApproved: boolean
       ) => {
         if (windowStart === null || windowEnd === null) return 0;
-        const earlyWindowStart = windowStart - 30 * 60 * 1000;
         let currentIn: number | null = null;
         let duration = 0;
 
+        // 30 mins buffer for early time-in, 4 hours for late time-out (clamped)
+        const BUFFER_START_MS = 30 * 60 * 1000;
+        const BUFFER_END_MS = 4 * 60 * 60 * 1000;
+        const searchStart = windowStart - BUFFER_START_MS;
+        const searchEnd = windowEnd + BUFFER_END_MS;
+
         logs.forEach(log => {
+          // Filter out logs that are outside the buffer window
+          if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
+
           if (requireApproved && log.status !== "Approved") {
             return;
           }
           if (log.type === "in") {
             if (log.timestamp > windowEnd) return;
-            if (log.timestamp < earlyWindowStart) return;
             const effectiveIn = Math.min(Math.max(log.timestamp, windowStart), windowEnd);
             currentIn = effectiveIn;
           } else if (log.type === "out") {
@@ -427,7 +366,7 @@ export default function StudentDashboardPage() {
       totalMs: totalMsAll,
       validatedMs: totalValidatedMsAll,
     };
-  }, [attendance, idnumber, schedule, dbSchedule]);
+  }, [attendance, schedule, now]);
 
   const totalHours = useMemo(() => {
     return formatHours(aggregateHours.totalMs);

@@ -69,36 +69,34 @@ export async function GET() {
     };
 
     const findPairDuration = (logs: AttendanceEvent[], windowStart: number, windowEnd: number) => {
-      let firstInTs: number | null = null;
-      let lastOutTs: number | null = null;
+      let currentIn: number | null = null;
+      let duration = 0;
 
       // Use a buffer window to catch early logins/late logouts
-      // 2 hours buffer seems reasonable
-      const BUFFER_MS = 2 * 60 * 60 * 1000;
-      const searchStart = windowStart - BUFFER_MS;
-      const searchEnd = windowEnd + BUFFER_MS;
+      // 30 mins buffer for start, 4 hours for end (clamped)
+      const BUFFER_START_MS = 30 * 60 * 1000;
+      const BUFFER_END_MS = 4 * 60 * 60 * 1000;
+      const searchStart = windowStart - BUFFER_START_MS;
+      const searchEnd = windowEnd + BUFFER_END_MS;
 
       logs.forEach(log => {
         if (log.ts < searchStart || log.ts > searchEnd) return;
         if (!isApproved(log)) return;
+        
         if (log.type === "in") {
-          if (firstInTs === null || log.ts < firstInTs) {
-            firstInTs = log.ts;
-          }
+          if (log.ts > windowEnd) return;
+          currentIn = clamp(log.ts, windowStart, windowEnd);
         } else if (log.type === "out") {
-          if (lastOutTs === null || log.ts > lastOutTs) {
-            lastOutTs = log.ts;
+          if (currentIn === null) return;
+          const effectiveOut = clamp(log.ts, windowStart, windowEnd);
+          if (effectiveOut > currentIn) {
+            duration += effectiveOut - currentIn;
           }
+          currentIn = null;
         }
       });
 
-      if (firstInTs === null || lastOutTs === null || lastOutTs <= firstInTs) {
-        return 0;
-      }
-
-      const rawIn = clamp(firstInTs, windowStart, windowEnd);
-      const rawOut = clamp(lastOutTs, windowStart, windowEnd);
-      return rawOut > rawIn ? rawOut - rawIn : 0;
+      return duration;
     };
 
     const byDay: { [dayKey: string]: { date: Date; logs: AttendanceEvent[] } } = {};
@@ -123,7 +121,7 @@ export async function GET() {
     const otCfg = shiftConfig["Overtime Shift"];
 
     const amStartT = parseTime(amCfg?.start, 8, 0);
-    const amEndT = parseTime(amCfg?.end, 11, 0);
+    const amEndT = parseTime(amCfg?.end, 12, 0);
     const pmStartT = parseTime(pmCfg?.start, 13, 0);
     const pmEndT = parseTime(pmCfg?.end, 17, 0);
     // Default OT is 17:00 - 20:00 if not configured

@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { 
   AttendanceView as LegacyAttendanceView, 
-  ReportsView as LegacyReportsView, 
+  ReportsView, 
   ProfileView as LegacyProfileView,
   DashboardView,
   AttendanceEntry,
@@ -117,6 +117,7 @@ function StudentPage() {
   const [courseDeadlines, setCourseDeadlines] = useState<Record<string, Record<number, string>>>({});
   const [dbSchedule, setDbSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
   const [schedule, setSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   
   // PWA Install
@@ -191,6 +192,13 @@ function StudentPage() {
       requestNotificationPermission();
     }
   }, [notificationPermission, idnumber]);
+
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      setNow(Date.now());
+    }, 60000);
+    return () => clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -326,6 +334,21 @@ function StudentPage() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'attendance' },
+        (payload: RealtimePostgresChangesPayload<any>) => { fetchData(); }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'report_requirements' },
+        (payload: RealtimePostgresChangesPayload<any>) => { fetchDeadlines(); }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'reports' },
+        (payload: RealtimePostgresChangesPayload<any>) => { fetchData(); }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'report_comments' },
         (payload: RealtimePostgresChangesPayload<any>) => { fetchData(); }
       )
       .subscribe();
@@ -508,6 +531,19 @@ function StudentPage() {
           }
         });
 
+        if (inTs !== null) {
+          const liveDuration = now - inTs;
+          if (liveDuration > 0) {
+            dayRawMs += liveDuration;
+          }
+        }
+        if (approvedInTs !== null) {
+          const liveValidatedDuration = now - approvedInTs;
+          if (liveValidatedDuration > 0) {
+            dayValidatedRawMs += liveValidatedDuration;
+          }
+        }
+
         totalMsAll += dayRawMs;
         totalValidatedMsAll += dayValidatedRawMs;
         return;
@@ -538,17 +574,24 @@ function StudentPage() {
         requireApproved: boolean
       ) => {
         if (windowStart === null || windowEnd === null) return 0;
-        const earlyWindowStart = windowStart - 30 * 60 * 1000;
         let currentIn: number | null = null;
         let duration = 0;
 
+        // 30 mins buffer for early time-in, 4 hours for late time-out (clamped)
+        const BUFFER_START_MS = 30 * 60 * 1000;
+        const BUFFER_END_MS = 4 * 60 * 60 * 1000;
+        const searchStart = windowStart - BUFFER_START_MS;
+        const searchEnd = windowEnd + BUFFER_END_MS;
+
         logs.forEach(log => {
+          // Filter out logs that are outside the buffer window
+          if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
+
           if (requireApproved && log.status !== "Approved") {
             return;
           }
           if (log.type === "in") {
             if (log.timestamp > windowEnd) return;
-            if (log.timestamp < earlyWindowStart) return;
             const effectiveIn = Math.min(Math.max(log.timestamp, windowStart), windowEnd);
             currentIn = effectiveIn;
           } else if (log.type === "out") {
@@ -588,7 +631,7 @@ function StudentPage() {
       formattedValidated: formatHours(totalValidatedMsAll),
       progress,
     };
-  }, [attendance, targetHours, idnumber, schedule, dbSchedule]);
+  }, [attendance, targetHours, idnumber, schedule, dbSchedule, now]);
 
   const recentActivity = useMemo(() => {
     const att = attendance.map((e) => ({
@@ -1023,10 +1066,11 @@ function StudentPage() {
 
               {activeTab === "reports" && (
                 <div className="space-y-6">
-                  <LegacyReportsView
+                  <ReportsView
                     idnumber={idnumber}
                     reports={reports}
                     drafts={drafts}
+                    deadlines={studentDeadlines}
                     onDraftUpdate={(newDrafts) => setDrafts(newDrafts)}
                     onUpdate={(newReports) => {
                       setReports(newReports);
