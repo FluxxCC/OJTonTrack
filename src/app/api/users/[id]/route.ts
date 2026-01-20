@@ -182,7 +182,56 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   const { id: idStr } = await params;
   const id = Number(idStr);
   if (!id) return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+
+  // 1. Fetch User to get idnumber
+  const { data: user, error: fetchError } = await admin
+    .from("users")
+    .select("idnumber")
+    .eq("id", id)
+    .single();
+
+  if (fetchError || !user) {
+     return NextResponse.json({ error: "User not found" }, { status: 404 });
+  }
+
+  const idnumber = user.idnumber;
+
+  // 2. Manual Cascade Delete (Clean up dependencies)
+  try {
+    // A. Clean up Reports and related Comments
+    // Fetch report IDs to delete comments on those reports
+    const { data: userReports } = await admin.from("reports").select("id").eq("idnumber", idnumber);
+    const reportIds = userReports?.map((r: { id: any }) => r.id) || [];
+
+    if (reportIds.length > 0) {
+        await admin.from("report_comments").delete().in("reportid", reportIds);
+    }
+    // Also delete comments MADE by the user (if any)
+    await admin.from("report_comments").delete().eq("idnumber", idnumber);
+    await admin.from("reports").delete().eq("idnumber", idnumber);
+
+    // B. Clean up other idnumber-based tables
+    await Promise.all([
+      admin.from("attendance").delete().eq("idnumber", idnumber),
+      admin.from("evaluation_forms").delete().eq("student_id", idnumber),
+      admin.from("notifications").delete().eq("idnumber", idnumber),
+      admin.from("push_subscriptions").delete().eq("idnumber", idnumber),
+    ]);
+
+    // C. Clean up id-based tables
+    await Promise.all([
+      admin.from("user_courses").delete().eq("user_id", id),
+      admin.from("user_sections").delete().eq("user_id", id),
+    ]);
+
+  } catch (cleanupError) {
+    console.error("Error cleaning up user dependencies:", cleanupError);
+    // Proceed to try deleting user anyway, though it might fail if cleanup failed
+  }
+
+  // 3. Delete User
   const { error } = await admin.from("users").delete().eq("id", id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  
   return NextResponse.json({ ok: true });
 }

@@ -737,6 +737,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
     supervisorid: string;
     company: string;
     location: string;
+    email: string;
   }>({
     idnumber: "",
     password: "",
@@ -749,6 +750,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
     supervisorid: "",
     company: "",
     location: "",
+    email: "",
   });
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -815,8 +817,8 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
       }
     }
 
-    if (!form.idnumber || !form.password) {
-      setMessage("ID Number and Password are required");
+    if (!form.idnumber || !form.password || !form.email) {
+      setMessage("ID Number, Password, and Email are required");
       return;
     }
     setLoading(true);
@@ -828,6 +830,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
         password: form.password,
         firstname: form.firstname || undefined,
         lastname: form.lastname || undefined,
+        email: form.email || undefined,
         course: form.course || undefined,
         section: form.section || undefined,
         courseIds: form.courseIds.length > 0 ? form.courseIds : undefined,
@@ -893,6 +896,15 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
             onChange={(e) => setForm({ ...form, lastname: e.target.value })}
             className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="Last name"
+          />
+        </label>
+        <label className="grid gap-1.5 md:col-span-2">
+          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Email</span>
+          <input
+            value={form.email}
+            onChange={(e) => setForm({ ...form, email: e.target.value })}
+            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            placeholder="Email address"
           />
         </label>
         {role === "student" && (
@@ -1191,6 +1203,7 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
     courseIds: Array.isArray(user.courseIds) ? user.courseIds : [],
     sectionIds: Array.isArray(user.sectionIds) ? user.sectionIds : [],
     supervisorid: user.supervisorid || "",
+    email: user.email || "",
   });
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -1267,6 +1280,7 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
         idnumber: form.idnumber.trim(),
         firstname: form.firstname || undefined,
         lastname: form.lastname || undefined,
+        email: form.email || undefined,
         course: form.course || undefined,
         section: form.section || undefined,
         company: form.company || undefined,
@@ -1336,6 +1350,15 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
             onChange={(e) => setForm({ ...form, lastname: e.target.value })}
             className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="Last name"
+          />
+        </label>
+        <label className="grid gap-1.5 md:col-span-2">
+          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Email</span>
+          <input
+            value={form.email}
+            onChange={(e) => setForm({ ...form, email: e.target.value })}
+            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            placeholder="Email address"
           />
         </label>
         {user.role === "student" && (

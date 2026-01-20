@@ -1477,8 +1477,12 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
           const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
 
           const findPairDuration = (logs: AttendanceEntry[], windowStart: number, windowEnd: number) => {
+            // Buffer: 30m before start, 4h after end
+            const bufferStart = windowStart - 30 * 60 * 1000;
+            const bufferEnd = windowEnd + 4 * 60 * 60 * 1000;
+
             const withinWindow = logs.filter(
-              log => log.timestamp >= windowStart && log.timestamp <= windowEnd
+              log => log.timestamp >= bufferStart && log.timestamp <= bufferEnd
             );
 
             let tIn: AttendanceEntry | null = null;
@@ -1486,7 +1490,10 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
             withinWindow.forEach(log => {
               if (log.type === "in") {
-                tIn = log;
+                // Shift Isolation: Ignore IN if it's strictly after the official window end
+                if (log.timestamp <= windowEnd) {
+                   tIn = log;
+                }
               } else if (log.type === "out" && tIn) {
                 const rawIn = clamp(tIn.timestamp, windowStart, windowEnd);
                 const rawOut = clamp(log.timestamp, windowStart, windowEnd);
