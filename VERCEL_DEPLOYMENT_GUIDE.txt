@@ -1,0 +1,49 @@
+================================================================================
+  OJTonTrack - Vercel Deployment Guide
+================================================================================
+
+Your project is ready for deployment! The build check passed successfully.
+
+When deploying to Vercel, you must add the following Environment Variables 
+in the Vercel Project Settings > Environment Variables section.
+
+--------------------------------------------------------------------------------
+ 1. Supabase Configuration
+--------------------------------------------------------------------------------
+NEXT_PUBLIC_SUPABASE_URL      = (Your Supabase Project URL)
+NEXT_PUBLIC_SUPABASE_ANON_KEY = (Your Supabase Anon Public Key)
+SUPABASE_SERVICE_ROLE_KEY     = (Your Supabase Service Role Secret Key)
+
+--------------------------------------------------------------------------------
+ 2. Email Configuration (Resend)
+--------------------------------------------------------------------------------
+RESEND_API_KEY                = (Your Resend API Key starting with re_...)
+SMTP_FROM                     = "OJTonTrack" <onboarding@ojtontrack.site>
+NEXT_PUBLIC_APP_URL           = https://ojtontrack.site 
+                                (or your-project.vercel.app if testing)
+
+--------------------------------------------------------------------------------
+ 3. Push Notifications (VAPID)
+--------------------------------------------------------------------------------
+VAPID_PUBLIC_KEY              = (Your VAPID Public Key)
+VAPID_PRIVATE_KEY             = (Your VAPID Private Key)
+NEXT_PUBLIC_VAPID_PUBLIC_KEY  = (Same as VAPID_PUBLIC_KEY)
+
+--------------------------------------------------------------------------------
+ 4. File Uploads (Cloudinary)
+--------------------------------------------------------------------------------
+CLOUDINARY_CLOUD_NAME         = (Your Cloudinary Cloud Name)
+CLOUDINARY_API_KEY            = (Your Cloudinary API Key)
+CLOUDINARY_API_SECRET         = (Your Cloudinary API Secret)
+
+--------------------------------------------------------------------------------
+ 5. Deployment Steps
+--------------------------------------------------------------------------------
+1. Push your code to GitHub/GitLab/Bitbucket.
+2. Import the project in Vercel.
+3. Copy/Paste the variables above into the Environment Variables section.
+4. Click Deploy.
+5. Once deployed, ensure your custom domain (ojtontrack.site) is added in 
+   Vercel Settings > Domains.
+
+================================================================================
