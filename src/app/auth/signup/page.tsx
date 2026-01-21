@@ -2,7 +2,6 @@
 import React, { useState, useEffect } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import citeLogo from "../../../../assets/CITE.png";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, ArrowLeft } from "lucide-react";
 
@@ -123,7 +122,7 @@ export default function SignupPage() {
     <div className="min-h-screen w-full flex items-center justify-center bg-gray-50 p-4 font-sans">
       <div className="w-full max-w-[500px] bg-white border rounded-2xl p-8 shadow-[0_8px_28px_rgba(0,0,0,0.06)]" style={{ borderColor: "#E5E7EB" }}>
         <div className="flex flex-col items-center mb-8">
-            <Image src={citeLogo} alt="CITE" width={64} height={64} className="h-16 w-16 rounded-lg object-cover mb-4" />
+            <Image src="/icons-512.png" alt="CITE" width={64} height={64} className="h-16 w-16 rounded-lg object-cover mb-4" />
             <h1 className="text-2xl font-extrabold text-[#1F2937]">Create Account</h1>
             <p className="text-gray-500 mt-1">Student Registration</p>
         </div>

@@ -1,7 +1,6 @@
 "use client";
 import React, { useState } from "react";
 import Image from "next/image";
-import citeLogo from "../../../../assets/CITE.png";
 import { useRouter } from "next/navigation";
 
 export default function SuperAdminLogin() {
@@ -61,7 +60,7 @@ export default function SuperAdminLogin() {
     <div className="min-h-screen bg-[#F6F7F9] flex items-center justify-center px-4">
       <div className="w-full max-w-[420px] bg-white border rounded-2xl p-8 shadow-[0_8px_28px_rgba(0,0,0,0.06)]" style={{ borderColor: "#E5E7EB" }}>
           <div className="flex flex-col items-center mb-8">
-              <Image src={citeLogo} alt="CITE" width={64} height={64} className="h-16 w-16 rounded-lg object-cover mb-4" />
+              <Image src="/icons-512.png" alt="CITE" width={64} height={64} className="h-16 w-16 rounded-lg object-cover mb-4" />
               <h1 className="text-2xl font-extrabold text-[#1F2937]">Super Admin</h1>
               <div className="mt-2 px-3 py-1 rounded-full bg-[#FFF7ED] border border-[#F97316]/20 text-[#F97316] text-sm font-medium capitalize">
                   Restricted Access

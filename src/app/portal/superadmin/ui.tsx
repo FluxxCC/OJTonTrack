@@ -21,7 +21,6 @@ import {
   Network,
   ShieldCheck
 } from "lucide-react";
-import citeLogo from "../../../../assets/CITE.png";
 import { usePathname, useRouter } from "next/navigation";
 
 // --- Types ---
@@ -135,7 +134,7 @@ export function SuperAdminHeader() {
       <div className="mx-auto w-full max-w-7xl px-3 sm:px-6 md:px-8 pt-3 pb-3 md:pt-4 md:pb-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Image src={citeLogo} alt="CITE" width={40} height={40} className="h-10 w-10 rounded-md object-cover" />
+            <Image src="/icons-512.png" alt="CITE" width={40} height={40} className="h-10 w-10 rounded-md object-cover" />
             <div>
               <div className="text-white font-extrabold text-base md:text-[1.25rem] tracking-wide leading-tight">
                 OJTonTrack

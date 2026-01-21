@@ -2,7 +2,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import citeLogo from "../../../../assets/CITE.png";
 import { supabase } from "@/lib/supabaseClient";
 import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import { 
@@ -763,7 +762,7 @@ function StudentPage() {
         >
           <div className="h-20 flex items-center gap-3 px-6 border-b border-gray-100 bg-gradient-to-r from-orange-50/50 to-transparent">
             <Image
-              src={citeLogo}
+              src="/icons-512.png"
               alt="CITE Logo"
               width={40}
               height={40}

@@ -2,7 +2,6 @@
 import React, { useEffect, useMemo, useState, useRef } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import citeLogo from "../../../../assets/CITE.png";
 import { supabase } from "@/lib/supabaseClient";
 import type { RealtimePostgresChangesPayload, RealtimeChannel } from "@supabase/supabase-js";
 import { 
@@ -4805,7 +4804,7 @@ export default function InstructorPage() {
         } lg:translate-x-0 flex flex-col`}
       >
         <div className="p-6 flex items-center gap-3">
-          <Image src={citeLogo} alt="Logo" width={40} height={40} className="rounded-lg shadow-sm" />
+          <Image src="/icons-512.png" alt="Logo" width={40} height={40} className="rounded-lg shadow-sm" />
           <div>
             <div className="font-extrabold text-xl tracking-tight text-gray-900">OJTonTrack</div>
             <div className="text-xs font-medium text-orange-600 uppercase tracking-wider">Instructor Portal</div>

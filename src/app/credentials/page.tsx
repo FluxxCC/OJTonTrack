@@ -2,7 +2,6 @@
 import React, { useState, Suspense } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import citeLogo from "../../../assets/CITE.png";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff } from "lucide-react";
 
@@ -108,7 +107,7 @@ function CredentialsForm() {
   return (
     <div className="w-full max-w-[420px] bg-white border rounded-2xl p-8 shadow-[0_8px_28px_rgba(0,0,0,0.06)] relative" style={{ borderColor: "#E5E7EB" }}>
         <div className="flex flex-col items-center mb-8">
-            <Image src={citeLogo} alt="CITE" width={64} height={64} className="h-16 w-16 rounded-lg object-cover mb-4" />
+            <Image src="/icons-512.png" alt="CITE" width={64} height={64} className="h-16 w-16 rounded-lg object-cover mb-4" />
             <h1 className="text-2xl font-extrabold text-[#1F2937]">Sign In</h1>
             <div className="mt-2 px-3 py-1 rounded-full bg-[#FFF7ED] border border-[#F97316]/20 text-[#F97316] text-sm font-medium capitalize">
                 {role} Portal

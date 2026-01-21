@@ -2,7 +2,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import Image from "next/image";
 import { useRouter, usePathname } from "next/navigation";
-import citeLogo from "../../../../assets/CITE.png";
 import { 
   Users, 
   GraduationCap, 
@@ -249,7 +248,7 @@ export default function CoordinatorPage() {
       >
         {/* Logo */}
         <div className="h-20 flex items-center gap-3 px-6 border-b border-gray-100 bg-gradient-to-r from-orange-50/50 to-transparent">
-          <Image src={citeLogo} alt="CITE Logo" width={40} height={40} className="w-10 h-10 rounded-xl shadow-sm object-cover" />
+          <Image src="/icons-512.png" alt="CITE Logo" width={40} height={40} className="w-10 h-10 rounded-xl shadow-sm object-cover" />
           <div>
             <h1 className="font-extrabold text-xl text-gray-900 tracking-tight leading-none">OJTonTrack</h1>
             <p className="text-xs font-medium text-[#F97316] uppercase tracking-wider mt-0.5">Coordinator</p>
