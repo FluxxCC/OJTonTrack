@@ -182,9 +182,10 @@ export function SuperAdminHeader() {
   );
 }
 
-export function EditTimeEntryModal({ entry, onClose, onSave }: { entry: any, onClose: () => void, onSave: () => void }) {
+export function EditTimeEntryModal({ entry, studentName, onClose, onSave }: { entry: any, studentName?: string, onClose: () => void, onSave: () => void }) {
   const [ts, setTs] = useState<string>(entry.ts ? new Date(entry.ts).toISOString().slice(0, 16) : "");
   const [type, setType] = useState<string>(entry.type);
+  const [status, setStatus] = useState<string>(entry.status || "Pending");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -192,19 +193,40 @@ export function EditTimeEntryModal({ entry, onClose, onSave }: { entry: any, onC
     setLoading(true);
     setError(null);
     try {
-        const sessionRes = await fetch("/api/auth/check-session");
-        const session = await sessionRes.json();
-        if (!session.idnumber) throw new Error("Could not get admin ID");
+        let adminId = "";
+        let adminRole = "superadmin";
+
+        // 1. Try LocalStorage (fastest, populated by AuthGuard)
+        if (typeof window !== 'undefined') {
+            adminId = localStorage.getItem("idnumber") || "";
+            const storedRole = localStorage.getItem("role");
+            if (storedRole) adminRole = storedRole;
+        }
+
+        // 2. If missing, try API
+        if (!adminId) {
+            const sessionRes = await fetch("/api/auth/check-session");
+            if (sessionRes.ok) {
+                const session = await sessionRes.json();
+                if (session.idnumber) {
+                    adminId = session.idnumber;
+                    adminRole = session.role || adminRole;
+                }
+            }
+        }
+
+        if (!adminId) throw new Error("Could not get admin ID. Please try logging out and back in.");
 
         const res = await fetch("/api/attendance", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 id: entry.id,
-                ts: new Date(ts).toISOString(),
+                ts: new Date(ts).getTime(),
                 type,
-                adminId: session.idnumber,
-                adminRole: session.role || "superadmin"
+                status,
+                adminId,
+                adminRole
             })
         });
         const json = await res.json();
@@ -221,35 +243,68 @@ export function EditTimeEntryModal({ entry, onClose, onSave }: { entry: any, onC
   return (
     <Modal onClose={onClose}>
         <div className="p-6">
-            <h2 className="text-xl font-bold mb-4">Edit Time Entry</h2>
-            {error && <div className="p-3 bg-red-50 text-red-600 rounded-lg mb-4 text-sm">{error}</div>}
-            <div className="space-y-4">
+            <div className="flex justify-between items-start mb-6">
                 <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Time</label>
+                    <h2 className="text-xl font-bold text-gray-900">Edit Time Entry</h2>
+                    {studentName && <p className="text-sm text-gray-500 font-medium mt-1">Student: <span className="text-gray-900">{studentName}</span></p>}
+                </div>
+                {entry.status && (
+                     <span className={`px-2.5 py-1 text-xs font-bold uppercase rounded-full ${
+                        entry.status === 'Approved' ? 'bg-green-100 text-green-700 border border-green-200' :
+                        entry.status === 'Rejected' ? 'bg-red-100 text-red-700 border border-red-200' :
+                        'bg-yellow-100 text-yellow-700 border border-yellow-200'
+                     }`}>
+                        {entry.status}
+                     </span>
+                )}
+            </div>
+
+            {error && <div className="p-3 bg-red-50 text-red-600 rounded-lg mb-4 text-sm border border-red-100">{error}</div>}
+            
+            <div className="space-y-5">
+                <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-1.5">Time</label>
                     <input 
                         type="datetime-local" 
                         value={ts} 
                         onChange={e => setTs(e.target.value)}
-                        className="w-full rounded-lg border border-gray-300 p-2"
+                        className="w-full rounded-xl border border-gray-300 p-3 text-gray-900 focus:ring-2 focus:ring-[#F97316] focus:border-[#F97316] outline-none transition-all shadow-sm"
                     />
                 </div>
                 <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                    <label className="block text-sm font-bold text-gray-700 mb-1.5">Type</label>
                     <select 
                         value={type} 
                         onChange={e => setType(e.target.value)}
-                        className="w-full rounded-lg border border-gray-300 p-2"
+                        className="w-full rounded-xl border border-gray-300 p-3 text-gray-900 focus:ring-2 focus:ring-[#F97316] focus:border-[#F97316] outline-none transition-all shadow-sm bg-white"
                     >
                         <option value="in">Time In</option>
                         <option value="out">Time Out</option>
                     </select>
                 </div>
-                <div className="flex justify-end gap-2 mt-6">
-                    <button onClick={onClose} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">Cancel</button>
+                <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-1.5">Status</label>
+                    <select 
+                        value={status} 
+                        onChange={e => setStatus(e.target.value)}
+                        className="w-full rounded-xl border border-gray-300 p-3 text-gray-900 focus:ring-2 focus:ring-[#F97316] focus:border-[#F97316] outline-none transition-all shadow-sm bg-white"
+                    >
+                        <option value="Pending">Pending</option>
+                        <option value="Approved">Validated</option>
+                        <option value="Rejected">Unvalidated</option>
+                    </select>
+                </div>
+                <div className="flex justify-end gap-3 mt-8">
+                    <button 
+                        onClick={onClose} 
+                        className="px-5 py-2.5 text-gray-700 font-medium hover:bg-gray-100 rounded-xl transition-colors"
+                    >
+                        Cancel
+                    </button>
                     <button 
                         onClick={handleSave} 
                         disabled={loading}
-                        className="px-4 py-2 bg-[#F97316] text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
+                        className="px-5 py-2.5 bg-[#F97316] text-white font-bold rounded-xl hover:bg-orange-600 disabled:opacity-50 transition-all shadow-sm active:scale-95"
                     >
                         {loading ? "Saving..." : "Save Changes"}
                     </button>
@@ -420,8 +475,7 @@ export function TimeEntryView({ users }: { users: User[] }) {
     const totalSeconds = Math.floor(ms / 1000);
     const h = Math.floor(totalSeconds / 3600);
     const m = Math.floor((totalSeconds % 3600) / 60);
-    const s = totalSeconds % 60;
-    return `${h}h ${m}m ${s}s`;
+    return `${h}h ${m}m`;
   };
 
   const formatTime = (ts: number) => {
@@ -442,6 +496,8 @@ export function TimeEntryView({ users }: { users: User[] }) {
       .sort((a, b) => b.date.getTime() - a.date.getTime())
       .map((day) => {
         const sorted = day.logs.slice().sort((a, b) => a.ts - b.ts);
+        // Filter out OT Auth logs if present (though usually separate table)
+        const processingLogs = sorted.filter(l => !l.photourl?.startsWith("OT_AUTH:"));
 
         const baseDate = new Date(day.date);
         baseDate.setHours(0, 0, 0, 0);
@@ -453,142 +509,115 @@ export function TimeEntryView({ users }: { users: User[] }) {
           return d.getTime();
         };
 
-        const classifySegment = (ts: number) => {
-          const h = new Date(ts).getHours();
-          return h < 12 ? "morning" : "afternoon";
-        };
-
         const src = schedule;
-
-        const morningLogs = sorted.filter((log) => classifySegment(log.ts) === "morning");
-        const afternoonLogs = sorted.filter((log) => classifySegment(log.ts) === "afternoon");
-
-        let overtimeLogs: AdminAttendanceLog[] = [];
-        if (src && src.otIn && src.otOut) {
-          const otStart = buildShift(src.otIn);
-          const otEnd = buildShift(src.otOut);
-          overtimeLogs = sorted.filter((log) => log.ts >= otStart && log.ts <= otEnd);
-        }
-
-        const pickInOut = (segLogs: AdminAttendanceLog[]) => {
-          const inEntry = segLogs.find((l) => l.type === "in") || null;
-          const outEntry = [...segLogs].reverse().find((l) => l.type === "out") || null;
-          return { inEntry, outEntry };
+        
+        let localSchedule = {
+            amIn: buildShift("08:00"),
+            amOut: buildShift("12:00"),
+            pmIn: buildShift("13:00"),
+            pmOut: buildShift("17:00"),
+            otStart: buildShift("17:00"),
+            otEnd: buildShift("18:00"),
         };
 
-        const morningPair = pickInOut(morningLogs);
-        const afternoonPair = pickInOut(afternoonLogs);
-        const overtimePair = pickInOut(overtimeLogs);
-
-        const s1 = morningPair.inEntry;
-        const s2 = morningPair.outEntry;
-        const s3 = afternoonPair.inEntry;
-        const s4 = afternoonPair.outEntry;
-        const s5 = overtimePair.inEntry;
-        const s6 = overtimePair.outEntry;
-
-        const hasSchedule =
-          !!src &&
-          typeof src.amIn === "string" &&
-          typeof src.amOut === "string" &&
-          typeof src.pmIn === "string" &&
-          typeof src.pmOut === "string";
-
-        let total = 0;
-        let validatedTotal = 0;
-
-        if (hasSchedule && src) {
-          const amInStr = typeof src.amIn === "string" ? src.amIn : "";
-          const amOutStr = typeof src.amOut === "string" ? src.amOut : "";
-          const pmInStr = typeof src.pmIn === "string" ? src.pmIn : "";
-          const pmOutStr = typeof src.pmOut === "string" ? src.pmOut : "";
-
-          const localSchedule = {
-            amIn: buildShift(amInStr),
-            amOut: buildShift(amOutStr),
-            pmIn: buildShift(pmInStr),
-            pmOut: buildShift(pmOutStr),
-            otStart: src.otIn ? buildShift(src.otIn) : null,
-            otEnd: src.otOut ? buildShift(src.otOut) : null,
-          };
-
-          const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
-
-          const computeShiftDuration = (
-            segLogs: AdminAttendanceLog[],
-            windowStart: number,
-            windowEnd: number,
-            requireApproved?: boolean
-          ) => {
-            let currentIn: number | null = null;
-            let duration = 0;
-
-            const logsToUse = requireApproved
-              ? segLogs.filter((log) => log.status === "Approved")
-              : segLogs;
-
-            logsToUse.forEach((log) => {
-              if (log.type === "in") {
-                if (log.ts > windowEnd) return;
-                const effectiveIn = clamp(log.ts, windowStart, windowEnd);
-                currentIn = effectiveIn;
-              } else if (log.type === "out") {
-                if (currentIn === null) return;
-                const effectiveOut = clamp(log.ts, windowStart, windowEnd);
-                if (effectiveOut > currentIn) {
-                  duration += effectiveOut - currentIn;
-                }
-                currentIn = null;
-              }
-            });
-
-            return duration;
-          };
-
-          const dayTotalAm = computeShiftDuration(sorted, localSchedule.amIn, localSchedule.amOut);
-          const dayTotalPm = computeShiftDuration(sorted, localSchedule.pmIn, localSchedule.pmOut);
-          const dayTotalOt =
-            localSchedule.otStart && localSchedule.otEnd
-              ? computeShiftDuration(sorted, localSchedule.otStart, localSchedule.otEnd)
-              : 0;
-
-          const dayValidatedAm = computeShiftDuration(
-            sorted,
-            localSchedule.amIn,
-            localSchedule.amOut,
-            true
-          );
-          const dayValidatedPm = computeShiftDuration(
-            sorted,
-            localSchedule.pmIn,
-            localSchedule.pmOut,
-            true
-          );
-          const dayValidatedOt =
-            localSchedule.otStart && localSchedule.otEnd
-              ? computeShiftDuration(sorted, localSchedule.otStart, localSchedule.otEnd, true)
-              : 0;
-
-          total = dayTotalAm + dayTotalPm + dayTotalOt;
-          validatedTotal = dayValidatedAm + dayValidatedPm + dayValidatedOt;
-        } else {
-          const pairs: [AdminAttendanceLog | null, AdminAttendanceLog | null][] = [
-            [s1, s2],
-            [s3, s4],
-            [s5, s6],
-          ];
-          pairs.forEach(([a, b]) => {
-            if (a && b && b.ts > a.ts) {
-              const diff = b.ts - a.ts;
-              total += diff;
-              if (a.status === "Approved" && b.status === "Approved") {
-                validatedTotal += diff;
-              }
-            }
-          });
+        if (src && typeof src.amIn === "string") {
+            localSchedule = {
+                amIn: buildShift(src.amIn),
+                amOut: buildShift(src.amOut),
+                pmIn: buildShift(src.pmIn),
+                pmOut: buildShift(src.pmOut),
+                otStart: src.otIn ? buildShift(src.otIn) : buildShift("17:00"),
+                otEnd: src.otOut ? buildShift(src.otOut) : buildShift("18:00"),
+            };
         }
 
-        return { date: day.date, s1, s2, s3, s4, s5, s6, total, validatedTotal };
+        // --- New Session Logic (Consistent with Supervisor) ---
+        type Session = { in: AdminAttendanceLog; out: AdminAttendanceLog | null; shift: 'am' | 'pm' | 'ot' };
+        const sessions: Session[] = [];
+        let currentIn: AdminAttendanceLog | null = null;
+
+        const determineShift = (ts: number): 'am' | 'pm' | 'ot' => {
+            if (ts < localSchedule.amOut) return 'am';
+            if (ts < localSchedule.pmOut) return 'pm';
+            return 'ot';
+        };
+
+        for (const log of processingLogs) {
+            if (log.status === "Rejected") continue;
+
+            if (log.type === "in") {
+                if (currentIn) {
+                    // Previous session incomplete
+                    sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.ts) });
+                }
+                currentIn = log;
+            } else if (log.type === "out") {
+                if (currentIn) {
+                    // Normal Session
+                    sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.ts) });
+                    currentIn = null;
+                }
+            }
+        }
+        if (currentIn) {
+            sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.ts) });
+        }
+
+        // Calculate Hours (Strict Shift Isolation)
+        const calculateHours = (requireApproved: boolean) => {
+            let total = 0;
+            sessions.forEach(session => {
+                const isInValid = !requireApproved || session.in.status === "Approved";
+                const isOutValid = !session.out || !requireApproved || session.out?.status === "Approved";
+                if (!isInValid || !isOutValid) return;
+                
+                if (!session.out) return;
+
+                if (session.shift === 'am') {
+                    const amIn = Math.max(session.in.ts, localSchedule.amIn);
+                    const amOut = Math.min(session.out.ts, localSchedule.amOut);
+                    const amInFl = Math.floor(amIn / 60000) * 60000;
+                    const amOutFl = Math.floor(amOut / 60000) * 60000;
+                    total += Math.max(0, amOutFl - amInFl);
+                } else if (session.shift === 'pm') {
+                    const pmIn = Math.max(session.in.ts, localSchedule.pmIn);
+                    const pmOut = Math.min(session.out.ts, localSchedule.pmOut);
+                    const pmInFl = Math.floor(pmIn / 60000) * 60000;
+                    const pmOutFl = Math.floor(pmOut / 60000) * 60000;
+                    total += Math.max(0, pmOutFl - pmInFl);
+                } else if (session.shift === 'ot') {
+                    const otIn = Math.max(session.in.ts, localSchedule.otStart);
+                    const otOut = Math.min(session.out.ts, localSchedule.otEnd);
+                    const otInFl = Math.floor(otIn / 60000) * 60000;
+                    const otOutFl = Math.floor(otOut / 60000) * 60000;
+                    total += Math.max(0, otOutFl - otInFl);
+                }
+            });
+            return Math.floor(total / 60000) * 60000;
+        };
+
+        const total = calculateHours(false);
+        const validatedTotal = calculateHours(true);
+
+        const mapSessionToSlots = (shiftSessions: Session[]) => {
+            if (shiftSessions.length === 0) return { in: null, out: null };
+            const firstSession = shiftSessions[0];
+            const lastSession = shiftSessions[shiftSessions.length - 1];
+            return { in: firstSession.in, out: lastSession.out };
+        };
+
+        const amSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'am'));
+        const pmSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'pm'));
+        const otSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'ot'));
+
+        return { 
+            date: day.date, 
+            s1: amSlots.in, s2: amSlots.out, 
+            s3: pmSlots.in, s4: pmSlots.out, 
+            s5: otSlots.in, s6: otSlots.out, 
+            total, 
+            validatedTotal 
+        };
       });
   }, [logs, schedule, selectedStudent]);
 
@@ -1079,6 +1108,7 @@ export function TimeEntryView({ users }: { users: User[] }) {
       {editingEntry && (
         <EditTimeEntryModal
           entry={editingEntry}
+          studentName={selectedStudent ? `${selectedStudent.lastname || ''}, ${selectedStudent.firstname || ''}` : undefined}
           onClose={() => setEditingEntry(null)}
           onSave={() => {
             if (selectedStudent) {

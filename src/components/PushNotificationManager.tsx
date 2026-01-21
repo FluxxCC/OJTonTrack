@@ -72,7 +72,8 @@ export default function PushNotificationManager() {
           );
           return;
         }
-        throw new Error("Failed to fetch public key");
+        console.error("Failed to fetch public key:", message || res.statusText);
+        return;
       }
       const { publicKey } = await res.json();
       if (!publicKey) {

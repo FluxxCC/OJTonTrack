@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabaseClient";
 
+export const dynamic = 'force-dynamic';
+
 type SchedulePayload = {
   amIn?: string;
   amOut?: string;

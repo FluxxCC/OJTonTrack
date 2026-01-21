@@ -242,18 +242,22 @@ function SupervisorContent() {
 
   // Fetch Completed Evaluations
   useEffect(() => {
-    if (!myIdnumber || !supabase) return;
-    (async () => {
-      const { data } = await supabase
-        .from('evaluation_forms')
-        .select('student_id')
-        .eq('supervisor_id', myIdnumber);
-      
-      if (data) {
-        setCompletedIds(new Set(data.map(d => String(d.student_id).trim())));
+    if (!myIdnumber) return;
+    const fetchCompleted = async () => {
+      try {
+        const res = await fetch(`/api/evaluation?supervisor_id=${encodeURIComponent(myIdnumber)}`, { cache: 'no-store' });
+        if (res.ok) {
+           const json = await res.json();
+           if (json.completedIds && Array.isArray(json.completedIds)) {
+             setCompletedIds(new Set(json.completedIds.map((id: any) => String(id).trim())));
+           }
+        }
+      } catch (e) {
+        console.error("Failed to fetch completed evaluations", e);
       }
-    })();
-  }, [myIdnumber]);
+    };
+    fetchCompleted();
+  }, [myIdnumber, refreshKey]);
   
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
@@ -454,6 +458,7 @@ function SupervisorContent() {
       if (res.ok) {
         setShowEvalModal(false);
         setEvalComments("");
+        setRefreshKey(prev => prev + 1);
         setCompletedIds(prev => {
           const next = new Set(prev);
           next.add(selected.idnumber);

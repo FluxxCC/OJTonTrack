@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-const webPush: any = require("web-push");
 
 export async function GET() {
   const pub = process.env.VAPID_PUBLIC_KEY || "";

@@ -26,7 +26,8 @@ import {
   Download,
   MessageSquare,
   Calendar,
-  Plus
+  Plus,
+  XCircle
 } from 'lucide-react';
 
 // --- Types ---
@@ -657,7 +658,7 @@ export function EvaluationModal({
 }
 
 export function StudentAttendanceDetailView({
-  student, attendance, onBack, onValidate, onRefresh, scheduleConfig
+  student, attendance, onBack, onValidate, onRefresh, scheduleConfig, overtimeShifts = []
 }: {
   student: User;
   attendance: AttendanceEntry[];
@@ -665,6 +666,7 @@ export function StudentAttendanceDetailView({
   onValidate: (entry: AttendanceEntry, action: 'approve' | 'reject' | 'reset') => void;
   onRefresh?: () => void;
   scheduleConfig: { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn: string; otOut: string } | null;
+  overtimeShifts?: any[];
 }) {
   const [logs, setLogs] = useState<AttendanceEntry[]>(attendance);
   const [now, setNow] = useState(() => Date.now());
@@ -674,10 +676,13 @@ export function StudentAttendanceDetailView({
   const [otHours, setOtHours] = useState(0);
   const [otMinutes, setOtMinutes] = useState(0);
   const [isSavingOt, setIsSavingOt] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
   // scheduleSettings state removed, using props instead
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [isBulkValidating, setIsBulkValidating] = useState(false);
   const [monthFilter, setMonthFilter] = useState("");
+  const [showValidateModal, setShowValidateModal] = useState(false);
+  const [showRejectModal, setShowRejectModal] = useState(false);
 
   useEffect(() => {
     setLogs(attendance);
@@ -770,12 +775,11 @@ export function StudentAttendanceDetailView({
 
   // Helper to format hours
   const formatHours = (ms: number) => {
-      if (!ms) return "0h 0m 0s";
+      if (!ms) return "0h 0m";
       const totalSeconds = Math.floor(ms / 1000);
       const h = Math.floor(totalSeconds / 3600);
       const m = Math.floor((totalSeconds % 3600) / 60);
-      const s = totalSeconds % 60;
-      return `${h}h ${m}m ${s}s`;
+      return `${h}h ${m}m`;
   };
 
   // Helper to format time
@@ -837,13 +841,33 @@ export function StudentAttendanceDetailView({
 
   const bulkValidate = (action: "approve" | "reject") => {
     if (selectedIds.size === 0) return;
+    if (action === "approve") {
+      setShowValidateModal(true);
+    } else {
+      setShowRejectModal(true);
+    }
+  };
+
+  const handleConfirmValidate = () => {
     setIsBulkValidating(true);
     const ids = Array.from(selectedIds);
     const entries = logs.filter(e => e.id != null && ids.includes(Number(e.id)));
-    entries.forEach(entry => onValidate(entry, action));
+    entries.forEach(entry => onValidate(entry, "approve"));
     setSelectedIds(new Set());
     setIsBulkValidating(false);
     if (onRefresh) onRefresh();
+    setShowValidateModal(false);
+  };
+
+  const handleConfirmReject = () => {
+    setIsBulkValidating(true);
+    const ids = Array.from(selectedIds);
+    const entries = logs.filter(e => e.id != null && ids.includes(Number(e.id)));
+    entries.forEach(entry => onValidate(entry, "reject"));
+    setSelectedIds(new Set());
+    setIsBulkValidating(false);
+    if (onRefresh) onRefresh();
+    setShowRejectModal(false);
   };
 
   const monthOptions = useMemo(() => {
@@ -895,31 +919,18 @@ export function StudentAttendanceDetailView({
         const durationMs = (otHours * 60 * 60 * 1000) + (otMinutes * 60 * 1000);
         const tsOut = new Date(tsIn.getTime() + durationMs);
         
-        // Save IN
-        await fetch("/api/attendance", {
+        await fetch("/api/overtime", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                idnumber: student.idnumber,
-                type: "in",
-                timestamp: tsIn.getTime(),
-                validated_by: supervisorId
+                date: overtimeModal.date.toISOString().split('T')[0],
+                start: tsIn.getTime(),
+                end: tsOut.getTime(),
+                supervisor_id: supervisorId
             })
         });
 
-        // Save OUT
-        await fetch("/api/attendance", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                idnumber: student.idnumber,
-                type: "out",
-                timestamp: tsOut.getTime(),
-                validated_by: supervisorId
-            })
-        });
-
-        alert("Overtime set successfully!");
+        setShowSuccessModal(true);
         setOvertimeModal({ isOpen: false, date: null });
         setOtInTime("");
         setOtHours(0);
@@ -958,7 +969,15 @@ export function StudentAttendanceDetailView({
               baseDate.setHours(0, 0, 0, 0);
 
               const buildShift = (timeStr: string) => {
-                  const [h, m] = timeStr.split(":").map(Number);
+                  let [hStr, mStr] = timeStr.split(":");
+                  let h = parseInt(hStr);
+                  let m = parseInt(mStr);
+                  
+                  // Handle 12-hour format if present
+                  const lowerStr = timeStr.toLowerCase();
+                  if (lowerStr.includes("pm") && h < 12) h += 12;
+                  if (lowerStr.includes("am") && h === 12) h = 0;
+                  
                   const d = new Date(baseDate.getTime());
                   d.setHours(h || 0, m || 0, 0, 0);
                   return d.getTime();
@@ -966,7 +985,7 @@ export function StudentAttendanceDetailView({
 
               let schedule = {
                   amIn: buildShift("07:00"),
-                  amOut: buildShift("11:00"),
+                  amOut: buildShift("12:00"),
                   pmIn: buildShift("13:00"),
                   pmOut: buildShift("17:00"),
                   otStart: buildShift("17:00"),
@@ -976,7 +995,7 @@ export function StudentAttendanceDetailView({
               if (scheduleConfig) {
                   schedule = {
                       amIn: buildShift(scheduleConfig.amIn || "07:00"),
-                      amOut: buildShift(scheduleConfig.amOut || "11:00"),
+                      amOut: buildShift(scheduleConfig.amOut || "12:00"),
                       pmIn: buildShift(scheduleConfig.pmIn || "13:00"),
                       pmOut: buildShift(scheduleConfig.pmOut || "17:00"),
                       otStart: buildShift(scheduleConfig.otIn || "17:00"),
@@ -984,86 +1003,121 @@ export function StudentAttendanceDetailView({
                   };
               }
 
-              const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+              // --- New Session Logic (Consistent with Dashboard) ---
+              type Session = { in: AttendanceEntry; out: AttendanceEntry | null; shift: 'am' | 'pm' | 'ot' };
+              const sessions: Session[] = [];
+              let currentIn: AttendanceEntry | null = null;
 
-              const findPairDuration = (
-                  logs: AttendanceEntry[],
-                  windowStart: number,
-                  windowEnd: number,
-                  requireApproved: boolean
-              ) => {
-                  let currentIn: number | null = null;
-                  let duration = 0;
-                  
-                  // 30 mins buffer for start, 4 hours for end (clamped)
-                  const BUFFER_START_MS = 30 * 60 * 1000;
-                  const BUFFER_END_MS = 4 * 60 * 60 * 1000;
-                  const searchStart = windowStart - BUFFER_START_MS;
-                  const searchEnd = windowEnd + BUFFER_END_MS;
-
-                  logs.forEach(log => {
-                      // Filter out logs that are outside the buffer window
-                      if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
-
-                      if (requireApproved && log.status !== "Approved") return;
-                      if (log.type === "in") {
-                          if (log.timestamp > windowEnd) return;
-                          const effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
-                          currentIn = effectiveIn;
-                      } else if (log.type === "out") {
-                          if (currentIn === null) return;
-                          const effectiveOut = clamp(log.timestamp, windowStart, windowEnd);
-                          if (effectiveOut > currentIn) {
-                              duration += effectiveOut - currentIn;
-                          }
-                          currentIn = null;
-                      }
-                  });
-
-                  return duration;
+              const determineShift = (ts: number): 'am' | 'pm' | 'ot' => {
+                  // Use schedule windows for more accurate shift determination
+                  if (ts < schedule.amOut) return 'am';
+                  if (ts < schedule.pmOut) return 'pm';
+                  return 'ot';
               };
 
-              const dayTotalAm = findPairDuration(dayLogs, schedule.amIn, schedule.amOut, false);
-              const dayTotalPm = findPairDuration(dayLogs, schedule.pmIn, schedule.pmOut, false);
-              const dayTotalOt = findPairDuration(dayLogs, schedule.otStart, schedule.otEnd, false);
+              for (const log of dayLogs) {
+                  if (log.status === "Rejected") continue;
 
-              const dayValidatedAm = findPairDuration(dayLogs, schedule.amIn, schedule.amOut, true);
-              const dayValidatedPm = findPairDuration(dayLogs, schedule.pmIn, schedule.pmOut, true);
-              const dayValidatedOt = findPairDuration(dayLogs, schedule.otStart, schedule.otEnd, true);
+                  if (log.type === "in") {
+                      if (currentIn) {
+                          // Previous session incomplete (forgot to time out). Close it as incomplete.
+                          sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.timestamp) });
+                      }
+                      currentIn = log;
+                  } else if (log.type === "out") {
+                      if (currentIn) {
+                          // Normal Session
+                          sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.timestamp) });
+                          currentIn = null;
+                      }
+                  }
+              }
+              if (currentIn) {
+                  sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.timestamp) });
+              }
 
-              const dayTotalMs = dayTotalAm + dayTotalPm + dayTotalOt;
-              const dayValidatedMs = dayValidatedAm + dayValidatedPm + dayValidatedOt;
+              // Calculate Hours (Shift Window Intersection - Strict Shift Isolation)
+              const calculateHours = (requireApproved: boolean) => {
+                  let total = 0;
+                  sessions.forEach(session => {
+                      const isInValid = !requireApproved || session.in.status === "Approved";
+                      const isOutValid = !session.out || !requireApproved || session.out.status === "Approved";
+                      if (!isInValid || !isOutValid) return;
+                      
+                      if (!session.out) return;
+
+                      // Strict Shift Isolation: Only calculate hours for the shift the session started in
+                      if (session.shift === 'am') {
+                          // Check AM Window Only
+                          const amIn = Math.max(session.in.timestamp, schedule.amIn);
+                          const amOut = Math.min(session.out.timestamp, schedule.amOut);
+                          const amInFl = Math.floor(amIn / 60000) * 60000;
+                          const amOutFl = Math.floor(amOut / 60000) * 60000;
+                          total += Math.max(0, amOutFl - amInFl);
+                      } else if (session.shift === 'pm') {
+                          // Check PM Window Only
+                          const pmIn = Math.max(session.in.timestamp, schedule.pmIn);
+                          const pmOut = Math.min(session.out.timestamp, schedule.pmOut);
+                          const pmInFl = Math.floor(pmIn / 60000) * 60000;
+                          const pmOutFl = Math.floor(pmOut / 60000) * 60000;
+                          total += Math.max(0, pmOutFl - pmInFl);
+                      } else if (session.shift === 'ot') {
+                          // Check OT Window Only
+                          const otIn = Math.max(session.in.timestamp, schedule.otStart);
+                          const otOut = Math.min(session.out.timestamp, schedule.otEnd);
+                          const otInFl = Math.floor(otIn / 60000) * 60000;
+                          const otOutFl = Math.floor(otOut / 60000) * 60000;
+                          total += Math.max(0, otOutFl - otInFl);
+                      }
+                  });
+                  return Math.round(total / 60000) * 60000;
+              };
+
+              const dayTotalMs = calculateHours(false);
+              const dayValidatedMs = calculateHours(true);
+              
+              // Helper for specific shift calculation (for OT column)
+              const calculateSpecificShiftHours = (targetShift: 'ot', requireApproved: boolean) => {
+                   let total = 0;
+                   sessions.forEach(session => {
+                      // Calculate OT hours regardless of session shift label
+                      const isInValid = !requireApproved || session.in.status === "Approved";
+                      const isOutValid = !session.out || !requireApproved || session.out.status === "Approved";
+                      if (!isInValid || !isOutValid) return;
+                      if (!session.out) return;
+
+                      const startWindow = schedule.otStart;
+                      const endWindow = schedule.otEnd;
+                      
+                      const effIn = Math.max(session.in.timestamp, startWindow);
+                      const effOut = Math.min(session.out.timestamp, endWindow);
+                      const effInFl = Math.floor(effIn / 60000) * 60000;
+                      const effOutFl = Math.floor(effOut / 60000) * 60000;
+                      total += Math.max(0, effOutFl - effInFl);
+                   });
+                   return Math.round(total / 60000) * 60000;
+              };
+              
+              const overtimeMs = calculateSpecificShiftHours('ot', false);
 
               totalMsAll += dayTotalMs;
               totalValidatedMsAll += dayValidatedMs;
 
-              const classifySegment = (ts: number) => {
-                  const h = new Date(ts).getHours();
-                  return h < 12 ? "morning" : "afternoon";
+              // Map sessions to UI slots (No Visual Clamping)
+              const mapSessionToSlots = (shiftSessions: Session[]) => {
+                 if (shiftSessions.length === 0) return { in: null, out: null };
+                 
+                 const firstSession = shiftSessions[0];
+                 const lastSession = shiftSessions[shiftSessions.length - 1];
+                 
+                 return { in: firstSession.in, out: lastSession.out };
               };
 
-              const morningSegLogs = dayLogs.filter(l => classifySegment(l.timestamp) === "morning");
-              const afternoonSegLogs = dayLogs.filter(l => classifySegment(l.timestamp) === "afternoon");
+              const amSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'am'));
+              const pmSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'pm'));
+              const otSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'ot'));
 
-              const s1 = morningSegLogs.find(l => l.type === "in") || null;
-              const s2 = [...morningSegLogs].filter(l => l.type === "out").pop() || null;
-              const s3 = afternoonSegLogs.find(l => l.type === "in") || null;
-              const s4 = [...afternoonSegLogs].filter(l => l.type === "out").pop() || null;
-
-              const s5 =
-                  (() => {
-                      const overtimeLogs = dayLogs.filter(l => l.timestamp >= schedule.otStart && l.timestamp <= schedule.otEnd);
-                      return overtimeLogs.find(l => l.type === "in") || null;
-                  })();
-              const s6 =
-                  (() => {
-                      const overtimeLogs = dayLogs.filter(l => l.timestamp >= schedule.otStart && l.timestamp <= schedule.otEnd);
-                      return [...overtimeLogs].filter(l => l.type === "out").pop() || null;
-                  })();
-
-              const overtimeMs = dayTotalOt;
-
-              return { date: day.date, s1, s2, s3, s4, s5, s6, dayTotalMs, overtimeMs, otAuthLog };
+              return { date: day.date, s1: amSlots.in, s2: amSlots.out, s3: pmSlots.in, s4: pmSlots.out, s5: otSlots.in, s6: otSlots.out, dayTotalMs, overtimeMs, otAuthLog };
           });
 
       return { days: processedDays, overallTotal: totalMsAll, overallValidated: totalValidatedMsAll };
@@ -1253,7 +1307,7 @@ export function StudentAttendanceDetailView({
                                             {slot ? (
                                                 <div className="flex flex-col items-center gap-2">
                                                     <div className="flex items-center gap-2">
-                                                        {isInCell && pairIn && (
+                                                        {isInCell && pairIn && (!pairIn.status || pairIn.status === 'Pending') && (
                                                             <input
                                                                 type="checkbox"
                                                                 checked={pairSelected}
@@ -1334,21 +1388,11 @@ export function StudentAttendanceDetailView({
                                             </div>
                                         ) : (
                                             idx === 4 ? (
-                                                <button
-                                                    onClick={() => {
-                                                        const pmOutTime = day.s4 
-                                                            ? new Date(day.s4.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-                                                            : scheduleConfig?.pmOut || "17:00";
-                                                        setOvertimeModal({ isOpen: true, date: day.date, defaultStart: pmOutTime });
-                                                        setOtInTime(pmOutTime);
-                                                        setOtHours(1);
-                                                        setOtMinutes(0);
-                                                    }}
-                                                    className="w-8 h-8 rounded-full bg-orange-50 text-orange-600 hover:bg-orange-100 hover:text-orange-700 flex items-center justify-center transition-colors mx-auto"
-                                                    title="Add Overtime"
-                                                >
-                                                    <Plus size={16} />
-                                                </button>
+                                                day.otAuthLog ? (
+                                                    <span className="text-blue-500 text-[10px] font-bold uppercase tracking-wider block py-4">OT Open</span>
+                                                ) : (
+                                                    <span className="text-gray-300 block py-4">-</span>
+                                                )
                                             ) : (
                                                 <span className="text-gray-300 block py-4">-</span>
                                             )
@@ -1394,7 +1438,7 @@ export function StudentAttendanceDetailView({
                                                     {slot ? (
                                                         <>
                                                             <div className="flex items-center gap-2">
-                                                                {isInCell && pairIn && (
+                                                                {isInCell && pairIn && (!pairIn.status || pairIn.status === 'Pending') && (
                                                                     <input
                                                                         type="checkbox"
                                                                         checked={pairSelected}
@@ -1451,7 +1495,7 @@ export function StudentAttendanceDetailView({
                                                     {slot ? (
                                                         <>
                                                             <div className="flex items-center gap-2">
-                                                                {isInCell && pairIn && (
+                                                                {isInCell && pairIn && (!pairIn.status || pairIn.status === 'Pending') && (
                                                                     <input
                                                                         type="checkbox"
                                                                         checked={pairSelected}
@@ -1713,6 +1757,90 @@ export function StudentAttendanceDetailView({
                 </div>
             </div>
         )}
+
+        {/* Success Modal */}
+        {showSuccessModal && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 text-center">
+              <div className="h-14 w-14 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4 text-green-600">
+                <Check size={32} strokeWidth={3} />
+              </div>
+              <h3 className="text-xl font-bold text-gray-900 mb-2">Success</h3>
+              <p className="text-gray-600 mb-6">
+                Overtime authorized successfully! The student can now time in.
+              </p>
+              <button
+                onClick={() => setShowSuccessModal(false)}
+                className="w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white font-bold rounded-xl transition-colors shadow-lg shadow-green-200"
+              >
+                Okay, Got it
+              </button>
+            </div>
+          </div>
+        )}
+
+      {/* Validation Confirmation Modal */}
+      {showValidateModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-6">
+              <div className="flex items-center justify-center w-12 h-12 mx-auto bg-green-100 rounded-full mb-4">
+                <CheckCircle2 className="w-6 h-6 text-green-600" />
+              </div>
+              <h3 className="text-xl font-bold text-center text-gray-900 mb-2">Confirm Attendance Validation</h3>
+              <p className="text-center text-gray-600 mb-6">
+                Are you sure you want to validate the selected attendance logs? This action will mark the hours as approved and cannot be undone.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => setShowValidateModal(false)}
+                  className="px-4 py-2.5 rounded-xl border border-gray-200 text-gray-700 font-semibold hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleConfirmValidate}
+                  className="px-4 py-2.5 rounded-xl bg-green-600 text-white font-bold hover:bg-green-700 transition-all shadow-md shadow-green-200"
+                >
+                  Yes, Validate
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rejection Confirmation Modal */}
+      {showRejectModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-6">
+              <div className="flex items-center justify-center w-12 h-12 mx-auto bg-red-100 rounded-full mb-4">
+                <XCircle className="w-6 h-6 text-red-600" />
+              </div>
+              <h3 className="text-xl font-bold text-center text-gray-900 mb-2">Confirm Attendance Rejection</h3>
+              <p className="text-center text-gray-600 mb-6">
+                Are you sure you want to reject the selected attendance logs? This will mark the hours as invalid. This action cannot be undone.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => setShowRejectModal(false)}
+                  className="px-4 py-2.5 rounded-xl border border-gray-200 text-gray-700 font-semibold hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleConfirmReject}
+                  className="px-4 py-2.5 rounded-xl bg-red-600 text-white font-bold hover:bg-red-700 transition-all shadow-md shadow-red-200"
+                >
+                  Yes, Reject
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -1828,7 +1956,7 @@ export function EvaluationView({
                 
                 if (isCompleted) {
                   buttonClass = "bg-blue-50 text-blue-600 border border-blue-100 cursor-default";
-                  buttonText = "Completed";
+                  buttonText = "Submitted";
                   isDisabled = true;
                 } else if (isAllowed) {
                   // Green & Clickable
@@ -1883,7 +2011,7 @@ export function EvaluationView({
                       >
                         {isCompleted ? (
                           <>
-                            <span>Completed</span>
+                            <span>Submitted</span>
                             <svg className="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                           </>
                         ) : isAllowed ? (
@@ -1935,6 +2063,28 @@ export function DashboardView({
     pmIn: string; pmOut: string;
     otIn: string; otOut: string;
   } | null>(null);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [overtimeShifts, setOvertimeShifts] = useState<any[]>([]);
+
+  useEffect(() => {
+    const fetchOvertime = async () => {
+        try {
+            const supervisorId = myIdnumber || localStorage.getItem("idnumber") || "";
+            if (!supervisorId) return;
+            const res = await fetch(`/api/overtime?supervisor_id=${encodeURIComponent(supervisorId)}`);
+            const json = await res.json();
+            if (json.overtime_shifts) {
+                setOvertimeShifts(json.overtime_shifts);
+            }
+        } catch (e) {
+            console.error("Failed to fetch overtime shifts", e);
+        }
+    };
+    fetchOvertime();
+    // Refresh every minute to keep in sync
+    const interval = setInterval(fetchOvertime, 60000);
+    return () => clearInterval(interval);
+  }, [myIdnumber, refreshKey]);
 
   useEffect(() => {
     const fetchSchedule = async () => {
@@ -1943,14 +2093,14 @@ export function DashboardView({
         const data = await res.json();
         if (data.shifts) {
           const config = {
-            amIn: "07:00", amOut: "11:00",
+            amIn: "07:00", amOut: "12:00",
             pmIn: "13:00", pmOut: "17:00",
             otIn: "17:00", otOut: "18:00"
           };
           data.shifts.forEach((s: any) => {
             if (s.shift_name === "Morning Shift") {
               config.amIn = s.official_start || "07:00";
-              config.amOut = s.official_end || "11:00";
+              config.amOut = s.official_end || "12:00";
             } else if (s.shift_name === "Afternoon Shift") {
               config.pmIn = s.official_start || "13:00";
               config.pmOut = s.official_end || "17:00";
@@ -1979,7 +2129,7 @@ export function DashboardView({
     setIsFetchingModalData(true);
     try {
       const res = await fetch(
-        `/api/attendance?idnumber=${encodeURIComponent(String(student.idnumber || ""))}&limit=200`,
+        `/api/attendance?idnumber=${encodeURIComponent(String(student.idnumber || ""))}&limit=10000`,
         { cache: "no-store" }
       );
       const json = await res.json();
@@ -2029,19 +2179,20 @@ export function DashboardView({
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [isBulkValidating, setIsBulkValidating] = useState(false);
-  const [overtimeModal, setOvertimeModal] = useState<{
+  // Replaced single overtime modal with bulk modal
+  const [bulkOvertimeModal, setBulkOvertimeModal] = useState<{
     isOpen: boolean;
-    student: User | null;
+    selectedStudentIds: Set<string>;
     date: Date | null;
-    defaultStart?: string;
-  }>({ isOpen: false, student: null, date: null });
+  }>({ isOpen: false, selectedStudentIds: new Set(), date: null });
+  
   const [otInTime, setOtInTime] = useState("");
   const [otHours, setOtHours] = useState(1);
   const [otMinutes, setOtMinutes] = useState(0);
   const [isSavingOt, setIsSavingOt] = useState(false);
   
   // Helpers
-  const formatTime = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const formatTime = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
   const formatHours = (ms: number) => {
     if (!ms) return "-";
     const totalSeconds = Math.floor(ms / 1000);
@@ -2119,58 +2270,74 @@ export function DashboardView({
     setIsBulkValidating(false);
   };
 
-  const handleSaveOvertime = async () => {
-    if (!overtimeModal.student || !overtimeModal.date || !otInTime || (otHours === 0 && otMinutes === 0)) return;
+  const handleBulkSaveOvertime = async () => {
+    if (bulkOvertimeModal.selectedStudentIds.size === 0 || !bulkOvertimeModal.date || !otInTime || (otHours === 0 && otMinutes === 0)) return;
     setIsSavingOt(true);
     try {
       const supervisorId = myIdnumber || localStorage.getItem("idnumber") || "";
+      if (!supervisorId) {
+          throw new Error("Supervisor ID not found. Please log in again.");
+      }
 
       const [inH, inM] = otInTime.split(":").map(Number);
-
-      const tsIn = new Date(overtimeModal.date);
+      const tsIn = new Date(bulkOvertimeModal.date);
       tsIn.setHours(inH, inM, 0, 0);
 
       const durationMs = otHours * 60 * 60 * 1000 + otMinutes * 60 * 1000;
       const tsOut = new Date(tsIn.getTime() + durationMs);
+      
+      const y = bulkOvertimeModal.date.getFullYear();
+      const m = String(bulkOvertimeModal.date.getMonth() + 1).padStart(2, '0');
+      const d = String(bulkOvertimeModal.date.getDate()).padStart(2, '0');
+      const dateStr = `${y}-${m}-${d}`;
+      const studentIds = Array.from(bulkOvertimeModal.selectedStudentIds);
 
-      // Create a special Authorization Record instead of manual logs
-      const authPayload = {
-        end: tsOut.getTime()
-      };
-      const authString = `OT_AUTH:${JSON.stringify(authPayload)}`;
+      // Process in parallel
+      const errors: string[] = [];
+      await Promise.all(studentIds.map(async (studentId) => {
+          try {
+            const res = await fetch("/api/overtime", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                date: dateStr,
+                start: tsIn.getTime(),
+                end: tsOut.getTime(),
+                supervisor_id: supervisorId,
+                student_id: studentId
+              }),
+            });
+            if (!res.ok) {
+                const json = await res.json();
+                throw new Error(json.error || "Failed to authorize overtime");
+            }
+          } catch (err: any) {
+             errors.push(`Student ${studentId}: ${err.message}`);
+          }
+      }));
 
-      await fetch("/api/attendance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          idnumber: overtimeModal.student.idnumber,
-          type: "in",
-          timestamp: tsIn.getTime(),
-          validated_by: supervisorId,
-          photoDataUrl: authString
-        }),
-      });
+      if (errors.length > 0) {
+          throw new Error(`Some authorizations failed:\n${errors.join("\n")}`);
+      }
 
-      // Update local state to reflect the new authorization immediately
-      const newAuth: any = {
-        id: undefined,
-        idnumber: overtimeModal.student.idnumber,
-        type: "in",
-        timestamp: tsIn.getTime(),
-        photoDataUrl: authString,
-        status: "Approved" as const,
-        validatedAt: Date.now(),
-      };
+      // Optimistically update overtimeShifts
+      const newShifts = studentIds.map(sid => ({
+          student_id: sid,
+          overtime_start: tsIn.getTime(),
+          overtime_end: tsOut.getTime(),
+          effective_date: dateStr,
+          created_by: supervisorId
+      }));
+      
+      setOvertimeShifts(prev => [...prev, ...newShifts]);
 
-      setAttendanceData(prev => [...prev, newAuth]);
-
-      alert("Overtime authorized successfully! The student can now time in.");
-      setOvertimeModal({ isOpen: false, student: null, date: null });
+      setShowSuccessModal(true);
+      setBulkOvertimeModal({ isOpen: false, selectedStudentIds: new Set(), date: null });
       setOtInTime("");
       setOtHours(0);
       setOtMinutes(0);
-    } catch (e) {
-      alert("Failed to authorize overtime");
+    } catch (e: any) {
+      alert(e.message || "Failed to authorize overtime");
     } finally {
       setIsSavingOt(false);
     }
@@ -2189,14 +2356,8 @@ export function DashboardView({
       const logs = (byStudent[student.idnumber] || []).slice().sort((a, b) => a.timestamp - b.timestamp);
       
       // Load Schedule
-      let scheduleSettings: any = null;
-      try {
-         const key = `schedule_${student.idnumber}`;
-         const saved = localStorage.getItem(key) || localStorage.getItem("schedule_default");
-         if (saved) scheduleSettings = JSON.parse(saved);
-      } catch {}
-
       let totalValidatedMs = 0;
+      let totalRawMs = 0;
       const pendingDates = new Set<string>();
       let todaySlots: any = null;
 
@@ -2228,137 +2389,166 @@ export function DashboardView({
               return d.getTime();
           };
 
-          let schedule = {
-              amIn: buildShift("07:00"),
-              amOut: buildShift("11:00"),
-              pmIn: buildShift("13:00"),
-              pmOut: buildShift("17:00"),
-              otStart: buildShift("17:00"),
-              otEnd: buildShift("18:00"),
+       // Use global scheduleConfig to match Detail View
+      let schedule = {
+          amIn: buildShift("07:00"),
+          amOut: buildShift("12:00"),
+          pmIn: buildShift("13:00"),
+          pmOut: buildShift("17:00"),
+          otStart: buildShift("17:00"),
+          otEnd: buildShift("18:00"),
+      };
+
+      if (scheduleConfig) {
+          schedule = {
+              amIn: buildShift(scheduleConfig.amIn || "07:00"),
+              amOut: buildShift(scheduleConfig.amOut || "12:00"),
+              pmIn: buildShift(scheduleConfig.pmIn || "13:00"),
+              pmOut: buildShift(scheduleConfig.pmOut || "17:00"),
+              otStart: buildShift(scheduleConfig.otIn || "17:00"),
+              otEnd: buildShift(scheduleConfig.otOut || "18:00"),
+          };
+      }
+
+      // Dynamic OT check: Apply authorized overtime window if exists for this student/date
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      const dateStr = `${y}-${m}-${d}`;
+
+      const dynamicOt = overtimeShifts.find((s: any) => 
+          String(s.student_id) === String(student.idnumber) && 
+          s.effective_date === dateStr
+      );
+
+      if (dynamicOt) {
+          // overtime_start/end are timestamps from DB/Optimistic update
+          schedule.otStart = dynamicOt.overtime_start;
+          schedule.otEnd = dynamicOt.overtime_end;
+      }
+
+          // Sort logs strictly by time
+          const sortedLogs = [...dayLogs].sort((a, b) => a.timestamp - b.timestamp);
+
+          // Build Sessions (Strict Session Logic)
+          // A student can only have ONE open session at a time.
+          type Session = { in: AttendanceEntry; out: AttendanceEntry | null; shift: 'am' | 'pm' | 'ot' };
+          const sessions: Session[] = [];
+          let currentIn: AttendanceEntry | null = null;
+
+          const determineShift = (ts: number): 'am' | 'pm' | 'ot' => {
+              const date = new Date(ts);
+              const h = date.getHours();
+              if (h < 12) return 'am'; // Noon cutoff
+              if (h < 17) return 'pm';
+              return 'ot';
           };
 
-          if (scheduleSettings) {
-              schedule = {
-                  amIn: buildShift(scheduleSettings.amIn || "07:00"),
-                  amOut: buildShift(scheduleSettings.amOut || "11:00"),
-                  pmIn: buildShift(scheduleSettings.pmIn || "13:00"),
-                  pmOut: buildShift(scheduleSettings.pmOut || "17:00"),
-                  otStart: buildShift(scheduleSettings.overtimeIn || "17:00"),
-                  otEnd: buildShift(scheduleSettings.overtimeOut || "18:00"),
-              };
-          }
+          for (const log of sortedLogs) {
+              if (log.status === "Rejected") continue;
 
-          const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
-
-          const computeShiftDuration = (
-              logs: AttendanceEntry[],
-              windowStart: number,
-              windowEnd: number,
-              requireApproved: boolean
-          ) => {
-              let currentIn: number | null = null;
-              let duration = 0;
-              // 30 mins buffer as per business rule
-              const BUFFER_START_MS = 30 * 60 * 1000;
-              const BUFFER_END_MS = 4 * 60 * 60 * 1000;
-              const searchStart = windowStart - BUFFER_START_MS;
-              const searchEnd = windowEnd + BUFFER_END_MS;
-
-              logs.forEach(log => {
-                  if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
-                  if (requireApproved && log.status !== "Approved") return;
-                  if (log.type === "in") {
-                      if (log.timestamp > windowEnd) return;
-                      const effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
-                      currentIn = effectiveIn;
-                  } else if (log.type === "out") {
-                      if (currentIn === null) return;
-                      const effectiveOut = clamp(log.timestamp, windowStart, windowEnd);
-                      if (effectiveOut > currentIn) {
-                          duration += effectiveOut - currentIn;
-                      }
+              if (log.type === "in") {
+                  if (currentIn) {
+                      // Previous session incomplete (forgot to time out). Close it as incomplete.
+                      sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.timestamp) });
+                  }
+                  currentIn = log;
+              } else if (log.type === "out") {
+                  if (currentIn) {
+                      // Close session
+                      sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.timestamp) });
                       currentIn = null;
                   }
-              });
-
-              if (currentIn !== null) {
-                  // Live calculation removed to enforce strict pairing
-                  // const effectiveOut = clamp(Date.now(), windowStart, windowEnd);
-                  // if (effectiveOut > currentIn) {
-                  //     duration += effectiveOut - currentIn;
-                  // }
+                  // Orphaned OUTs are ignored
               }
+          }
+          if (currentIn) {
+              sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.timestamp) });
+          }
 
-              return duration;
+          // Calculate Hours (Shift Window Intersection - All Windows)
+          const calculateHours = (requireApproved: boolean) => {
+              let total = 0;
+              sessions.forEach(session => {
+                  const isInValid = !requireApproved || session.in.status === "Approved";
+                  const isOutValid = !session.out || !requireApproved || session.out.status === "Approved";
+                  if (!isInValid || !isOutValid) return;
+                  
+                  if (!session.out) return;
+
+                  // Check AM Window
+                  const amIn = Math.max(session.in.timestamp, schedule.amIn);
+                  const amOut = Math.min(session.out.timestamp, schedule.amOut);
+                  const amInFl = Math.floor(amIn / 60000) * 60000;
+                  const amOutFl = Math.floor(amOut / 60000) * 60000;
+                  total += Math.max(0, amOutFl - amInFl);
+
+                  // Check PM Window
+                  const pmIn = Math.max(session.in.timestamp, schedule.pmIn);
+                  const pmOut = Math.min(session.out.timestamp, schedule.pmOut);
+                  const pmInFl = Math.floor(pmIn / 60000) * 60000;
+                  const pmOutFl = Math.floor(pmOut / 60000) * 60000;
+                  total += Math.max(0, pmOutFl - pmInFl);
+
+                  // Check OT Window
+                  const otIn = Math.max(session.in.timestamp, schedule.otStart);
+                  const otOut = Math.min(session.out.timestamp, schedule.otEnd);
+                  const otInFl = Math.floor(otIn / 60000) * 60000;
+                  const otOutFl = Math.floor(otOut / 60000) * 60000;
+                  total += Math.max(0, otOutFl - otInFl);
+              });
+              
+              return Math.floor(total / 60000) * 60000;
           };
 
-          const dayVal = computeShiftDuration(dayLogs, schedule.amIn, schedule.amOut, true) + 
-                         computeShiftDuration(dayLogs, schedule.pmIn, schedule.pmOut, true) + 
-                         computeShiftDuration(dayLogs, schedule.otStart, schedule.otEnd, true);
-          
-          const dayRaw = computeShiftDuration(dayLogs, schedule.amIn, schedule.amOut, false) +
-                         computeShiftDuration(dayLogs, schedule.pmIn, schedule.pmOut, false) +
-                         computeShiftDuration(dayLogs, schedule.otStart, schedule.otEnd, false);
+          const dayVal = calculateHours(true);
+          const dayRaw = calculateHours(false);
           
           totalValidatedMs += dayVal;
+          totalRawMs += dayRaw;
           
           // Capture Today's Slots
           if (date.toLocaleDateString() === todayStr) {
-             // Smart Pairing Logic
-            const otAuthLog = dayLogs.find(l => l.photoDataUrl && l.photoDataUrl.startsWith("OT_AUTH:"));
-            const processingLogs = dayLogs.filter(l => !l.photoDataUrl?.startsWith("OT_AUTH:"));
-
-            const sortedLogs = [...processingLogs].sort((a, b) => a.timestamp - b.timestamp);
-            const noonCutoff = new Date(date).setHours(12, 30, 0, 0);
-
-            // 1. Identify Start Points (INs)
-            const s1 = sortedLogs.find(l => l.type === "in" && l.timestamp < noonCutoff) || null;
-             const s3 = sortedLogs.find(l => l.type === "in" && l.timestamp >= noonCutoff) || null;
+             const otAuthLog = dayLogs.find(l => l.photoDataUrl && l.photoDataUrl.startsWith("OT_AUTH:"));
              
-             // OT IN: strictly after PM IN (if exists), else just after OT Start
-             const s5 = sortedLogs.find(l => 
-                 l.type === "in" && 
-                 l.timestamp >= schedule.otStart && 
-                 (!s3 || l.timestamp > s3.timestamp)
-             ) || null;
+             const todayISO = new Date().toLocaleDateString('en-CA');
+             const isOvertimeAuthorized = overtimeShifts.some((s: any) => 
+                 String(s.student_id) === String(student.idnumber) && 
+                 s.effective_date === todayISO
+             );
 
-             // 2. Identify End Points (OUTs) based on Pairs
-             
-             // s2 (AM OUT): Last OUT after s1 but before s3 (if s3 exists)
-             let s2: AttendanceEntry | null = null;
-             if (s1) {
-                 const searchEnd = s3 ? s3.timestamp : (new Date(date).setHours(23, 59, 59, 999));
-                 const candidates = sortedLogs.filter(l => l.type === "out" && l.timestamp > s1.timestamp && l.timestamp < searchEnd);
-                 s2 = candidates.pop() || null;
-             }
+             // Map sessions to UI slots (No Visual Clamping)
+             const mapSessionToSlots = (shiftSessions: Session[]) => {
+                 if (shiftSessions.length === 0) return { in: null, out: null };
+                 
+                 const firstSession = shiftSessions[0];
+                 const lastSession = shiftSessions[shiftSessions.length - 1];
+                 
+                 return { in: firstSession.in, out: lastSession.out };
+             };
 
-             // s4 (PM OUT): Last OUT after s3 but before s5 (if s5 exists)
-             let s4: AttendanceEntry | null = null;
-             if (s3) {
-                 const searchEnd = s5 ? s5.timestamp : (new Date(date).setHours(23, 59, 59, 999));
-                 const candidates = sortedLogs.filter(l => l.type === "out" && l.timestamp > s3.timestamp && l.timestamp < searchEnd);
-                 s4 = candidates.pop() || null;
-             }
+             const amSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'am'));
+             const pmSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'pm'));
+             const otSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'ot'));
 
-             // s6 (OT OUT): Last OUT after s5
-             let s6: AttendanceEntry | null = null;
-             if (s5) {
-                 const candidates = sortedLogs.filter(l => l.type === "out" && l.timestamp > s5.timestamp);
-                 s6 = candidates.pop() || null;
-            }
-
-            todaySlots = { s1, s2, s3, s4, s5, s6, todayTotalMs: dayRaw, otAuthLog };
-         }
-     });
+             todaySlots = { 
+                 s1: amSlots.in, s2: amSlots.out, 
+                 s3: pmSlots.in, s4: pmSlots.out, 
+                 s5: otSlots.in, s6: otSlots.out, 
+                 todayTotalMs: dayRaw, otAuthLog, isOvertimeAuthorized 
+             };
+          }
+      });
 
       return {
         student,
         totalMs: totalValidatedMs,
+        totalRawMs,
         pendingDays: pendingDates.size,
         todaySlots
       };
     });
-  }, [filteredStudents, attendanceData]);
+  }, [filteredStudents, attendanceData, scheduleConfig, overtimeShifts]);
 
   // Fetch Attendance
   useEffect(() => {
@@ -2378,7 +2568,7 @@ export function DashboardView({
           .select('id, type, ts, photourl, status, validated_by, validated_at, idnumber')
           .in('idnumber', ids)
           .order('ts', { ascending: false })
-          .limit(5000);
+          .limit(100000);
         
         if (!error && data && mounted) {
            const mapped: AttendanceEntry[] = data.map((e: AttendanceQueryResult) => {
@@ -2467,6 +2657,7 @@ export function DashboardView({
               onBack={() => setSelectedModalData(null)}
               onValidate={handleValidation}
               onRefresh={() => handleViewStudentAttendance(selectedModalData.student)}
+              overtimeShifts={overtimeShifts}
           />
       );
   }
@@ -2516,6 +2707,23 @@ export function DashboardView({
            </div>
 
            <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-gray-100 md:border-t-0 md:pt-0">
+             <button
+               onClick={() => {
+                   const today = new Date();
+                   today.setHours(0, 0, 0, 0);
+                   setBulkOvertimeModal({ 
+                       isOpen: true, 
+                       selectedStudentIds: new Set(), 
+                       date: today 
+                   });
+                   setOtInTime("17:00");
+                   setOtHours(1);
+                   setOtMinutes(0);
+               }}
+               className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-orange-500 bg-orange-500 text-white hover:bg-orange-600 hover:border-orange-600 transition-colors"
+             >
+               Authorize Overtime
+             </button>
              <button
                onClick={selectAllPending}
                className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100 hover:border-orange-400 transition-colors"
@@ -2607,8 +2815,10 @@ export function DashboardView({
                   </td>
                 </tr>
               ) : (
-                studentSummaries.map(({ student, totalMs, todaySlots }) => {
+                studentSummaries.map(({ student, totalMs, totalRawMs, todaySlots }) => {
                   const todayMs = todaySlots?.todayTotalMs || 0;
+                  // Use todayMs (Daily Validated + Pending) for the Total Hours column
+                  const displayTotal = todayMs;
                   const renderSlot = (
                     slot: AttendanceEntry | null,
                     pairIn?: AttendanceEntry | null,
@@ -2618,8 +2828,8 @@ export function DashboardView({
                   ) => {
                     if (!slot) {
                       if (isOvertime && isInCell) {
-                        // Check if Auth Log exists
-                        if (todaySlots?.otAuthLog) {
+                        // Check if Auth Log exists or Overtime Shift is present
+                        if (todaySlots?.otAuthLog || todaySlots?.isOvertimeAuthorized) {
                              return (
                                  <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-green-600 font-bold bg-green-50">
                                      Authorized
@@ -2645,26 +2855,8 @@ export function DashboardView({
                         }
 
                         return (
-                          <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-gray-700">
-                            <button
-                              onClick={() => {
-                                const today = new Date();
-                                today.setHours(0, 0, 0, 0);
-                                setOvertimeModal({
-                                  isOpen: true,
-                                  student,
-                                  date: today,
-                                  defaultStart,
-                                });
-                                setOtInTime(defaultStart);
-                                setOtHours(1);
-                                setOtMinutes(0);
-                              }}
-                              className="w-8 h-8 rounded-full bg-orange-50 text-orange-600 hover:bg-orange-100 hover:text-orange-700 flex items-center justify-center transition-colors mx-auto"
-                              title="Add Overtime"
-                            >
-                              <Plus size={16} />
-                            </button>
+                          <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-gray-300">
+                            -
                           </td>
                         );
                       }
@@ -2765,7 +2957,7 @@ export function DashboardView({
                       {renderSlot(todaySlots?.s5, todaySlots?.s5, todaySlots?.s6, true, true)}
                       {renderSlot(todaySlots?.s6, todaySlots?.s5, todaySlots?.s6, false, true)}
                       <td className="px-4 py-3 text-center font-bold text-gray-900">
-                        {todayMs > 0 ? formatHours(todayMs) : "-"}
+                        {displayTotal > 0 ? formatHours(displayTotal) : "-"}
                       </td>
                     </tr>
                   );
@@ -2781,8 +2973,9 @@ export function DashboardView({
               No students found.
             </div>
           ) : (
-            studentSummaries.map(({ student, totalMs, pendingDays, todaySlots }) => {
+            studentSummaries.map(({ student, totalMs, totalRawMs, pendingDays, todaySlots }) => {
               const todayMs = todaySlots?.todayTotalMs || 0;
+              const displayTotal = todayMs;
               const courseSection = [
                 student.course || "",
                 student.section || ""
@@ -2819,7 +3012,7 @@ export function DashboardView({
                         Total Hours
                       </div>
                       <div className="text-sm font-bold text-gray-900 mt-1">
-                        {todayMs > 0 ? formatDuration(todayMs) : (
+                        {displayTotal > 0 ? formatDuration(displayTotal) : (
                           <span className="text-gray-300">-</span>
                         )}
                       </div>
@@ -2871,106 +3064,200 @@ export function DashboardView({
           </div>
         )}
 
-        {overtimeModal.isOpen && overtimeModal.student && (
+        {bulkOvertimeModal.isOpen && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
-                <h3 className="font-bold text-gray-900">Set Overtime</h3>
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+              <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+                <h3 className="font-bold text-gray-900">Authorize Overtime</h3>
                 <button
-                  onClick={() => setOvertimeModal({ isOpen: false, student: null, date: null })}
+                  onClick={() => setBulkOvertimeModal(prev => ({ ...prev, isOpen: false }))}
                   className="p-2 hover:bg-gray-200 rounded-full text-gray-500"
                 >
                   <X size={20} />
                 </button>
               </div>
-              <div className="p-6 space-y-4">
-                <p className="text-sm text-gray-500">
-                  Set overtime for{" "}
-                  <span className="font-bold text-gray-900">
-                    {overtimeModal.date?.toLocaleDateString()}
-                  </span>
-                  .
-                  This will manually add validated entries.
-                </p>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Time In</label>
-                  <input
-                    type="time"
-                    value={otInTime}
-                    min={overtimeModal.defaultStart}
-                    onClick={e => e.currentTarget.showPicker()}
-                    onChange={e => setOtInTime(e.target.value)}
-                    className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Duration</label>
-                  <div className="flex gap-2">
-                    <div className="flex-1">
-                      <div className="relative">
-                        <input
-                          type="number"
-                          min="0"
-                          value={otHours}
-                          onChange={e => setOtHours(Math.max(0, parseInt(e.target.value) || 0))}
-                          className="w-full rounded-xl border border-gray-300 pl-3 pr-12 py-2 text-sm focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
-                        />
-                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">
-                          hrs
-                        </span>
-                      </div>
-                    </div>
-                    <div className="flex-1">
-                      <div className="relative">
-                        <input
-                          type="number"
-                          min="0"
-                          max="59"
-                          value={otMinutes}
-                          onChange={e =>
-                            setOtMinutes(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))
+
+              <div className="p-6 space-y-4 overflow-y-auto custom-scrollbar">
+                {/* Date & Time Controls */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-gray-700 uppercase">Date</label>
+                    <input 
+                      type="date" 
+                      value={bulkOvertimeModal.date ? (() => {
+                        const d = bulkOvertimeModal.date;
+                        const y = d.getFullYear();
+                        const m = String(d.getMonth() + 1).padStart(2, '0');
+                        const da = String(d.getDate()).padStart(2, '0');
+                        return `${y}-${m}-${da}`;
+                      })() : ''}
+                      onChange={(e) => {
+                          if (!e.target.value) {
+                              setBulkOvertimeModal(prev => ({ ...prev, date: null }));
+                          } else {
+                              const [y, m, d] = e.target.value.split('-').map(Number);
+                              // Create local date at 00:00
+                              setBulkOvertimeModal(prev => ({ ...prev, date: new Date(y, m - 1, d) }));
                           }
-                          className="w-full rounded-xl border border-gray-300 pl-3 pr-12 py-2 text-sm focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
-                        />
-                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">
-                          mins
-                        </span>
-                      </div>
-                    </div>
+                      }}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
+                    />
                   </div>
-                  <p className="text-xs text-gray-500 mt-2 text-right">
-                    Ends at:{" "}
-                    <span className="font-bold text-gray-900">
-                      {(() => {
-                        if (!otInTime) return "--:--";
-                        const [h, m] = otInTime.split(":").map(Number);
-                        const date = new Date();
-                        date.setHours(h, m, 0, 0);
-                        date.setMinutes(date.getMinutes() + otHours * 60 + otMinutes);
-                        return date.toLocaleTimeString("en-GB", {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        });
-                      })()}
-                    </span>
-                  </p>
+                  <div className="space-y-1">
+                     <label className="text-xs font-bold text-gray-700 uppercase">Start Time</label>
+                     <input 
+                       type="time" 
+                       value={otInTime}
+                       onChange={(e) => setOtInTime(e.target.value)}
+                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
+                     />
+                  </div>
                 </div>
-                <div className="flex justify-end gap-3 pt-4">
-                  <button
-                    onClick={() => setOvertimeModal({ isOpen: false, student: null, date: null })}
-                    className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleSaveOvertime}
-                    disabled={isSavingOt || !otInTime || (otHours === 0 && otMinutes === 0)}
-                    className="px-4 py-2 text-sm font-bold text-white bg-orange-600 hover:bg-orange-700 rounded-lg shadow-md shadow-orange-200 transition-all disabled:opacity-70 disabled:cursor-not-allowed"
-                  >
-                    {isSavingOt ? "Saving..." : "Save Overtime"}
-                  </button>
+
+                <div className="grid grid-cols-2 gap-4">
+                   <div className="space-y-1">
+                     <label className="text-xs font-bold text-gray-700 uppercase">Hours</label>
+                     <input 
+                       type="number" 
+                       min="0" max="12"
+                       value={otHours}
+                       onChange={(e) => setOtHours(Math.max(0, parseInt(e.target.value) || 0))}
+                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
+                     />
+                   </div>
+                   <div className="space-y-1">
+                     <label className="text-xs font-bold text-gray-700 uppercase">Minutes</label>
+                     <input 
+                       type="number" 
+                       min="0" max="59" step="15"
+                       value={otMinutes}
+                       onChange={(e) => setOtMinutes(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))}
+                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
+                     />
+                   </div>
+                </div>
+
+                <p className="text-sm font-medium text-gray-700 text-right">
+                  Ends at:{" "}
+                  <span className="font-bold text-orange-600">
+                    {(() => {
+                      if (!otInTime) return "--:--";
+                      const [h, m] = otInTime.split(":").map(Number);
+                      const date = new Date();
+                      date.setHours(h, m, 0, 0);
+                      date.setMinutes(date.getMinutes() + otHours * 60 + otMinutes);
+                      return date.toLocaleTimeString("en-GB", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      });
+                    })()}
+                  </span>
+                </p>
+
+                {/* Student Selection */}
+                <div className="space-y-2 pt-2 border-t border-gray-100">
+                   <div className="flex items-center justify-between">
+                      <label className="text-xs font-medium text-gray-500 uppercase">Select Students</label>
+                      <button 
+                        onClick={() => {
+                            const allIds = filteredStudents.map(s => String(s.idnumber));
+                            const allSelected = allIds.every(id => bulkOvertimeModal.selectedStudentIds.has(id));
+                            
+                            setBulkOvertimeModal(prev => {
+                                const next = new Set(prev.selectedStudentIds);
+                                if (allSelected) {
+                                    allIds.forEach(id => next.delete(id));
+                                } else {
+                                    allIds.forEach(id => next.add(id));
+                                }
+                                return { ...prev, selectedStudentIds: next };
+                            });
+                        }}
+                        className="text-xs text-orange-600 font-medium hover:underline"
+                      >
+                        {filteredStudents.length > 0 && filteredStudents.every(s => bulkOvertimeModal.selectedStudentIds.has(String(s.idnumber))) ? "Deselect All" : "Select All"}
+                      </button>
+                   </div>
+                   <div className="border border-gray-200 rounded-lg h-48 overflow-y-auto divide-y divide-gray-100 custom-scrollbar bg-gray-50">
+                      {filteredStudents.length === 0 ? (
+                          <div className="p-4 text-center text-sm text-gray-500">No students found.</div>
+                      ) : (
+                          filteredStudents.map(student => {
+                              const sid = String(student.idnumber);
+                              const isSelected = bulkOvertimeModal.selectedStudentIds.has(sid);
+                              return (
+                                  <label key={sid} className="flex items-center gap-3 p-3 hover:bg-white cursor-pointer transition-colors">
+                                      <input 
+                                        type="checkbox"
+                                        checked={isSelected}
+                                        onChange={() => {
+                                            setBulkOvertimeModal(prev => {
+                                                const next = new Set(prev.selectedStudentIds);
+                                                if (next.has(sid)) next.delete(sid);
+                                                else next.add(sid);
+                                                return { ...prev, selectedStudentIds: next };
+                                            });
+                                        }}
+                                        className="w-4 h-4 rounded text-orange-600 focus:ring-orange-500 border-gray-300"
+                                      />
+                                      <div className="text-sm">
+                                          <div className="font-medium text-gray-900">{student.lastname}, {student.firstname}</div>
+                                          <div className="text-xs text-gray-500">{student.course} • {student.section}</div>
+                                      </div>
+                                  </label>
+                              );
+                          })
+                      )}
+                   </div>
+                   <p className="text-xs text-gray-400 text-right">
+                      {bulkOvertimeModal.selectedStudentIds.size} student(s) selected
+                   </p>
                 </div>
               </div>
+
+              <div className="p-4 border-t border-gray-100 bg-gray-50 flex justify-end gap-3">
+                <button 
+                  onClick={() => setBulkOvertimeModal(prev => ({ ...prev, isOpen: false }))}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleBulkSaveOvertime}
+                  disabled={isSavingOt || bulkOvertimeModal.selectedStudentIds.size === 0 || !otInTime || (otHours === 0 && otMinutes === 0)}
+                  className="px-4 py-2 text-sm font-bold text-white bg-orange-600 rounded-lg hover:bg-orange-700 shadow-md shadow-orange-200 transition-all disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {isSavingOt ? (
+                     <>
+                       <RefreshCw size={14} className="animate-spin" />
+                       <span>Saving...</span>
+                     </>
+                  ) : (
+                     <span>Authorize Overtime</span>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Success Modal */}
+        {showSuccessModal && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 text-center">
+              <div className="h-14 w-14 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4 text-green-600">
+                <Check size={32} strokeWidth={3} />
+              </div>
+              <h3 className="text-xl font-bold text-gray-900 mb-2">Success</h3>
+              <p className="text-gray-600 mb-6">
+                Overtime authorized successfully! The student can now time in.
+              </p>
+              <button
+                onClick={() => setShowSuccessModal(false)}
+                className="w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white font-bold rounded-xl transition-colors shadow-lg shadow-green-200"
+              >
+                Okay, Got it
+              </button>
             </div>
           </div>
         )}

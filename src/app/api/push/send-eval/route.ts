@@ -28,7 +28,7 @@ export async function POST(req: Request) {
     if (subs.length === 0) return NextResponse.json({ ok: true, sent: 0 });
 
     webPush.setVapidDetails(
-      "mailto:admin@ojtontrack.local",
+      "mailto:admin@ojtontrack.site",
       pub,
       priv
     );

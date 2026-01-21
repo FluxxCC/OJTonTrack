@@ -2,8 +2,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AttendanceView, StudentHeader, StudentBottomNav } from "../ui";
 
-type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" };
-type ServerAttendanceEntry = { type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null };
+type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" };
+type ServerAttendanceEntry = { id?: number; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null };
 
 export default function StudentAttendancePage() {
   const idnumber = useMemo(() => {
@@ -17,7 +17,7 @@ export default function StudentAttendancePage() {
     let active = true;
     const load = async () => {
       try {
-        const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=50`, { cache: "no-store" });
+        const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=1000`, { cache: "no-store" });
         const json = await res.json();
         if (active && res.ok && Array.isArray(json.entries)) {
           const mapped = json.entries.map((e: ServerAttendanceEntry) => {
@@ -26,6 +26,7 @@ export default function StudentAttendancePage() {
             const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
             const status = isRejected ? "Rejected" : isApproved ? "Approved" : "Pending";
             return {
+              id: e.id,
               type: e.type,
               timestamp: e.ts,
               photoDataUrl: e.photourl,

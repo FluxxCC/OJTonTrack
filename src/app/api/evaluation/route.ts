@@ -42,9 +42,25 @@ export async function GET(req: Request) {
   if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
   try {
     const url = new URL(req.url);
+    const supervisorId = String(url.searchParams.get("supervisor_id") || "").trim();
+
+    if (supervisorId) {
+      const { data, error } = await admin
+        .from("evaluation_forms")
+        .select("student_id")
+        .eq("supervisor_id", supervisorId);
+
+      if (error) {
+        return NextResponse.json({ error: error.message }, { status: 500 });
+      }
+      return NextResponse.json({ 
+        completedIds: (data || []).map((d: any) => d.student_id) 
+      });
+    }
+
     const idnumber = String(url.searchParams.get("idnumber") || "").trim();
     if (!idnumber) {
-      return NextResponse.json({ error: "idnumber is required" }, { status: 400 });
+      return NextResponse.json({ error: "idnumber or supervisor_id is required" }, { status: 400 });
     }
     const { data, error } = await admin
       .from("evaluation_forms")

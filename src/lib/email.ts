@@ -12,7 +12,7 @@ export async function sendEmail(to: string, subject: string, html: string) {
   }
   
   try {
-    const from = process.env.SMTP_FROM || '"OJTonTrack" <onboarding@resend.dev>';
+    const from = process.env.SMTP_FROM || '"OJTonTrack" <onboarding@ojtontrack.site>';
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {

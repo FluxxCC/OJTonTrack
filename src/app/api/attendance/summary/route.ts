@@ -41,6 +41,20 @@ export async function GET() {
     }
   });
 
+  const { data: otShiftsData } = await admin
+    .from("overtime_shifts")
+    .select("student_id, effective_date, overtime_start, overtime_end");
+
+  // Build lookup: student_id -> date (YYYY-MM-DD) -> { start, end }
+  const otLookup: Record<string, Record<string, { start: number, end: number }>> = {};
+  (otShiftsData || []).forEach((s: any) => {
+      if (!otLookup[s.student_id]) otLookup[s.student_id] = {};
+      otLookup[s.student_id][s.effective_date] = {
+          start: Number(s.overtime_start),
+          end: Number(s.overtime_end)
+      };
+  });
+
   const shiftConfig: Record<string, { start: string; end: string }> = {};
   try {
     const { data: shiftRows } = await admin
@@ -68,6 +82,8 @@ export async function GET() {
       return st === "APPROVED" || st === "VALIDATED" || !!e.validated_by;
     };
 
+    const floorToMin = (ms: number) => Math.floor(ms / 60000) * 60000;
+
     const findPairDuration = (logs: AttendanceEvent[], windowStart: number, windowEnd: number) => {
       let currentIn: number | null = null;
       let duration = 0;
@@ -83,12 +99,18 @@ export async function GET() {
         if (log.ts < searchStart || log.ts > searchEnd) return;
         if (!isApproved(log)) return;
         
+        // Floor timestamp to minute (exclude seconds/ms) BEFORE calculation
+        const flooredTs = floorToMin(log.ts);
+
         if (log.type === "in") {
-          if (log.ts > windowEnd) return;
-          currentIn = clamp(log.ts, windowStart, windowEnd);
+          if (flooredTs > windowEnd) {
+             currentIn = null;
+             return;
+          }
+          currentIn = clamp(flooredTs, windowStart, windowEnd);
         } else if (log.type === "out") {
           if (currentIn === null) return;
-          const effectiveOut = clamp(log.ts, windowStart, windowEnd);
+          const effectiveOut = clamp(flooredTs, windowStart, windowEnd);
           if (effectiveOut > currentIn) {
             duration += effectiveOut - currentIn;
           }
@@ -142,18 +164,30 @@ export async function GET() {
       const amOut = buildShift(amEndT);
       const pmIn = buildShift(pmStartT);
       const pmOut = buildShift(pmEndT);
-      const otStart = buildShift(otStartT);
-      const otEnd = buildShift(otEndT);
+      const otStartStatic = buildShift(otStartT);
+      const otEndStatic = buildShift(otEndT);
 
+      // Determine correct OT window for this day/student
+      const dateStr = day.date.toLocaleDateString('en-CA'); // YYYY-MM-DD
+      let otStart = 0;
+      let otEnd = 0;
+      
+      const dynamicOt = otLookup[id]?.[dateStr];
+      if (dynamicOt) {
+          otStart = dynamicOt.start;
+          otEnd = dynamicOt.end;
+      }
+      
       const dayLogs = day.logs.slice().sort((a, b) => a.ts - b.ts);
 
       const dayValidatedAm = findPairDuration(dayLogs, amIn, amOut);
       const dayValidatedPm = findPairDuration(dayLogs, pmIn, pmOut);
       
-      // Only calculate OT if it's configured or we want to allow default OT
-      // The requirement says "Overtime is a separate time-in/out period"
-      // We'll calculate it using the configured (or default) window
-      const dayValidatedOt = findPairDuration(dayLogs, otStart, otEnd);
+      // Only calculate OT if dynamic authorization exists (Strict)
+      let dayValidatedOt = 0;
+      if (otStart > 0 && otEnd > 0) {
+          dayValidatedOt = findPairDuration(dayLogs, otStart, otEnd);
+      }
 
       totalMs += dayValidatedAm + dayValidatedPm + dayValidatedOt;
     });
@@ -202,5 +236,18 @@ export async function GET() {
   // Sort recent attendance by latest first (no limit to ensure badges work for all students)
   recentAttendance.sort((a, b) => b.ts - a.ts);
 
-  return NextResponse.json({ summary, activeSessions, recentAttendance, recentReports });
+  // Transform otLookup to array for frontend
+  const overtimeShifts: { student_id: string; date: string; start: number; end: number }[] = [];
+  Object.keys(otLookup).forEach(sid => {
+      Object.keys(otLookup[sid]).forEach(date => {
+          overtimeShifts.push({
+              student_id: sid,
+              date: date,
+              start: otLookup[sid][date].start,
+              end: otLookup[sid][date].end
+          });
+      });
+  });
+
+  return NextResponse.json({ summary, activeSessions, recentAttendance, recentReports, overtimeShifts });
 }

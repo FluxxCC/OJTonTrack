@@ -20,7 +20,7 @@ function timeStringToMinutes(raw: string | null | undefined): number {
   return (h || 0) * 60 + (m || 0);
 }
 
-type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved"; validatedAt?: number };
+type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number };
 type ReportEntryLegacy = { text: string; fileName?: string; fileType?: string; submittedAt: number; timestamp?: number };
 
 type User = {
@@ -38,7 +38,7 @@ type User = {
 };
 
 type AttendanceEntryRaw = {
-  id: string;
+  id: string | number;
   type: "in" | "out";
   ts: number;
   photourl: string;
@@ -61,6 +61,7 @@ export default function StudentDashboardPage() {
   const [reports, setReports] = useState<ReportEntry[]>([]);
   const [targetHours, setTargetHours] = useState<number>(486);
   const [schedule, setSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
+  const [overtimeShifts, setOvertimeShifts] = useState<{ effective_date: string; overtime_start: number; overtime_end: number }[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const idnumber = useMemo(() => {
     if (typeof window === "undefined") return "";
@@ -80,7 +81,7 @@ export default function StudentDashboardPage() {
     let active = true;
     const loadAttendance = async () => {
       try {
-        const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=50`);
+        const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=1000`, { cache: "no-store" });
         const json = await res.json();
         if (active && res.ok && Array.isArray(json.entries)) {
           const mapped = json.entries.map((e: AttendanceEntryRaw) => {
@@ -90,6 +91,7 @@ export default function StudentDashboardPage() {
             const status = isRejected ? "Rejected" : isApproved ? "Approved" : "Pending";
             const validatedAtNum = e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined;
             return {
+              id: Number(e.id),
               type: e.type,
               timestamp: e.ts,
               photoDataUrl: e.photourl,
@@ -112,6 +114,17 @@ export default function StudentDashboardPage() {
       try {
         const t = Number(localStorage.getItem("targetHours") || "");
         if (!Number.isNaN(t) && t > 0) setTargetHours(t);
+      } catch {}
+      try {
+          const res = await fetch(`/api/overtime?student_id=${encodeURIComponent(idnumber)}`, { cache: "no-store" });
+          const json = await res.json();
+          if (active && res.ok && Array.isArray(json.overtime_shifts)) {
+             setOvertimeShifts(json.overtime_shifts.map((s: any) => ({
+                 ...s,
+                 overtime_start: Number(s.overtime_start),
+                 overtime_end: Number(s.overtime_end)
+             })));
+           }
       } catch {}
     };
     loadAttendance();
@@ -210,13 +223,15 @@ export default function StudentDashboardPage() {
         const pmOutNorm = normalizeTimeString(pmRow.official_end || "");
         const otInNorm = normalizeTimeString(finalOtRow?.official_start || "");
         const otOutNorm = normalizeTimeString(finalOtRow?.official_end || "");
-        if (!amInNorm || !amOutNorm || !pmInNorm || !pmOutNorm) return;
+        
+        // Relaxed validation: allow partial schedules (e.g. only AM or only PM)
+        if (!amInNorm && !amOutNorm && !pmInNorm && !pmOutNorm) return;
 
         const next = {
-          amIn: amInNorm,
-          amOut: amOutNorm,
-          pmIn: pmInNorm,
-          pmOut: pmOutNorm,
+          amIn: amInNorm || "",
+          amOut: amOutNorm || "",
+          pmIn: pmInNorm || "",
+          pmOut: pmOutNorm || "",
           otIn: otInNorm || undefined,
           otOut: otOutNorm || undefined,
         };
@@ -232,8 +247,16 @@ export default function StudentDashboardPage() {
   }, [idnumber]);
 
   const aggregateHours = useMemo(() => {
+    const seen = new Set<string>();
+    const uniqueAttendance = attendance.filter(a => {
+      const key = a.id ? String(a.id) : `${a.timestamp}-${a.type}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
     const grouped = new Map<string, { date: Date; logs: AttendanceEntry[] }>();
-    attendance.forEach(log => {
+    uniqueAttendance.forEach(log => {
       const d = new Date(log.timestamp);
       const key = d.toLocaleDateString();
       if (!grouped.has(key)) grouped.set(key, { date: d, logs: [] });
@@ -305,58 +328,96 @@ export default function StudentDashboardPage() {
       const amOutMs = buildShift(effectiveSchedule.amOut);
       const pmInMs = buildShift(effectiveSchedule.pmIn);
       const pmOutMs = buildShift(effectiveSchedule.pmOut);
-      const otInMs = buildShift(effectiveSchedule.otIn);
-      const otOutMs = buildShift(effectiveSchedule.otOut);
 
-      const computeShiftDuration = (
-        logs: AttendanceEntry[],
-        windowStart: number | null,
-        windowEnd: number | null,
-        requireApproved: boolean
-      ) => {
-        if (windowStart === null || windowEnd === null) return 0;
-        let currentIn: number | null = null;
-        let duration = 0;
+      // Check for dynamic overtime shift
+      const dateKey = day.date.toLocaleDateString('en-CA');
+      const dynamicOt = overtimeShifts.find(s => s.effective_date === dateKey);
+      
+      const otInMs = dynamicOt ? dynamicOt.overtime_start : buildShift(effectiveSchedule.otIn);
+      const otOutMs = dynamicOt ? dynamicOt.overtime_end : buildShift(effectiveSchedule.otOut);
 
-        // 30 mins buffer for early time-in, 4 hours for late time-out (clamped)
-        const BUFFER_START_MS = 30 * 60 * 1000;
-        const BUFFER_END_MS = 4 * 60 * 60 * 1000;
-        const searchStart = windowStart - BUFFER_START_MS;
-        const searchEnd = windowEnd + BUFFER_END_MS;
-
-        logs.forEach(log => {
-          // Filter out logs that are outside the buffer window
-          if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
-
-          if (requireApproved && log.status !== "Approved") {
-            return;
-          }
-          if (log.type === "in") {
-            if (log.timestamp > windowEnd) return;
-            const effectiveIn = Math.min(Math.max(log.timestamp, windowStart), windowEnd);
-            currentIn = effectiveIn;
-          } else if (log.type === "out") {
-            if (currentIn === null) return;
-            const effectiveOut = Math.min(Math.max(log.timestamp, windowStart), windowEnd);
-            if (effectiveOut > currentIn) {
-              duration += effectiveOut - currentIn;
-            }
-            currentIn = null;
-          }
-        });
-
-        return duration;
+      const localSchedule = {
+        amIn: amInMs || 0,
+        amOut: amOutMs || 0,
+        pmIn: pmInMs || 0,
+        pmOut: pmOutMs || 0,
+        otStart: otInMs || 0,
+        otEnd: otOutMs || 0,
       };
 
-      const dayTotalMs =
-        (amInMs && amOutMs ? computeShiftDuration(dayLogs, amInMs, amOutMs, false) : 0) +
-        (pmInMs && pmOutMs ? computeShiftDuration(dayLogs, pmInMs, pmOutMs, false) : 0) +
-        (otInMs && otOutMs ? computeShiftDuration(dayLogs, otInMs, otOutMs, false) : 0);
+      type Session = { in: AttendanceEntry; out: AttendanceEntry | null };
+      const sessions: Session[] = [];
+      let currentIn: AttendanceEntry | null = null;
 
-      const dayValidatedMs =
-        (amInMs && amOutMs ? computeShiftDuration(dayLogs, amInMs, amOutMs, true) : 0) +
-        (pmInMs && pmOutMs ? computeShiftDuration(dayLogs, pmInMs, pmOutMs, true) : 0) +
-        (otInMs && otOutMs ? computeShiftDuration(dayLogs, otInMs, otOutMs, true) : 0);
+      dayLogs.forEach(log => {
+          if (log.status === "Rejected") return;
+
+          if (log.type === "in") {
+              if (currentIn) {
+                   sessions.push({ in: currentIn, out: null });
+              }
+              currentIn = log;
+          } else if (log.type === "out") {
+              if (currentIn) {
+                  sessions.push({ in: currentIn, out: log });
+                  currentIn = null;
+              }
+          }
+      });
+      if (currentIn) {
+          sessions.push({ in: currentIn, out: null });
+      }
+
+      let dayTotalMs = 0;
+      let dayValidatedMs = 0;
+
+      const calculateOverlap = (start: number, end: number, limitStart: number, limitEnd: number) => {
+          if (!limitStart || !limitEnd || limitStart >= limitEnd) return 0;
+          // Clamp to window
+          const s = Math.max(start, limitStart);
+          const e = Math.min(end, limitEnd);
+          if (s >= e) return 0;
+          
+          // Floor to minutes as per policy
+          const sFl = Math.floor(s / 60000) * 60000;
+          const eFl = Math.floor(e / 60000) * 60000;
+          return Math.max(0, eFl - sFl);
+      };
+
+      sessions.forEach(session => {
+          if (!session.out) return;
+
+          let am = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.amIn, localSchedule.amOut);
+          let pm = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.pmIn, localSchedule.pmOut);
+          const ot = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.otStart, localSchedule.otEnd);
+          
+          // Fallback: If session strictly encloses the AM window but overlap returned 0 (e.g. due to minor boundary mismatch), force full AM credit.
+          if (am === 0 && localSchedule.amIn && localSchedule.amOut) {
+             if (session.in.timestamp <= localSchedule.amIn && session.out.timestamp >= localSchedule.amOut) {
+                am = localSchedule.amOut - localSchedule.amIn;
+             }
+          }
+
+          // If a single session spans across Morning and Afternoon (e.g. AM IN -> PM OUT),
+          // it means the student failed to clock out for lunch and clock in for PM.
+          // In this case, we only credit the Morning hours and invalidating the PM hours.
+          if (am > 0 && pm > 0) {
+            pm = 0;
+          }
+
+          const sessionDuration = am + pm + ot;
+          dayTotalMs += sessionDuration;
+
+          const isInApproved = session.in.status === "Approved";
+          const isOutApproved = session.out.status === "Approved";
+          if (isInApproved && isOutApproved) {
+              dayValidatedMs += sessionDuration;
+          }
+      });
+
+      // Uniform rounding for the day total
+      dayTotalMs = Math.round(dayTotalMs / 60000) * 60000;
+      dayValidatedMs = Math.round(dayValidatedMs / 60000) * 60000;
 
       totalMsAll += dayTotalMs;
       totalValidatedMsAll += dayValidatedMs;
@@ -366,7 +427,7 @@ export default function StudentDashboardPage() {
       totalMs: totalMsAll,
       validatedMs: totalValidatedMsAll,
     };
-  }, [attendance, schedule, now]);
+  }, [attendance, schedule, now, overtimeShifts]);
 
   const totalHours = useMemo(() => {
     return formatHours(aggregateHours.totalMs);

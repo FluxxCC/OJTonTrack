@@ -90,7 +90,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
         console.error("Failed to resolve actor name for email:", e);
       }
 
-      const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+      const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://ojtontrack.site";
 
       if (email && role === "student") {
         if (prevStatus !== newStatus && newStatus === "APPROVED") {
@@ -105,6 +105,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
             <p>Hi ${studentName || "Student"},</p>
             <p>Your OJTonTrack account has been approved.</p>
             <p>You can now sign in using your ID number and password.</p>
+            <p><a href="${appUrl}">Login here</a></p>
             <p>Approved by: ${actorName}</p>
           `;
           await sendTransactionalEmail({

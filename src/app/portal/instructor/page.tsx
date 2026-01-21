@@ -49,8 +49,8 @@ const REPORTS_CACHE_DURATION = 300000; // 5 minutes
 
 // --- Types ---
 
-type AttendanceEntry = { idnumber: string; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; validatedBy?: string };
-type ServerAttendanceEntry = { idnumber: string; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null; validated_at?: string | null };
+type AttendanceEntry = { idnumber: string; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; validatedBy?: string; is_overtime?: boolean };
+type ServerAttendanceEntry = { idnumber: string; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null; validated_at?: string | null; is_overtime?: boolean };
 type ReportEntry = { id: number; title?: string; body?: string; text?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string; idnumber?: string; isViewedByInstructor?: boolean };
 type ReportFile = { name?: string; type?: string } | null;
 type ReportFiles = ReportFile[] | ReportFile | undefined;
@@ -116,18 +116,8 @@ const formatHMS = (ms: number) => {
     return `${h}h ${m}m ${s}s`;
 };
 
-const LiveTotal = ({ baseMs, activeStart, now: propNow }: { baseMs: number; activeStart?: number; now?: number }) => {
-  const [internalNow, setInternalNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (propNow !== undefined) return;
-    if (!activeStart) return;
-    const i = setInterval(() => setInternalNow(Date.now()), 1000);
-    return () => clearInterval(i);
-  }, [activeStart, propNow]);
-
-  const currentNow = propNow !== undefined ? propNow : internalNow;
-  const dynamicMs = activeStart ? Math.max(0, currentNow - activeStart) : 0;
-  return <>{formatHMS(baseMs + dynamicMs)}</>;
+const LiveTotal = ({ baseMs }: { baseMs: number; activeStart?: number; now?: number }) => {
+  return <>{formatHMS(baseMs)}</>;
 };
 
 const MonthDropdown = ({ options, value, onChange }: { options: { key: string, label: string }[], value: string, onChange: (val: string) => void }) => {
@@ -174,7 +164,7 @@ const MonthDropdown = ({ options, value, onChange }: { options: { key: string, l
     );
 };
 
-const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: propNow }: { attendance: AttendanceEntry[], selected: User | null, activeStart?: number, now?: number }) => {
+const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: propNow, overtimeShifts = [] }: { attendance: AttendanceEntry[], selected: User | null, activeStart?: number, now?: number, overtimeShifts?: { student_id: string; date: string; start: number; end: number }[] }) => {
     
     const startOfWeekSunday = (d: Date) => {
         const s = new Date(d);
@@ -363,7 +353,7 @@ const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: pr
         });
 
         const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
-        const computeShift = (entries: AttendanceEntry[], start: number, end: number) => {
+        const computeShift = (entries: AttendanceEntry[], start: number, end: number, isToday: boolean) => {
              let currentIn: number | null = null;
              let duration = 0;
              const BUFFER_START_MS = 30 * 60 * 1000;
@@ -384,6 +374,13 @@ const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: pr
                      currentIn = null;
                  }
              });
+
+             if (currentIn !== null && isToday) {
+                 const nowTs = Date.now();
+                 const effectiveOut = clamp(nowTs, start, end);
+                 if (effectiveOut > currentIn) duration += effectiveOut - currentIn;
+             }
+
              return duration;
         };
 
@@ -392,6 +389,7 @@ const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: pr
             date.setDate(date.getDate() + i);
             const key = date.toLocaleDateString();
             const logs = (logsByDateKey.get(key) || []).sort((a,b) => a.timestamp - b.timestamp);
+            const isToday = new Date().toDateString() === date.toDateString();
             
             const makeTime = (t: {h:number, m:number}) => {
                 const d = new Date(date);
@@ -403,18 +401,29 @@ const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: pr
             const amOut = makeTime(scheduleTemplate.amOut);
             const pmIn = makeTime(scheduleTemplate.pmIn);
             const pmOut = makeTime(scheduleTemplate.pmOut);
-            const otIn = makeTime(scheduleTemplate.otIn);
-            const otOut = makeTime(scheduleTemplate.otOut);
+            
+            // Dynamic OT Lookup
+            const dateStr = date.toLocaleDateString('en-CA');
+            const otShift = overtimeShifts.find(s => s.student_id === selected.idnumber && s.date === dateStr);
+            
+            let otIn, otOut;
+            if (otShift) {
+                otIn = otShift.start;
+                otOut = otShift.end;
+            } else {
+                otIn = makeTime(scheduleTemplate.otIn);
+                otOut = makeTime(scheduleTemplate.otOut);
+            }
 
             dayMs[i] = 
-                computeShift(logs, amIn, amOut) +
-                computeShift(logs, pmIn, pmOut) +
-                computeShift(logs, otIn, otOut);
+                computeShift(logs, amIn, amOut, isToday) +
+                computeShift(logs, pmIn, pmOut, isToday) +
+                computeShift(logs, otIn, otOut, isToday);
         }
 
         const labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         return labels.map((label, i) => ({ date: label, ms: dayMs[i], hours: dayMs[i] / (1000 * 60 * 60) }));
-    }, [selected, attendance, selectedWeekStart, currentTick, scheduleConfig]);
+    }, [selected, attendance, selectedWeekStart, scheduleConfig, overtimeShifts]);
 
     const rangeTotalMs = useMemo(() => {
         return studentChartData.reduce((acc, d) => acc + (d.ms || 0), 0);
@@ -550,7 +559,8 @@ const StudentDetailsPanel = ({
     openReportsModal,
     onViewAttendanceEntry,
     evaluation,
-    openEvaluationModal
+    openEvaluationModal,
+    overtimeShifts = []
 }: { 
     selected: User | null, 
     attendance: AttendanceEntry[], 
@@ -564,10 +574,11 @@ const StudentDetailsPanel = ({
     openReportsModal: () => void,
     onViewAttendanceEntry: (entry: AttendanceEntry) => void,
     evaluation: EvaluationDetail | null,
-    openEvaluationModal: () => void
+    openEvaluationModal: () => void,
+    overtimeShifts?: { student_id: string; date: string; start: number; end: number }[]
 }) => {
     const activeStart = selected ? activeSessions[selected.idnumber] : undefined;
-    const [now, setNow] = useState(() => Date.now());
+    const now = Date.now();
     
     // Evaluation Toggle State
     const [showEvalRestriction, setShowEvalRestriction] = useState(false);
@@ -588,13 +599,6 @@ const StudentDetailsPanel = ({
         }
     };
     
-    useEffect(() => {
-        if (!activeStart) return;
-        setNow(Date.now());
-        const i = setInterval(() => setNow(Date.now()), 1000);
-        return () => clearInterval(i);
-    }, [activeStart]);
-
     if (!selected) {
         return (
             <div className="flex-1 flex flex-col items-center justify-center text-gray-400 bg-white rounded-2xl border border-gray-200 border-dashed">
@@ -636,7 +640,7 @@ const StudentDetailsPanel = ({
                     : 'bg-gray-50 text-gray-600 border-gray-200'
                         }`}>
                         <span className={`h-2 w-2 rounded-full ${(attendanceSummary[selected.idnumber] || 0) / (1000 * 60 * 60) >= 486 ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
-                        <LiveTotal baseMs={(attendanceSummary[selected.idnumber] || 0)} activeStart={activeSessions[selected.idnumber]} now={now} /> / 486 Hours
+                        <LiveTotal baseMs={(attendanceSummary[selected.idnumber] || 0)} /> / 486 Hours
                         </div>
                     
                     <label className="flex items-center gap-3 cursor-pointer select-none bg-gray-50 px-3 py-2 rounded-xl border border-gray-200 hover:border-gray-300 transition-colors">
@@ -661,6 +665,7 @@ const StudentDetailsPanel = ({
                 selected={selected}
                 activeStart={activeSessions[selected.idnumber]}
                 now={now}
+                overtimeShifts={overtimeShifts}
                 />
             </div>
 
@@ -891,55 +896,22 @@ interface StudentsViewProps {
   const StudentAttendanceDetailView = ({ 
     student, 
     attendance, 
+    overtimeShifts,
+    scheduleConfig: globalScheduleConfig,
     onBack,
     evaluationStatuses,
     toggleEvaluation,
   }: { 
     student: User, 
     attendance: AttendanceEntry[], 
+    overtimeShifts: { student_id: string; date: string; start: number; end: number }[],
+    scheduleConfig: any,
     onBack: () => void,
     evaluationStatuses: Record<string, boolean>,
     toggleEvaluation: (id: string, current: boolean) => void,
   }) => {
     const [now] = useState(() => Date.now());
     const [monthFilter, setMonthFilter] = useState("");
-    const [scheduleConfig, setScheduleConfig] = useState<{
-        amIn: string; amOut: string;
-        pmIn: string; pmOut: string;
-        otIn: string; otOut: string;
-    } | null>(null);
-
-    useEffect(() => {
-        const fetchSchedule = async () => {
-            try {
-                const res = await fetch('/api/shifts');
-                const data = await res.json();
-                if (data.shifts) {
-                    const config = {
-                        amIn: "07:00", amOut: "11:00",
-                        pmIn: "13:00", pmOut: "17:00",
-                        otIn: "17:00", otOut: "18:00"
-                    };
-                    data.shifts.forEach((s: any) => {
-                        if (s.shift_name === "Morning Shift") {
-                            config.amIn = s.official_start;
-                            config.amOut = s.official_end;
-                        } else if (s.shift_name === "Afternoon Shift") {
-                            config.pmIn = s.official_start;
-                            config.pmOut = s.official_end;
-                        } else if (s.shift_name === "Overtime Shift") {
-                            config.otIn = s.official_start;
-                            config.otOut = s.official_end;
-                        }
-                    });
-                    setScheduleConfig(config);
-                }
-            } catch (e) {
-                console.error("Failed to fetch schedule", e);
-            }
-        };
-        fetchSchedule();
-    }, []);
 
     const monthOptions = useMemo(() => {
         const map = new Map<string, string>();
@@ -983,12 +955,11 @@ interface StudentsViewProps {
 
     // Helper to format hours
     const formatHours = (ms: number) => {
-        if (!ms) return "0h 0m 0s";
+        if (!ms) return "0h 0m";
         const totalSeconds = Math.floor(ms / 1000);
         const h = Math.floor(totalSeconds / 3600);
         const m = Math.floor((totalSeconds % 3600) / 60);
-        const s = totalSeconds % 60;
-        return `${h}h ${m}m ${s}s`;
+        return `${h}h ${m}m`;
     };
 
     // Helper to format time
@@ -1017,6 +988,7 @@ interface StudentsViewProps {
 
                 const dayDate = new Date(day.date);
                 dayDate.setHours(0, 0, 0, 0);
+                const isToday = new Date().toDateString() === dayDate.toDateString();
 
                 const buildShift = (timeStr: string) => {
                     const [h, m] = timeStr.split(":").map(Number);
@@ -1025,33 +997,30 @@ interface StudentsViewProps {
                     return d.getTime();
                 };
 
-                let schedule: {
-                    amIn: number;
-                    amOut: number;
-                    pmIn: number;
-                    pmOut: number;
-                    otStart: number;
-                    otEnd: number;
+                // Use passed config or default
+                const config = globalScheduleConfig || {
+                    amIn: "08:00", amOut: "12:00",
+                    pmIn: "13:00", pmOut: "17:00",
+                    otIn: "17:00", otOut: "18:00"
                 };
 
-                if (scheduleConfig) {
-                    schedule = {
-                        amIn: buildShift(scheduleConfig.amIn),
-                        amOut: buildShift(scheduleConfig.amOut),
-                        pmIn: buildShift(scheduleConfig.pmIn),
-                        pmOut: buildShift(scheduleConfig.pmOut),
-                        otStart: buildShift(scheduleConfig.otIn),
-                        otEnd: buildShift(scheduleConfig.otOut),
-                    };
-                } else {
-                    schedule = {
-                        amIn: buildShift("08:00"),
-                        amOut: buildShift("12:00"),
-                        pmIn: buildShift("13:00"),
-                        pmOut: buildShift("17:00"),
-                        otStart: buildShift("17:00"),
-                        otEnd: buildShift("18:00"),
-                    };
+                let schedule = {
+                    amIn: buildShift(config.amIn),
+                    amOut: buildShift(config.amOut),
+                    pmIn: buildShift(config.pmIn),
+                    pmOut: buildShift(config.pmOut),
+                    otStart: buildShift(config.otIn),
+                    otEnd: buildShift(config.otOut),
+                };
+                
+                // Dynamic OT check
+                const dateStr = dayDate.getFullYear() + "-" + 
+                              String(dayDate.getMonth() + 1).padStart(2, '0') + "-" + 
+                              String(dayDate.getDate()).padStart(2, '0');
+                const dynamicOt = overtimeShifts?.find(s => s.student_id === student.idnumber && s.date === dateStr);
+                if (dynamicOt) {
+                    schedule.otStart = dynamicOt.start;
+                    schedule.otEnd = dynamicOt.end;
                 }
 
                 const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
@@ -1064,39 +1033,61 @@ interface StudentsViewProps {
                 ) => {
                     let currentIn: number | null = null;
                     let duration = 0;
-                    // 30 mins buffer for start, 4 hours for end (clamped)
+                    // 30 mins buffer for start, 12 hours for end (to allow late outs to close the shift)
                     const BUFFER_START_MS = 30 * 60 * 1000;
-                    const BUFFER_END_MS = 4 * 60 * 60 * 1000;
+                    const BUFFER_END_MS = 12 * 60 * 60 * 1000;
                     const searchStart = windowStart - BUFFER_START_MS;
                     const searchEnd = windowEnd + BUFFER_END_MS;
 
                     logs.forEach(log => {
                         if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
-                        if (requireApproved && log.status !== "Approved") return;
+                        if (requireApproved) {
+                             const status = String(log.status || "").toUpperCase();
+                             const isApproved = status === "APPROVED" || status === "VALIDATED" || !!log.validatedBy;
+                             if (!isApproved) return;
+                        }
+                        
+                        // Floor to minute
+                        const logTime = Math.floor(log.timestamp / 60000) * 60000;
+
                         if (log.type === "in") {
-                            if (log.timestamp > windowEnd) return;
-                            const effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
+                            if (logTime > windowEnd) return;
+                            // Clamp start
+                            let effectiveIn = clamp(logTime, windowStart, windowEnd);
                             currentIn = effectiveIn;
                         } else if (log.type === "out") {
                             if (currentIn === null) return;
-                            const effectiveOut = clamp(log.timestamp, windowStart, windowEnd);
+                            // Clamp end
+                            let effectiveOut = clamp(logTime, windowStart, windowEnd);
                             if (effectiveOut > currentIn) {
                                 duration += effectiveOut - currentIn;
                             }
                             currentIn = null;
                         }
                     });
+                    
+                    // Handle ongoing session for today
+                    if (currentIn !== null && isToday) {
+                         const nowFl = Math.floor(Date.now() / 60000) * 60000;
+                         const effectiveOut = clamp(nowFl, windowStart, windowEnd);
+                         if (effectiveOut > currentIn) {
+                             duration += effectiveOut - currentIn;
+                         }
+                    }
 
                     return duration;
                 };
 
-                const dayTotalAm = computeShiftDuration(dayLogs, schedule.amIn, schedule.amOut, false);
-                const dayTotalPm = computeShiftDuration(dayLogs, schedule.pmIn, schedule.pmOut, false);
-                const dayTotalOt = computeShiftDuration(dayLogs, schedule.otStart, schedule.otEnd, false);
+                const regularLogs = dayLogs.filter(l => !l.is_overtime);
+                const overtimeLogs = dayLogs.filter(l => l.is_overtime);
 
-                const dayValidatedAm = computeShiftDuration(dayLogs, schedule.amIn, schedule.amOut, true);
-                const dayValidatedPm = computeShiftDuration(dayLogs, schedule.pmIn, schedule.pmOut, true);
-                const dayValidatedOt = computeShiftDuration(dayLogs, schedule.otStart, schedule.otEnd, true);
+                const dayTotalAm = computeShiftDuration(regularLogs, schedule.amIn, schedule.amOut, false);
+                const dayTotalPm = computeShiftDuration(regularLogs, schedule.pmIn, schedule.pmOut, false);
+                const dayTotalOt = computeShiftDuration(overtimeLogs, schedule.otStart, schedule.otEnd, false);
+
+                const dayValidatedAm = computeShiftDuration(regularLogs, schedule.amIn, schedule.amOut, true);
+                const dayValidatedPm = computeShiftDuration(regularLogs, schedule.pmIn, schedule.pmOut, true);
+                const dayValidatedOt = computeShiftDuration(overtimeLogs, schedule.otStart, schedule.otEnd, true);
 
                 const dayTotalMs = dayTotalAm + dayTotalPm + dayTotalOt;
                 const dayValidatedMs = dayValidatedAm + dayValidatedPm + dayValidatedOt;
@@ -1105,42 +1096,49 @@ interface StudentsViewProps {
                 totalValidatedMsAll += dayValidatedMs;
 
                 // Smart Pairing Logic to handle late lunches and avoid duplicates
-                const sortedLogs = [...dayLogs].sort((a, b) => a.timestamp - b.timestamp);
+                const sortedRegular = [...regularLogs].sort((a, b) => a.timestamp - b.timestamp);
+                const sortedOvertime = [...overtimeLogs].sort((a, b) => a.timestamp - b.timestamp);
+                
                 const noonCutoff = new Date(day.date).setHours(12, 30, 0, 0);
 
-                // 1. Identify Start Points (INs)
-                const s1 = sortedLogs.find(l => l.type === "in" && l.timestamp < noonCutoff) || null;
-                const s3 = sortedLogs.find(l => l.type === "in" && l.timestamp >= noonCutoff) || null;
+                // 1. Identify Start Points (INs) - Regular
+                const s1 = sortedRegular.find(l => l.type === "in" && l.timestamp < noonCutoff) || null;
+                const s3 = sortedRegular.find(l => l.type === "in" && l.timestamp >= noonCutoff) || null;
                 
-                // OT IN: strictly after PM IN (if exists), else just after OT Start
-                const s5 = sortedLogs.find(l => 
+                // OT IN: First from overtime logs
+                // Ensure we don't pick up the same timestamp as a regular log (if duplicate logs exist)
+                const s5 = sortedOvertime.find(l => 
                     l.type === "in" && 
-                    l.timestamp >= schedule.otStart && 
-                    (!s3 || l.timestamp > s3.timestamp)
+                    (!s1 || l.timestamp !== s1.timestamp) && 
+                    (!s3 || l.timestamp !== s3.timestamp)
                 ) || null;
 
                 // 2. Identify End Points (OUTs) based on Pairs
                 
-                // s2 (AM OUT): Last OUT after s1 but before s3 (if s3 exists)
+                // s2 (AM OUT): Last regular OUT after s1 but before s3 (if s3 exists)
                 let s2: AttendanceEntry | null = null;
                 if (s1) {
                     const searchEnd = s3 ? s3.timestamp : (new Date(day.date).setHours(23, 59, 59, 999));
-                    const candidates = sortedLogs.filter(l => l.type === "out" && l.timestamp > s1.timestamp && l.timestamp < searchEnd);
+                    const candidates = sortedRegular.filter(l => l.type === "out" && l.timestamp > s1.timestamp && l.timestamp < searchEnd);
                     s2 = candidates.pop() || null;
                 }
 
-                // s4 (PM OUT): Last OUT after s3 but before s5 (if s5 exists)
+                // s4 (PM OUT): Last regular OUT after s3
                 let s4: AttendanceEntry | null = null;
                 if (s3) {
-                    const searchEnd = s5 ? s5.timestamp : (new Date(day.date).setHours(23, 59, 59, 999));
-                    const candidates = sortedLogs.filter(l => l.type === "out" && l.timestamp > s3.timestamp && l.timestamp < searchEnd);
+                    const candidates = sortedRegular.filter(l => l.type === "out" && l.timestamp > s3.timestamp);
                     s4 = candidates.pop() || null;
                 }
 
-                // s6 (OT OUT): Last OUT after s5
+                // s6 (OT OUT): Last OT OUT after s5
                 let s6: AttendanceEntry | null = null;
                 if (s5) {
-                    const candidates = sortedLogs.filter(l => l.type === "out" && l.timestamp > s5.timestamp);
+                    const candidates = sortedOvertime.filter(l => 
+                        l.type === "out" && 
+                        l.timestamp > s5.timestamp &&
+                        (!s2 || l.timestamp !== s2.timestamp) &&
+                        (!s4 || l.timestamp !== s4.timestamp)
+                    );
                     s6 = candidates.pop() || null;
                 }
 
@@ -1150,7 +1148,7 @@ interface StudentsViewProps {
             });
 
         return { days: processedDays, overallTotal: totalMsAll, overallValidated: totalValidatedMsAll };
-    }, [student, filteredAttendance, now]);
+    }, [student, filteredAttendance, now, globalScheduleConfig, overtimeShifts]);
 
     const [showEvalRestriction, setShowEvalRestriction] = useState(false);
     const [detailEvaluation, setDetailEvaluation] = useState<EvaluationDetail | null>(null);
@@ -1543,6 +1541,7 @@ interface StudentsViewProps {
     attendanceSummary,
     evaluationStatuses,
     toggleEvaluation,
+    overtimeShifts,
   }: {
     students: User[];
     attendance: AttendanceEntry[];
@@ -1550,6 +1549,7 @@ interface StudentsViewProps {
     attendanceSummary: Record<string, number>;
     evaluationStatuses: Record<string, boolean>;
     toggleEvaluation: (id: string, current: boolean) => void;
+    overtimeShifts: { student_id: string; date: string; start: number; end: number }[];
   }) => {
 
     // 1. Calculate available weeks dynamically based on attendance data
@@ -1628,6 +1628,7 @@ interface StudentsViewProps {
     }, [availableWeeks, selectedWeekStart]);
 
     const [selectedStudentDetail, setSelectedStudentDetail] = useState<User | null>(null);
+    const [selected, setSelected] = useState<User | null>(null);
     const [filterCourse, setFilterCourse] = useState("");
     const [filterSection, setFilterSection] = useState("");
     const [searchTerm, setSearchTerm] = useState("");
@@ -1784,6 +1785,9 @@ interface StudentsViewProps {
                     };
                 }
 
+                const regularLogs = dayLogs.filter(l => !l.is_overtime);
+                const overtimeLogs = dayLogs.filter(l => l.is_overtime);
+
                 const computeShiftDuration = (
                     entries: AttendanceEntry[],
                     windowStart: number,
@@ -1792,9 +1796,9 @@ interface StudentsViewProps {
                 ) => {
                     let currentIn: number | null = null;
                     let duration = 0;
-                    // 30 mins buffer for start, 4 hours for end (clamped)
+                    // 30 mins buffer for start, 12 hours for end (clamped)
                     const BUFFER_START_MS = 30 * 60 * 1000;
-                    const BUFFER_END_MS = 4 * 60 * 60 * 1000;
+                    const BUFFER_END_MS = 12 * 60 * 60 * 1000;
                     const searchStart = windowStart - BUFFER_START_MS;
                     const searchEnd = windowEnd + BUFFER_END_MS;
 
@@ -1805,11 +1809,13 @@ interface StudentsViewProps {
                         }
                         if (log.type === "in") {
                             if (log.timestamp > windowEnd) return;
-                            const effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
+                            let effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
+                            effectiveIn = Math.floor(effectiveIn / 60000) * 60000;
                             currentIn = effectiveIn;
                         } else if (log.type === "out") {
                             if (currentIn === null) return;
-                            const effectiveOut = clamp(log.timestamp, windowStart, windowEnd);
+                            let effectiveOut = clamp(log.timestamp, windowStart, windowEnd);
+                            effectiveOut = Math.floor(effectiveOut / 60000) * 60000;
                             if (effectiveOut > currentIn) {
                                 duration += effectiveOut - currentIn;
                             }
@@ -1821,13 +1827,35 @@ interface StudentsViewProps {
                         // Live calculation removed to enforce strict pairing
                     }
 
+                    // Uniform rounding: Floor to nearest minute
+                    return Math.floor(duration / 60000) * 60000;
+                };
+
+                const computeOtDuration = (logs: AttendanceEntry[]) => {
+                    let duration = 0;
+                    let currentIn: number | null = null;
+                    const sorted = [...logs].sort((a,b) => a.timestamp - b.timestamp);
+                    
+                    sorted.forEach(log => {
+                        if (log.type === "in") {
+                            currentIn = Math.floor(log.timestamp / 60000) * 60000;
+                        } else if (log.type === "out") {
+                            if (currentIn !== null) {
+                                const effectiveOut = Math.floor(log.timestamp / 60000) * 60000;
+                                if (effectiveOut > currentIn) {
+                                    duration += effectiveOut - currentIn;
+                                }
+                                currentIn = null;
+                            }
+                        }
+                    });
                     return duration;
                 };
 
                 const dayTotalMs =
-                    computeShiftDuration(dayLogs, schedule.amIn, schedule.amOut, false) +
-                    computeShiftDuration(dayLogs, schedule.pmIn, schedule.pmOut, false) +
-                    computeShiftDuration(dayLogs, schedule.otStart, schedule.otEnd, false);
+                    computeShiftDuration(regularLogs, schedule.amIn, schedule.amOut, false) +
+                    computeShiftDuration(regularLogs, schedule.pmIn, schedule.pmOut, false) +
+                    computeOtDuration(overtimeLogs);
 
                 let dayIdx = day.date.getDay() - 1;
                 if (dayIdx === -1) dayIdx = 6;
@@ -1847,8 +1875,7 @@ interface StudentsViewProps {
         const totalSeconds = Math.floor(ms / 1000);
         const h = Math.floor(totalSeconds / 3600);
         const m = Math.floor((totalSeconds % 3600) / 60);
-        const s = totalSeconds % 60;
-        return `${h}h ${m}m ${s}s`;
+        return `${h}h ${m}m`;
     };
 
     const weekNumber = useMemo(() => {
@@ -1878,6 +1905,8 @@ interface StudentsViewProps {
             <StudentAttendanceDetailView 
                 student={selectedStudentDetail}
                 attendance={attendance}
+                overtimeShifts={overtimeShifts}
+                scheduleConfig={scheduleConfig}
                 onBack={() => setSelectedStudentDetail(null)}
                 evaluationStatuses={evaluationStatuses}
                 toggleEvaluation={toggleEvaluation}
@@ -2892,6 +2921,8 @@ export default function InstructorPage() {
   const [isMobile, setIsMobile] = useState(false);
   const [attendanceSummary, setAttendanceSummary] = useState<Record<string, number>>({});
   const [activeSessions, setActiveSessions] = useState<Record<string, number>>({});
+  const [serverSummary, setServerSummary] = useState<Record<string, number>>({});
+  const [overtimeShifts, setOvertimeShifts] = useState<{ student_id: string; date: string; start: number; end: number }[]>([]);
   const [evaluationStatuses, setEvaluationStatuses] = useState<Record<string, boolean>>({});
   const [allowApproval, setAllowApproval] = useState<boolean>(true);
   const [broadcastChannel, setBroadcastChannel] = useState<RealtimeChannel | null>(null);
@@ -2908,6 +2939,44 @@ export default function InstructorPage() {
   const [availableCourses, setAvailableCourses] = useState<Course[]>([]);
   const [availableSections, setAvailableSections] = useState<Section[]>([]);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+
+  const [scheduleConfig, setScheduleConfig] = useState<{
+    amIn: string; amOut: string;
+    pmIn: string; pmOut: string;
+    otIn: string; otOut: string;
+  } | null>(null);
+
+  useEffect(() => {
+    const fetchSchedule = async () => {
+        try {
+            const res = await fetch('/api/shifts');
+            const data = await res.json();
+            if (data.shifts) {
+                const config = {
+                    amIn: "07:00", amOut: "11:00",
+                    pmIn: "13:00", pmOut: "17:00",
+                    otIn: "17:00", otOut: "18:00"
+                };
+                data.shifts.forEach((s: any) => {
+                    if (s.shift_name === "Morning Shift") {
+                        config.amIn = s.official_start;
+                        config.amOut = s.official_end;
+                    } else if (s.shift_name === "Afternoon Shift") {
+                        config.pmIn = s.official_start;
+                        config.pmOut = s.official_end;
+                    } else if (s.shift_name === "Overtime Shift") {
+                        config.otIn = s.official_start;
+                        config.otOut = s.official_end;
+                    }
+                });
+                setScheduleConfig(config);
+            }
+        } catch (e) {
+            console.error("Failed to fetch schedule", e);
+        }
+    };
+    fetchSchedule();
+  }, []);
 
   // User Info
   const myIdnumber = useMemo(() => {
@@ -3013,6 +3082,8 @@ export default function InstructorPage() {
         const res = await fetch("/api/attendance/summary", { cache: "no-store" });
         const json = await res.json();
         if (json.activeSessions) setActiveSessions(json.activeSessions);
+        if (json.summary) setServerSummary(json.summary);
+        if (Array.isArray(json.overtimeShifts)) setOvertimeShifts(json.overtimeShifts);
         if (Array.isArray(json.recentAttendance)) {
           setRecentAttendance(json.recentAttendance.map((e: { idnumber: string; type: "in" | "out"; ts: number }) => ({ idnumber: e.idnumber, type: e.type, ts: Number(e.ts) })));
         }
@@ -3227,7 +3298,8 @@ export default function InstructorPage() {
               photoDataUrl: e.photourl,
               status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
               validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
-              validatedBy: e.validated_by || undefined
+              validatedBy: e.validated_by || undefined,
+              is_overtime: e.is_overtime
             };
           }) as AttendanceEntry[];
           setAttendance(mapped);
@@ -3241,152 +3313,80 @@ export default function InstructorPage() {
   }, [refreshTrigger]);
 
   useEffect(() => {
-    if (!attendance || attendance.length === 0) {
-      setAttendanceSummary({});
-      return;
-    }
-
+    const nextSummary: Record<string, number> = { ...serverSummary };
     const nowTs = Date.now();
-    const byStudent = new Map<string, AttendanceEntry[]>();
 
-    attendance.forEach(log => {
-      const id = (log as any).idnumber as string | undefined;
-      if (!id) return;
-      if (!byStudent.has(id)) byStudent.set(id, []);
-      byStudent.get(id)!.push(log);
-    });
+    const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
 
-    const nextSummary: Record<string, number> = {};
+    const calculateOngoing = (start: number, studentId: string) => {
+        const d = new Date(start);
+        const dayDate = new Date(d);
+        dayDate.setHours(0,0,0,0);
 
-    byStudent.forEach((logs, idnumber) => {
-      if (!logs.length) {
-        nextSummary[idnumber] = 0;
-        return;
-      }
-
-      const grouped = new Map<string, { date: Date; logs: AttendanceEntry[] }>();
-      logs.forEach(log => {
-        const date = new Date(log.timestamp);
-        const key = date.toLocaleDateString();
-        if (!grouped.has(key)) grouped.set(key, { date, logs: [] });
-        grouped.get(key)!.logs.push(log);
-      });
-
-      let totalValidatedMsAll = 0;
-
-      grouped.forEach(day => {
-        const dayLogs = day.logs.slice().sort((a, b) => a.timestamp - b.timestamp);
-
-        const dayDate = new Date(day.date);
-        dayDate.setHours(0, 0, 0, 0);
-
-        const buildShift = (timeStr: string) => {
-          const [h, m] = timeStr.split(":").map(Number);
-          const d = new Date(dayDate.getTime());
-          d.setHours(h || 0, m || 0, 0, 0);
-          return d.getTime();
+        const makeTime = (t: string) => {
+            const [h, m] = t.split(":").map(Number);
+            const ts = new Date(dayDate);
+            ts.setHours(h, m, 0, 0);
+            return ts.getTime();
         };
 
-        let schedule: {
-          amIn: number;
-          amOut: number;
-          pmIn: number;
-          pmOut: number;
-          otStart: number;
-          otEnd: number;
+        const config = scheduleConfig || {
+             amIn: "07:00", amOut: "11:00",
+             pmIn: "13:00", pmOut: "17:00",
+             otIn: "17:00", otOut: "18:00"
         };
 
-        try {
-          const stored = localStorage.getItem(`schedule_${idnumber}`) || localStorage.getItem("schedule_default");
-          if (stored) {
-            const parsed = JSON.parse(stored);
-            schedule = {
-              amIn: buildShift(parsed.amIn || "08:00"),
-              amOut: buildShift(parsed.amOut || "12:00"),
-              pmIn: buildShift(parsed.pmIn || "13:00"),
-              pmOut: buildShift(parsed.pmOut || "17:00"),
-              otStart: buildShift(parsed.overtimeIn || "17:00"),
-              otEnd: buildShift(parsed.overtimeOut || "18:00"),
-            };
-          } else {
-            schedule = {
-              amIn: buildShift("08:00"),
-              amOut: buildShift("12:00"),
-              pmIn: buildShift("13:00"),
-              pmOut: buildShift("17:00"),
-              otStart: buildShift("17:00"),
-              otEnd: buildShift("18:00"),
-            };
-          }
-        } catch {
-          schedule = {
-            amIn: buildShift("08:00"),
-            amOut: buildShift("12:00"),
-            pmIn: buildShift("13:00"),
-            pmOut: buildShift("17:00"),
-            otStart: buildShift("17:00"),
-            otEnd: buildShift("18:00"),
-          };
+        const amIn = makeTime(config.amIn);
+        const amOut = makeTime(config.amOut);
+        const pmIn = makeTime(config.pmIn);
+        const pmOut = makeTime(config.pmOut);
+        
+        // Dynamic OT Lookup
+        const dateStr = dayDate.toLocaleDateString('en-CA');
+        const otShift = overtimeShifts.find(s => s.student_id === studentId && s.date === dateStr);
+        
+        let otIn, otOut;
+        if (otShift) {
+             otIn = otShift.start;
+             otOut = otShift.end;
+        } else {
+             otIn = makeTime(config.otIn);
+             otOut = makeTime(config.otOut);
         }
+        
+        const floorToMin = (ms: number) => Math.floor(ms / 60000) * 60000;
+        const startFl = floorToMin(start);
+        const nowFl = floorToMin(nowTs);
 
-        const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
-
-        const computeShiftDuration = (
-          entries: AttendanceEntry[],
-          windowStart: number,
-          windowEnd: number,
-          requireApproved: boolean
-        ) => {
-          if (windowStart === null || windowEnd === null) return 0; // Guard against null window
-          let currentIn: number | null = null;
-          let duration = 0;
-          // 30 mins buffer for start, 4 hours for end (clamped)
-          const BUFFER_START_MS = 30 * 60 * 1000;
-          const BUFFER_END_MS = 4 * 60 * 60 * 1000;
-          const searchStart = windowStart - BUFFER_START_MS;
-          const searchEnd = windowEnd + BUFFER_END_MS;
-
-          entries.forEach(log => {
-            if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
-            if (requireApproved && log.status !== "Approved") return;
-            if (log.type === "in") {
-              if (log.timestamp > windowEnd) return;
-              const effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
-              currentIn = effectiveIn;
-            } else if (log.type === "out") {
-              if (currentIn === null) return;
-              const effectiveOut = clamp(log.timestamp, windowStart, windowEnd);
-              if (effectiveOut > currentIn) {
-                duration += effectiveOut - currentIn;
-              }
-              currentIn = null;
-            }
-          });
-
-          if (currentIn !== null) {
-             // Live calculation removed to enforce strict pairing - same as other views
-             // const effectiveOut = clamp(nowTs, windowStart, windowEnd);
-             // if (effectiveOut > currentIn) {
-             //   duration += effectiveOut - currentIn;
-             // }
-          }
-
-          return duration;
+        const BUFFER_START_MS = 30 * 60 * 1000;
+        const BUFFER_END_MS = 4 * 60 * 60 * 1000;
+        
+        const calcWindow = (wS: number, wE: number) => {
+             if (start < wS - BUFFER_START_MS || start > wE + BUFFER_END_MS) return 0;
+             const inT = clamp(startFl, wS, wE);
+             const outT = clamp(nowFl, wS, wE);
+             if (outT > inT) return outT - inT;
+             return 0;
         };
 
-        const dayValidatedAm = computeShiftDuration(dayLogs, schedule.amIn, schedule.amOut, true);
-        const dayValidatedPm = computeShiftDuration(dayLogs, schedule.pmIn, schedule.pmOut, true);
-        const dayValidatedOt = computeShiftDuration(dayLogs, schedule.otStart, schedule.otEnd, true);
+        let dur = 0;
+        dur += calcWindow(amIn, amOut);
+        dur += calcWindow(pmIn, pmOut);
+        dur += calcWindow(otIn, otOut);
 
-        const dayValidatedMs = dayValidatedAm + dayValidatedPm + dayValidatedOt;
-        totalValidatedMsAll += dayValidatedMs;
-      });
+        return dur;
+    };
 
-      nextSummary[idnumber] = totalValidatedMsAll;
+    Object.keys(activeSessions).forEach(id => {
+       const start = activeSessions[id];
+       if (start) {
+          const ongoing = calculateOngoing(start, id);
+          nextSummary[id] = (nextSummary[id] || 0) + ongoing;
+       }
     });
 
     setAttendanceSummary(nextSummary);
-  }, [attendance]);
+  }, [serverSummary, activeSessions, scheduleConfig, overtimeShifts]);
 
   // Realtime Attendance subscription removed - relying on global attendance refreshTrigger
   // which updates whenever any attendance record changes (insert/update/delete)
@@ -4897,7 +4897,7 @@ export default function InstructorPage() {
 
         {/* View Area */}
         <main className="flex-1 overflow-auto p-4 lg:p-8">
-          {activeTab === "attendance" && <AttendanceMonitoringView students={students} attendance={attendance} onNavigateToApproval={() => setActiveTab("approval")} attendanceSummary={attendanceSummary} evaluationStatuses={evaluationStatuses} toggleEvaluation={toggleEvaluation} />}
+          {activeTab === "attendance" && <AttendanceMonitoringView students={students} attendance={attendance} onNavigateToApproval={() => setActiveTab("approval")} attendanceSummary={attendanceSummary} evaluationStatuses={evaluationStatuses} toggleEvaluation={toggleEvaluation} overtimeShifts={overtimeShifts} />}
           {activeTab === "reports" && <ReportsView />}
           {activeTab === "approval" && (allowApproval ? <AccountApprovalView /> : <ApprovalRestrictedView />)}
           {activeTab === "profile" && <ProfileView />}

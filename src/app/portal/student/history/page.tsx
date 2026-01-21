@@ -2,8 +2,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { StudentBottomNav, StudentHeader } from "../ui";
 
-type AttendanceEntry = { type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" };
-type ServerAttendanceEntry = { type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null };
+type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" };
+type ServerAttendanceEntry = { id?: number; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null };
 
 export default function StudentHistoryPage() {
   const idnumber = useMemo(() => {
@@ -12,12 +12,22 @@ export default function StudentHistoryPage() {
   }, []);
   const [attendance, setAttendance] = useState<AttendanceEntry[]>([]);
 
+  const uniqueAttendance = useMemo(() => {
+    const seen = new Set<string>();
+    return attendance.filter(a => {
+      const key = a.id ? String(a.id) : `${a.timestamp}-${a.type}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [attendance]);
+
   useEffect(() => {
     if (!idnumber) return;
     let active = true;
     const load = async () => {
       try {
-        const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=200`, { cache: "no-store" });
+        const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=1000`, { cache: "no-store" });
         const json = await res.json();
         if (active && res.ok && Array.isArray(json.entries)) {
           const mapped = json.entries.map((e: ServerAttendanceEntry) => {
@@ -26,6 +36,7 @@ export default function StudentHistoryPage() {
             const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
             const status = isRejected ? "Rejected" : isApproved ? "Approved" : "Pending";
             return {
+              id: e.id,
               type: e.type,
               timestamp: e.ts,
               photoDataUrl: e.photourl,
@@ -57,10 +68,10 @@ export default function StudentHistoryPage() {
           <div className="rounded-3xl bg-white border border-gray-200 shadow-sm p-4 sm:p-6">
             <div className="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">Attendance History</div>
             <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-2 custom-scrollbar">
-              {attendance.length === 0 ? (
+              {uniqueAttendance.length === 0 ? (
                 <div className="text-center py-8 text-gray-500 text-sm">No attendance records found.</div>
               ) : (
-                attendance.slice().sort((a,b) => Number(b.timestamp) - Number(a.timestamp)).map((entry, idx) => (
+                uniqueAttendance.slice().sort((a,b) => Number(b.timestamp) - Number(a.timestamp)).map((entry, idx) => (
                   <div key={idx} className="flex items-center gap-4 p-3 rounded-xl bg-gray-50 border border-gray-100">
                     <div className="h-12 w-20 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200">
                       {entry.photoDataUrl && (

@@ -23,13 +23,13 @@ export async function GET(req: Request) {
     if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
     const url = new URL(req.url);
     const idnumber = String(url.searchParams.get("idnumber") || "").trim();
-    const limit = Number(url.searchParams.get("limit") || 50);
+    const limit = Number(url.searchParams.get("limit") || 1000);
     
     let query = admin
       .from("attendance")
-      .select("id,idnumber,role,course,type,ts,photourl,status,createdat,validated_by,validated_at")
+      .select("id,idnumber,role,course,type,ts,photourl,status,createdat,validated_by,validated_at,is_overtime")
       .order("ts", { ascending: false })
-      .limit(Math.max(1, Math.min(200, limit)));
+      .limit(Math.max(1, Math.min(10000, limit)));
 
     if (idnumber) {
       query = query.eq("idnumber", idnumber);
@@ -156,6 +156,27 @@ export async function POST(req: Request) {
 
     const ts = manualTimestamp || Date.now();
 
+    // Check if this timestamp falls within an authorized overtime shift
+    let is_overtime = false;
+    try {
+        // We look for a shift where start <= ts <= end
+        // overtime_shifts stores start/end as BigInt/Number timestamps
+        const { data: otShift } = await admin
+            .from("overtime_shifts")
+            .select("id")
+            .eq("student_id", idnumber)
+            .lte("overtime_start", ts)
+            .gte("overtime_end", ts)
+            .limit(1)
+            .maybeSingle();
+            
+        if (otShift) {
+            is_overtime = true;
+        }
+    } catch (err) {
+        console.error("Error checking overtime status:", err);
+    }
+
     const createdat = new Date().toISOString();
     const payload = {
       idnumber,
@@ -169,6 +190,7 @@ export async function POST(req: Request) {
       validated_by: validatedBy,
       validated_at: validatedBy ? createdat : null,
       createdat,
+      is_overtime
     };
 
     const insertRes = await admin.from("attendance").insert(payload).select("id").maybeSingle();
@@ -260,7 +282,7 @@ export async function PUT(req: Request) {
     if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
     
     const body = await req.json().catch(() => ({}));
-    const { id, ts, type, adminId, adminRole } = body;
+    const { id, ts, type, adminId, adminRole, status } = body;
     
     if (!id || !ts || !type || !adminId) {
       return NextResponse.json({ error: "Missing required fields (id, ts, type, adminId)" }, { status: 400 });
@@ -277,10 +299,23 @@ export async function PUT(req: Request) {
       return NextResponse.json({ error: "Record not found" }, { status: 404 });
     }
 
+    // Determine new status
+    // If status is provided by admin, map it to DB status:
+    // "Approved" -> "VALIDATED"
+    // "Rejected" -> "REJECTED"
+    // "Pending" -> "RAW" (or keep as is if not changing)
+    let newDbStatus = "ADJUSTED";
+    if (status) {
+        if (status === "Approved") newDbStatus = "VALIDATED";
+        else if (status === "Rejected") newDbStatus = "REJECTED";
+        else if (status === "Pending") newDbStatus = "RAW";
+        else newDbStatus = status; // Fallback
+    }
+
     // 2. Update record
     const { error: updateError } = await admin
       .from("attendance")
-      .update({ ts, type, status: "ADJUSTED" }) // Mark as adjusted
+      .update({ ts, type, status: newDbStatus }) 
       .eq("id", id);
     
     if (updateError) {
@@ -291,6 +326,8 @@ export async function PUT(req: Request) {
     const changes = [];
     if (oldRecord.ts !== ts) changes.push(`Time: ${new Date(oldRecord.ts).toLocaleString()} -> ${new Date(ts).toLocaleString()}`);
     if (oldRecord.type !== type) changes.push(`Type: ${oldRecord.type} -> ${type}`);
+    // Check if status effectively changed (map old DB status to UI terms for comparison, or just log if newDbStatus != oldRecord.status)
+    if (oldRecord.status !== newDbStatus) changes.push(`Status: ${oldRecord.status} -> ${newDbStatus}`);
 
     await admin.from("system_audit_logs").insert({
       actor_idnumber: adminId,
@@ -298,8 +335,8 @@ export async function PUT(req: Request) {
       action: "EDIT_ATTENDANCE",
       target_table: "attendance",
       target_id: Number(id),
-      before_data: { ts: oldRecord.ts, type: oldRecord.type },
-      after_data: { ts, type },
+      before_data: { ts: oldRecord.ts, type: oldRecord.type, status: oldRecord.status },
+      after_data: { ts, type, status: newDbStatus },
       reason: changes.join(", ")
     });
 

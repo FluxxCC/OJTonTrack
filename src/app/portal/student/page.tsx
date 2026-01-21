@@ -46,6 +46,7 @@ function timeStringToMinutes(raw: string | null | undefined): number {
 }
 
 type ServerAttendanceEntry = { 
+  id: number;
   type: "in" | "out"; 
   ts: number; 
   photourl: string; 
@@ -230,7 +231,7 @@ function StudentPage() {
     if (!idnumber) return;
     try {
       // Fetch Attendance
-      const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=100`);
+      const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}`);
       const json = await res.json();
       if (res.ok && Array.isArray(json.entries)) {
         const mapped = json.entries.map((e: any) => {
@@ -240,6 +241,7 @@ function StudentPage() {
           const status = isRejected ? "Rejected" : isApproved ? "Approved" : "Pending";
           const approvedAtNum = e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined;
           return {
+            id: e.id,
             type: e.type,
             timestamp: e.ts,
             photoDataUrl: e.photourl,
@@ -375,12 +377,11 @@ function StudentPage() {
   }, []);
 
   const formatHours = (ms: number) => {
-    if (!ms) return "0h 0m 0s";
+    if (!ms) return "0h 0m";
     const totalSeconds = Math.floor(ms / 1000);
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    return `${hours}h ${minutes}m ${seconds}s`;
+    return `${hours}h ${minutes}m`;
   };
 
   useEffect(() => {
@@ -501,15 +502,18 @@ function StudentPage() {
 
     let totalMsAll = 0;
     let totalValidatedMsAll = 0;
+    const recentRows: any[] = [];
 
-    Array.from(grouped.values()).forEach(day => {
+    const sortedDays = Array.from(grouped.values()).sort((a, b) => b.date.getTime() - a.date.getTime());
+
+    sortedDays.forEach((day, index) => {
       const dayLogs = day.logs.slice().sort((a, b) => a.timestamp - b.timestamp);
 
       const effectiveSchedule = dbSchedule || schedule;
+      let dayTotalMs = 0;
+      let dayValidatedMs = 0;
 
       if (!effectiveSchedule || (!effectiveSchedule.amIn && !effectiveSchedule.pmIn && !effectiveSchedule.otIn)) {
-        let dayRawMs = 0;
-        let dayValidatedRawMs = 0;
         let inTs: number | null = null;
         let approvedInTs: number | null = null;
 
@@ -521,104 +525,133 @@ function StudentPage() {
             }
           } else if (log.type === "out" && inTs !== null) {
             if (log.timestamp > inTs) {
-              dayRawMs += log.timestamp - inTs;
+              dayTotalMs += log.timestamp - inTs;
             }
             if (approvedInTs !== null && log.status === "Approved" && log.timestamp > approvedInTs) {
-              dayValidatedRawMs += log.timestamp - approvedInTs;
+              dayValidatedMs += log.timestamp - approvedInTs;
             }
             inTs = null;
             approvedInTs = null;
           }
         });
+        
+        // Note: We removed the "live" duration addition to ensure finalized calculation only on time-out.
+        // If inTs is not null (still checked in), we DO NOT add to total. This matches user request.
+        
+      } else {
+        const baseDate = new Date(day.date);
+        baseDate.setHours(0, 0, 0, 0);
 
-        if (inTs !== null) {
-          const liveDuration = now - inTs;
-          if (liveDuration > 0) {
-            dayRawMs += liveDuration;
-          }
-        }
-        if (approvedInTs !== null) {
-          const liveValidatedDuration = now - approvedInTs;
-          if (liveValidatedDuration > 0) {
-            dayValidatedRawMs += liveValidatedDuration;
-          }
-        }
+        const buildShift = (timeStr: string | undefined) => {
+          if (!timeStr) return null;
+          const [h, m] = timeStr.split(":").map(Number);
+          const d = new Date(baseDate.getTime());
+          d.setHours(h || 0, m || 0, 0, 0);
+          return d.getTime();
+        };
 
-        totalMsAll += dayRawMs;
-        totalValidatedMsAll += dayValidatedRawMs;
-        return;
-      }
+        const amInMs = buildShift(effectiveSchedule.amIn);
+        const amOutMs = buildShift(effectiveSchedule.amOut);
+        const pmInMs = buildShift(effectiveSchedule.pmIn);
+        const pmOutMs = buildShift(effectiveSchedule.pmOut);
+        const otInMs = buildShift(effectiveSchedule.otIn);
+        const otOutMs = buildShift(effectiveSchedule.otOut);
 
-      const baseDate = new Date(day.date);
-      baseDate.setHours(0, 0, 0, 0);
+        const localSchedule = {
+            amIn: amInMs || 0,
+            amOut: amOutMs || 0,
+            pmIn: pmInMs || 0,
+            pmOut: pmOutMs || 0,
+            otStart: otInMs || 0,
+            otEnd: otOutMs || 0,
+        };
 
-      const buildShift = (timeStr: string | undefined) => {
-        if (!timeStr) return null;
-        const [h, m] = timeStr.split(":").map(Number);
-        const d = new Date(baseDate.getTime());
-        d.setHours(h || 0, m || 0, 0, 0);
-        return d.getTime();
-      };
+        type Session = { in: AttendanceEntry; out: AttendanceEntry | null };
+        const sessions: Session[] = [];
+        let currentIn: AttendanceEntry | null = null;
 
-      const amInMs = buildShift(effectiveSchedule.amIn);
-      const amOutMs = buildShift(effectiveSchedule.amOut);
-      const pmInMs = buildShift(effectiveSchedule.pmIn);
-      const pmOutMs = buildShift(effectiveSchedule.pmOut);
-      const otInMs = buildShift(effectiveSchedule.otIn);
-      const otOutMs = buildShift(effectiveSchedule.otOut);
+        dayLogs.forEach(log => {
+            if (log.status === "Rejected") return;
 
-      const computeShiftDuration = (
-        logs: AttendanceEntry[],
-        windowStart: number | null,
-        windowEnd: number | null,
-        requireApproved: boolean
-      ) => {
-        if (windowStart === null || windowEnd === null) return 0;
-        let currentIn: number | null = null;
-        let duration = 0;
-
-        // 30 mins buffer for early time-in, 4 hours for late time-out (clamped)
-        const BUFFER_START_MS = 30 * 60 * 1000;
-        const BUFFER_END_MS = 4 * 60 * 60 * 1000;
-        const searchStart = windowStart - BUFFER_START_MS;
-        const searchEnd = windowEnd + BUFFER_END_MS;
-
-        logs.forEach(log => {
-          // Filter out logs that are outside the buffer window
-          if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
-
-          if (requireApproved && log.status !== "Approved") {
-            return;
-          }
-          if (log.type === "in") {
-            if (log.timestamp > windowEnd) return;
-            const effectiveIn = Math.min(Math.max(log.timestamp, windowStart), windowEnd);
-            currentIn = effectiveIn;
-          } else if (log.type === "out") {
-            if (currentIn === null) return;
-            const effectiveOut = Math.min(Math.max(log.timestamp, windowStart), windowEnd);
-            if (effectiveOut > currentIn) {
-              duration += effectiveOut - currentIn;
+            if (log.type === "in") {
+                if (currentIn) {
+                     sessions.push({ in: currentIn, out: null });
+                }
+                currentIn = log;
+            } else if (log.type === "out") {
+                if (currentIn) {
+                    sessions.push({ in: currentIn, out: log });
+                    currentIn = null;
+                }
             }
-            currentIn = null;
-          }
+        });
+        if (currentIn) {
+            sessions.push({ in: currentIn, out: null });
+        }
+
+        const calculateOverlap = (start: number, end: number, limitStart: number, limitEnd: number) => {
+            if (!limitStart || !limitEnd || limitStart >= limitEnd) return 0;
+            const s = Math.max(start, limitStart);
+            const e = Math.min(end, limitEnd);
+            if (s >= e) return 0;
+            const sFl = Math.floor(s / 60000) * 60000;
+            const eFl = Math.floor(e / 60000) * 60000;
+            return Math.max(0, eFl - sFl);
+        };
+
+        sessions.forEach(session => {
+            if (!session.out) return;
+
+            let am = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.amIn, localSchedule.amOut);
+            let pm = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.pmIn, localSchedule.pmOut);
+            const ot = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.otStart, localSchedule.otEnd);
+            
+            // Fallback: If session strictly encloses the AM window but overlap returned 0 (e.g. due to minor boundary mismatch), force full AM credit.
+            if (am === 0 && localSchedule.amIn && localSchedule.amOut) {
+                if (session.in.timestamp <= localSchedule.amIn && session.out.timestamp >= localSchedule.amOut) {
+                    am = localSchedule.amOut - localSchedule.amIn;
+                }
+            }
+
+            // If a single session spans across Morning and Afternoon (e.g. AM IN -> PM OUT),
+            // it means the student failed to clock out for lunch and clock in for PM.
+            // In this case, we only credit the Morning hours and invalidating the PM hours.
+            if (am > 0 && pm > 0) {
+                pm = 0;
+            }
+
+            const sessionDuration = am + pm + ot;
+            dayTotalMs += sessionDuration;
+
+            const isInApproved = session.in.status === "Approved";
+            const isOutApproved = session.out.status === "Approved";
+            if (isInApproved && isOutApproved) {
+                dayValidatedMs += sessionDuration;
+            }
         });
 
-        return duration;
-      };
-
-      const dayTotalMs =
-        (amInMs && amOutMs ? computeShiftDuration(dayLogs, amInMs, amOutMs, false) : 0) +
-        (pmInMs && pmOutMs ? computeShiftDuration(dayLogs, pmInMs, pmOutMs, false) : 0) +
-        (otInMs && otOutMs ? computeShiftDuration(dayLogs, otInMs, otOutMs, false) : 0);
-
-      const dayValidatedMs =
-        (amInMs && amOutMs ? computeShiftDuration(dayLogs, amInMs, amOutMs, true) : 0) +
-        (pmInMs && pmOutMs ? computeShiftDuration(dayLogs, pmInMs, pmOutMs, true) : 0) +
-        (otInMs && otOutMs ? computeShiftDuration(dayLogs, otInMs, otOutMs, true) : 0);
+        // Uniform rounding for the day total
+        dayTotalMs = Math.round(dayTotalMs / 60000) * 60000;
+        dayValidatedMs = Math.round(dayValidatedMs / 60000) * 60000;
+      }
 
       totalMsAll += dayTotalMs;
       totalValidatedMsAll += dayValidatedMs;
+
+      if (index < 5) {
+          const firstIn = dayLogs.find(l => l.type === 'in');
+          const lastOut = dayLogs.filter(l => l.type === 'out').pop(); // Simple approximation for display
+          
+          recentRows.push({
+             labelDate: day.date.toLocaleDateString(undefined, { month: "short", day: "2-digit", year: "numeric" }),
+             inLabel: firstIn ? new Date(firstIn.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-",
+             outLabel: lastOut ? new Date(lastOut.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-",
+             inEntry: firstIn,
+             outEntry: lastOut,
+             duration: formatHours(dayTotalMs),
+             status: dayTotalMs > 0 ? "Approved" : "Pending"
+          });
+      }
     });
 
     const targetMs = targetHours * 3600 * 1000;
@@ -630,6 +663,7 @@ function StudentPage() {
       formattedTotal: formatHours(totalMsAll),
       formattedValidated: formatHours(totalValidatedMsAll),
       progress,
+      recentRows,
     };
   }, [attendance, targetHours, idnumber, schedule, dbSchedule, now]);
 
@@ -693,6 +727,14 @@ function StudentPage() {
     { id: "reports", label: "Reports", icon: FileText },
     { id: "profile", label: "Profile", icon: UserIcon },
   ];
+
+  const handleTimeIn = () => {
+    setActiveTab("attendance");
+  };
+
+  const handleTimeOut = () => {
+    setActiveTab("attendance");
+  };
 
   const handleLogout = async () => {
     try {
@@ -842,210 +884,21 @@ function StudentPage() {
           <main className="flex-1 overflow-y-auto p-4 sm:p-8 custom-scrollbar">
             <div className="max-w-7xl mx-auto">
               {activeTab === "dashboard" && (
-                <div className="space-y-6">
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
-                    <StatCard
-                      title="Total Hours"
-                      value={hoursAgg.formattedTotal}
-                      icon={Clock}
-                      color="bg-orange-500"
-                      subtext={`Target: ${targetHours}h`}
-                      progress={hoursAgg.progress}
-                    />
-                    <StatCard
-                      title="Total Validated Hours"
-                      value={hoursAgg.formattedValidated}
-                      icon={Clock}
-                      color="bg-green-500"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm flex flex-col">
-                      <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-lg font-bold text-gray-900">
-                          Recent Activity
-                        </h3>
-                        <div className="flex items-center gap-3">
-                          <button
-                            onClick={() => setActiveTab("attendance")}
-                            className="text-sm text-[#F97316] hover:underline"
-                          >
-                            Attendance
-                          </button>
-                          <button
-                            onClick={() => setActiveTab("reports")}
-                            className="text-sm text-[#F97316] hover:underline"
-                          >
-                            Reports
-                          </button>
-                        </div>
-                      </div>
-                      <div className="space-y-4 flex-1">
-                        {recentActivity.length === 0 ? (
-                          <div className="text-center text-gray-400 py-8">
-                            No recent activity
-                          </div>
-                        ) : (
-                          recentActivity.map((item, i) => (
-                            <div
-                              key={i}
-                              className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100"
-                            >
-                              <div className="flex items-center gap-3">
-                                <div
-                                  className={`h-8 w-8 rounded-full flex items-center justify-center border ${
-                                    item.kind === "attendance"
-                                      ? item.label === "Time In"
-                                        ? "bg-green-50 text-green-600 border-green-200"
-                                        : "bg-red-50 text-red-600 border-red-200"
-                                      : "bg-orange-50 text-orange-600 border-orange-200"
-                                  }`}
-                                >
-                                  {item.kind === "attendance" ? (
-                                    item.label === "Time In" ? (
-                                      <LogIn size={16} />
-                                    ) : (
-                                      <LogOut size={16} />
-                                    )
-                                  ) : (
-                                    <FileText size={16} />
-                                  )}
-                                </div>
-                                <div>
-                                  <div className="text-sm font-semibold text-gray-900">
-                                    {item.kind === "report"
-                                      ? "Report Submitted"
-                                      : item.label}
-                                  </div>
-                                  <div className="text-xs text-gray-500">
-                                    {new Date(
-                                      item.timestamp
-                                    ).toLocaleDateString()}
-                                  </div>
-                                </div>
-                              </div>
-                              <div className="text-sm font-medium text-gray-600">
-                                {new Date(
-                                  item.timestamp
-                                ).toLocaleTimeString([], {
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })}
-                              </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex flex-col gap-4">
-                      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 text-gray-900 flex flex-col items-center gap-3">
-                        <div className="flex items-center gap-2">
-                          <div className="p-1.5 rounded-lg bg-orange-50 text-[#F97316] border border-orange-100">
-                            <Zap size={14} />
-                          </div>
-                          <div className="text-xs font-bold text-gray-700 uppercase tracking-wider">
-                            Quick Actions
-                          </div>
-                        </div>
-                        <div className="w-full sm:w-64 space-y-2">
-                          <button
-                            onClick={() => setActiveTab("attendance")}
-                            className={`w-full rounded-xl font-bold py-3 px-6 text-sm transition-all active:scale-95 shadow ${
-                              isCheckedIn
-                                ? "bg-white text-red-600 hover:bg-gray-100 border border-gray-200"
-                                : "bg-[#F97316] text-white hover:bg-[#EA580C] border border-transparent"
-                            }`}
-                          >
-                            <span className="inline-flex items-center justify-center gap-2">
-                              {isCheckedIn ? (
-                                <LogOut size={16} />
-                              ) : (
-                                <LogIn size={16} />
-                              )}
-                              {isCheckedIn ? "Time Out" : "Time In"}
-                            </span>
-                          </button>
-                          <Link
-                            href="/portal/student/reports"
-                            className="block w-full rounded-xl font-bold py-3 px-6 text-sm transition-all active:scale-95 shadow bg-[#F97316] text-white hover:bg-[#EA580C] border border-transparent text-center"
-                          >
-                            Submit Report
-                          </Link>
-                        </div>
-                      </div>
-
-                      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 text-gray-900 flex flex-col gap-3">
-                        <div className="flex items-center gap-2">
-                          <div className="p-1.5 rounded-lg bg-blue-50 text-blue-600 border border-blue-100">
-                            <Calendar size={14} />
-                          </div>
-                          <div className="text-xs font-bold text-gray-700 uppercase tracking-wider">
-                            Weekly Report Deadlines
-                          </div>
-                        </div>
-                        {studentDeadlines.length === 0 ? (
-                          <div className="text-xs text-gray-400 text-center px-2 py-3 border border-dashed border-gray-200 rounded-xl">
-                            No report deadlines set by your instructor yet.
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            {studentDeadlines.slice(0, 4).map((d) => (
-                              <div
-                                key={d.week}
-                                className="flex items-center justify-between text-xs bg-white border border-gray-100 rounded-xl px-3 py-2 shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:bg-gray-50 transition-colors"
-                              >
-                                <div className="flex items-center gap-3">
-                                  <div className="h-7 w-7 rounded-full flex items-center justify-center bg-gray-50 border border-gray-200 text-[11px] font-semibold text-gray-600">
-                                    W{d.week}
-                                  </div>
-                                  <div className="flex flex-col">
-                                    <span className="text-sm font-semibold text-gray-900">
-                                      Week {d.week}
-                                    </span>
-                                    <span
-                                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-medium ${
-                                        d.status === "submitted"
-                                          ? "bg-green-50 border-green-200 text-green-700"
-                                          : "bg-red-50 border-red-200 text-red-700"
-                                      }`}
-                                    >
-                                      <span
-                                        className={`h-1.5 w-1.5 rounded-full ${
-                                          d.status === "submitted"
-                                            ? "bg-green-500"
-                                            : "bg-red-500"
-                                        }`}
-                                      />
-                                      {d.status === "submitted"
-                                        ? "Submitted"
-                                        : "Not submitted yet"}
-                                    </span>
-                                  </div>
-                                </div>
-                                <div className="text-xs font-medium text-gray-600">
-                                  {new Date(d.date).toLocaleDateString(
-                                    undefined,
-                                    {
-                                      month: "short",
-                                      day: "numeric",
-                                    }
-                                  )}
-                                </div>
-                              </div>
-                            ))}
-                            {studentDeadlines.length > 4 && (
-                              <div className="text-[11px] text-gray-400 text-right">
-                                +{studentDeadlines.length - 4} more deadlines
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                <DashboardView
+                  attendance={attendance}
+                  reports={reports}
+                  totalHours={hoursAgg.formattedTotal}
+                  totalValidatedHours={hoursAgg.formattedValidated}
+                  targetHours={student?.target_hours || 486}
+                  nextDeadline={studentDeadlines.find(d => d.status === "pending") || studentDeadlines[studentDeadlines.length - 1]}
+                  onTimeIn={handleTimeIn}
+                  onTimeOut={handleTimeOut}
+                  onViewAttendance={() => setActiveTab("attendance")}
+                  companyText={student?.company || "N/A"}
+                  supervisorText={student?.supervisor_name || student?.supervisorid || "N/A"}
+                  locationText={student?.location || "N/A"}
+                  recentRows={hoursAgg.recentRows}
+                />
               )}
 
               {activeTab === "attendance" && (
