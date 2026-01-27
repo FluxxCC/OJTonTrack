@@ -23,6 +23,7 @@ import {
   ClipboardCheck,
   UserCheck,
   Download,
+  FileDown,
   MessageSquare,
   Calendar,
   ShieldAlert
@@ -38,18 +39,21 @@ import {
 } from 'recharts';
 import { AttendanceDetailsModal } from "@/components/AttendanceDetailsModal";
 import { UsersView, AddUserForm, EditUserForm, ViewUserDetails, Modal, ConfirmationModal, SuccessModal, AlertModal } from './ui';
+import { calculateSessionDuration, determineShift, ShiftSchedule as LibShiftSchedule, buildSchedule, formatHours, calculateTotalDuration, BUFFER_START_MS, BUFFER_END_MS, calculateShiftDurations } from "@/lib/attendance";
+import * as XLSX from 'xlsx-js-style';
 
 
 // --- Global Cache for Reports ---
 let cachedReportsData: ReportEntry[] | null = null;
 let lastReportsFetchTime = 0;
 const REPORTS_CACHE_DURATION = 300000; // 5 minutes
+let cachedDeadlinesData: Record<string, Record<number, string>> | null = null;
 
 
 // --- Types ---
 
-type AttendanceEntry = { idnumber: string; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; validatedBy?: string; is_overtime?: boolean };
-type ServerAttendanceEntry = { idnumber: string; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null; validated_at?: string | null; is_overtime?: boolean };
+type AttendanceEntry = { id?: number; idnumber: string; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" | "Validated"; validatedAt?: number; validatedBy?: string; validated_by?: string; is_overtime?: boolean };
+type ServerAttendanceEntry = { id?: number; idnumber: string; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null; validated_at?: string | null; is_overtime?: boolean };
 type ReportEntry = { id: number; title?: string; body?: string; text?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string; idnumber?: string; isViewedByInstructor?: boolean };
 type ReportFile = { name?: string; type?: string } | null;
 type ReportFiles = ReportFile[] | ReportFile | undefined;
@@ -163,7 +167,15 @@ const MonthDropdown = ({ options, value, onChange }: { options: { key: string, l
     );
 };
 
-const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: propNow, overtimeShifts = [] }: { attendance: AttendanceEntry[], selected: User | null, activeStart?: number, now?: number, overtimeShifts?: { student_id: string; date: string; start: number; end: number }[] }) => {
+const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: propNow, overtimeShifts = [], effectiveScheduleConfig, overrides }: { 
+    attendance: AttendanceEntry[], 
+    selected: User | null, 
+    activeStart?: number, 
+    now?: number, 
+    overtimeShifts?: { student_id: string; date: string; start: number; end: number }[],
+    effectiveScheduleConfig: { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn: string; otOut: string } | null,
+    overrides?: Record<string, any>
+}) => {
     
     const startOfWeekSunday = (d: Date) => {
         const s = new Date(d);
@@ -199,44 +211,6 @@ const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: pr
     const [selectedMonthKey, setSelectedMonthKey] = useState<string>(() => getMonthKeyFromWeekStart(startOfWeekSunday(new Date()).getTime()));
 
     const [internalTick, setInternalTick] = useState(() => Date.now());
-
-    const [scheduleConfig, setScheduleConfig] = useState<{
-        amIn: string; amOut: string;
-        pmIn: string; pmOut: string;
-        otIn: string; otOut: string;
-    } | null>(null);
-
-    useEffect(() => {
-        const fetchSchedule = async () => {
-            try {
-                const res = await fetch('/api/shifts');
-                const data = await res.json();
-                if (data.shifts) {
-                    const config = {
-                        amIn: "07:00", amOut: "11:00",
-                        pmIn: "13:00", pmOut: "17:00",
-                        otIn: "17:00", otOut: "18:00"
-                    };
-                    data.shifts.forEach((s: any) => {
-                        if (s.shift_name === "Morning Shift") {
-                            config.amIn = s.official_start;
-                            config.amOut = s.official_end;
-                        } else if (s.shift_name === "Afternoon Shift") {
-                            config.pmIn = s.official_start;
-                            config.pmOut = s.official_end;
-                        } else if (s.shift_name === "Overtime Shift") {
-                            config.otIn = s.official_start;
-                            config.otOut = s.official_end;
-                        }
-                    });
-                    setScheduleConfig(config);
-                }
-            } catch (e) {
-                console.error("Failed to fetch schedule", e);
-            }
-        };
-        fetchSchedule();
-    }, []);
 
     // Live update removed as per user request (refresh-based only)
     /*
@@ -316,28 +290,12 @@ const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: pr
     const studentChartData = useMemo(() => {
         if (!selected || attendance.length === 0) return [];
         
-        // Build schedule template with defaults
-        const buildShiftTemplate = (timeStr: string) => {
-             const [h, m] = timeStr.split(":").map(Number);
-             return { h: h||0, m: m||0 };
-        };
-        let scheduleTemplate = {
-             amIn: {h:8, m:0}, amOut: {h:12, m:0},
-             pmIn: {h:13, m:0}, pmOut: {h:17, m:0},
-             otIn: {h:17, m:0}, otOut: {h:18, m:0}
+        const effectiveConfig = effectiveScheduleConfig || {
+            amIn: "08:00", amOut: "12:00",
+            pmIn: "13:00", pmOut: "17:00",
+            otIn: "17:00", otOut: "18:00"
         };
         
-        if (scheduleConfig) {
-             scheduleTemplate = {
-                 amIn: buildShiftTemplate(scheduleConfig.amIn),
-                 amOut: buildShiftTemplate(scheduleConfig.amOut),
-                 pmIn: buildShiftTemplate(scheduleConfig.pmIn),
-                 pmOut: buildShiftTemplate(scheduleConfig.pmOut),
-                 otIn: buildShiftTemplate(scheduleConfig.otIn),
-                 otOut: buildShiftTemplate(scheduleConfig.otOut),
-             };
-        }
-
         const dayMs = Array(7).fill(0);
         const start = new Date(selectedWeekStart);
         const end = new Date(selectedWeekStart + 7 * 24 * 60 * 60 * 1000);
@@ -351,38 +309,6 @@ const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: pr
             logsByDateKey.get(key)!.push(e);
         });
 
-        const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
-        const computeShift = (entries: AttendanceEntry[], start: number, end: number, isToday: boolean) => {
-             let currentIn: number | null = null;
-             let duration = 0;
-             const BUFFER_START_MS = 30 * 60 * 1000;
-             const BUFFER_END_MS = 4 * 60 * 60 * 1000;
-             const searchStart = start - BUFFER_START_MS;
-             const searchEnd = end + BUFFER_END_MS;
-
-             entries.forEach(log => {
-                 if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
-                 
-                 if (log.type === "in") {
-                     if (log.timestamp > end) return;
-                     currentIn = clamp(log.timestamp, start, end);
-                 } else if (log.type === "out") {
-                     if (currentIn === null) return;
-                     const effectiveOut = clamp(log.timestamp, start, end);
-                     if (effectiveOut > currentIn) duration += effectiveOut - currentIn;
-                     currentIn = null;
-                 }
-             });
-
-             if (currentIn !== null && isToday) {
-                 const nowTs = Date.now();
-                 const effectiveOut = clamp(nowTs, start, end);
-                 if (effectiveOut > currentIn) duration += effectiveOut - currentIn;
-             }
-
-             return duration;
-        };
-
         for (let i = 0; i < 7; i++) {
             const date = new Date(selectedWeekStart);
             date.setDate(date.getDate() + i);
@@ -390,39 +316,72 @@ const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: pr
             const logs = (logsByDateKey.get(key) || []).sort((a,b) => a.timestamp - b.timestamp);
             const isToday = new Date().toDateString() === date.toDateString();
             
-            const makeTime = (t: {h:number, m:number}) => {
-                const d = new Date(date);
-                d.setHours(t.h, t.m, 0, 0);
-                return d.getTime();
-            };
-
-            const amIn = makeTime(scheduleTemplate.amIn);
-            const amOut = makeTime(scheduleTemplate.amOut);
-            const pmIn = makeTime(scheduleTemplate.pmIn);
-            const pmOut = makeTime(scheduleTemplate.pmOut);
-            
             // Dynamic OT Lookup
             const dateStr = date.toLocaleDateString('en-CA');
             const otShift = overtimeShifts.find(s => s.student_id === selected.idnumber && s.date === dateStr);
             
-            let otIn, otOut;
-            if (otShift) {
-                otIn = otShift.start;
-                otOut = otShift.end;
-            } else {
-                otIn = makeTime(scheduleTemplate.otIn);
-                otOut = makeTime(scheduleTemplate.otOut);
+            // Check for Date Override
+            const override = overrides ? overrides[dateStr] : undefined;
+            const scheduleToUse = override ? {
+                amIn: override.am?.start || effectiveConfig.amIn,
+                amOut: override.am?.end || effectiveConfig.amOut,
+                pmIn: override.pm?.start || effectiveConfig.pmIn,
+                pmOut: override.pm?.end || effectiveConfig.pmOut,
+                otIn: effectiveConfig.otIn,
+                otOut: effectiveConfig.otOut
+            } : effectiveConfig;
+
+            // Build schedule for THIS specific day
+            const dailySchedule = buildSchedule(
+                date,
+                {
+                    amIn: scheduleToUse.amIn || "08:00",
+                    amOut: scheduleToUse.amOut || "12:00",
+                    pmIn: scheduleToUse.pmIn || "13:00",
+                    pmOut: scheduleToUse.pmOut || "17:00",
+                    otIn: scheduleToUse.otIn,
+                    otOut: scheduleToUse.otOut
+                },
+                otShift ? { start: otShift.start, end: otShift.end } : undefined
+            );
+
+            // Pair logs into sessions
+            let totalDuration = 0;
+            let currentIn: AttendanceEntry | null = null;
+            
+            // We need to process logs sequentially
+            for (const log of logs) {
+                if (log.type === "in") {
+                    if (currentIn) {
+                        // Previous incomplete session
+                    }
+                    currentIn = log;
+                } else if (log.type === "out") {
+                    if (currentIn) {
+                        const { am, pm, ot } = calculateShiftDurations(currentIn.timestamp, log.timestamp, dailySchedule);
+                        
+                        totalDuration += (am + pm + ot);
+                        currentIn = null;
+                    }
+                }
             }
 
-            dayMs[i] = 
-                computeShift(logs, amIn, amOut, isToday) +
-                computeShift(logs, pmIn, pmOut, isToday) +
-                computeShift(logs, otIn, otOut, isToday);
+            // Handle ongoing session (Live)
+            if (currentIn && isToday) {
+                const nowTs = currentTick; // Use the live tick
+                // Only count if now > in
+                if (nowTs > currentIn.timestamp) {
+                    const shift = determineShift(currentIn.timestamp, dailySchedule);
+                    totalDuration += calculateSessionDuration(currentIn.timestamp, nowTs, shift, dailySchedule);
+                }
+            }
+
+            dayMs[i] = totalDuration;
         }
 
         const labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         return labels.map((label, i) => ({ date: label, ms: dayMs[i], hours: dayMs[i] / (1000 * 60 * 60) }));
-    }, [selected, attendance, selectedWeekStart, scheduleConfig, overtimeShifts]);
+    }, [selected, attendance, selectedWeekStart, effectiveScheduleConfig, overtimeShifts, currentTick, overrides]);
 
     const rangeTotalMs = useMemo(() => {
         return studentChartData.reduce((acc, d) => acc + (d.ms || 0), 0);
@@ -559,7 +518,10 @@ const StudentDetailsPanel = ({
     onViewAttendanceEntry,
     evaluation,
     openEvaluationModal,
-    overtimeShifts = []
+    overtimeShifts = [],
+    scheduleConfig,
+    scheduleConfigs,
+    overrides
 }: { 
     selected: User | null, 
     attendance: AttendanceEntry[], 
@@ -574,8 +536,78 @@ const StudentDetailsPanel = ({
     onViewAttendanceEntry: (entry: AttendanceEntry) => void,
     evaluation: EvaluationDetail | null,
     openEvaluationModal: () => void,
-    overtimeShifts?: { student_id: string; date: string; start: number; end: number }[]
+    overtimeShifts?: { student_id: string; date: string; start: number; end: number }[],
+    scheduleConfig?: { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn: string; otOut: string } | null,
+    scheduleConfigs?: { global: any; bySupervisor: Record<string, any> },
+    overrides?: Record<string, any>
 }) => {
+    const processedAttendance = useMemo(() => {
+        if (!attendance) return [];
+        const result: AttendanceEntry[] = [];
+        const sorted = [...attendance].sort((a, b) => a.timestamp - b.timestamp);
+        
+        for (let i = 0; i < sorted.length; i++) {
+            const entry = sorted[i];
+            result.push(entry);
+            
+            if (entry.type === 'in') {
+                // Check for pair
+                const next = sorted[i+1];
+                const isPaired = next && next.type === 'out';
+                
+                if (!isPaired) {
+                    // Check if we should auto-close
+                    const config = scheduleConfig || {
+                        amIn: "08:00", amOut: "12:00",
+                        pmIn: "13:00", pmOut: "17:00",
+                        otIn: "17:00", otOut: "18:00"
+                    };
+                    
+                    // Build schedule to get timestamps
+                    const entryDate = new Date(entry.timestamp);
+                    const schedule = buildSchedule(entryDate, config);
+                    const shiftName = determineShift(entry.timestamp, schedule);
+                    
+                    let targetOutTs = 0;
+                    if (shiftName === 'am') targetOutTs = schedule.amOut;
+                    else if (shiftName === 'pm') targetOutTs = schedule.pmOut;
+                    else targetOutTs = schedule.otEnd;
+
+                    if (targetOutTs) {
+                        // Handle late in: if in > end, use in + 1 min
+                        let outTs = targetOutTs;
+                        if (entry.timestamp > targetOutTs) {
+                            outTs = entry.timestamp + 60000;
+                        }
+                        
+                        // If it's today, only auto-close if strictly past the window + buffer
+                        // For past days, always auto-close
+                        const isToday = new Date().toDateString() === entryDate.toDateString();
+                        
+                        // Only auto-close if it's NOT today (meaning it's a past date)
+                        if (!isToday) {
+                             result.push({
+                                 id: -(entry.id || Math.floor(Math.random() * 1000000)),
+                                 idnumber: entry.idnumber,
+                                 type: 'out',
+                                 timestamp: outTs,
+                                 photoDataUrl: '',
+                                 status: 'Pending',
+                                 validated_by: 'AUTO TIME OUT',
+                                 is_overtime: entry.is_overtime,
+                             } as AttendanceEntry);
+                        }
+                    }
+                } else {
+                    // Skip next since it's the pair
+                    i++;
+                    result.push(next);
+                }
+            }
+        }
+        return result;
+    }, [attendance, scheduleConfig]);
+
     const activeStart = selected ? activeSessions[selected.idnumber] : undefined;
     const now = Date.now();
     
@@ -665,6 +697,8 @@ const StudentDetailsPanel = ({
                 activeStart={activeSessions[selected.idnumber]}
                 now={now}
                 overtimeShifts={overtimeShifts}
+                effectiveScheduleConfig={scheduleConfig || null}
+                overrides={overrides}
                 />
             </div>
 
@@ -745,7 +779,7 @@ const StudentDetailsPanel = ({
                 <div className="p-3 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                     <div className="flex items-center gap-2">
                         <h3 className="font-semibold text-gray-900">Approved Attendance</h3>
-                        <span className="text-[11px] font-semibold text-gray-600 bg-gray-100 px-2 py-0.5 rounded-full">{attendance.filter(a => a.status === "Approved").length}</span>
+                        <span className="text-[11px] font-semibold text-gray-600 bg-gray-100 px-2 py-0.5 rounded-full">{processedAttendance.filter(a => a.status === "Approved" || a.validated_by === "AUTO TIME OUT").length}</span>
                     </div>
                     <button 
                         onClick={openAttendanceModal}
@@ -755,42 +789,54 @@ const StudentDetailsPanel = ({
                     </button>
                 </div>
                 <div className="overflow-y-auto p-3 space-y-2 custom-scrollbar flex-1">
-                    {attendance.filter(a => a.status === "Approved").slice().sort((a,b) => b.timestamp - a.timestamp).map((entry, idx) => (
-                    <button 
+                    {processedAttendance.filter(a => a.status === "Approved" || a.validated_by === "AUTO TIME OUT").map((entry, idx) => {
+                        const isAutoTimeOut = entry.validated_by === 'SYSTEM_AUTO_CLOSE' || entry.validated_by === 'AUTO TIME OUT';
+                        return (
+                        <button 
                         key={idx} 
                         onClick={() => onViewAttendanceEntry(entry)}
                         className="w-full flex items-center gap-2 p-2 rounded-xl bg-gray-50 border border-gray-100 hover:border-orange-200 transition-colors text-left group"
                     >
-                        <div className="h-8 w-8 rounded-md bg-gray-200 overflow-hidden flex-shrink-0 relative">
-                        {entry.photoDataUrl ? (
-                            <img src={entry.photoDataUrl} className="h-full w-full object-cover" alt="log" />
-                        ) : (
-                            <div className="flex items-center justify-center h-full w-full text-gray-400">
-                                <Users size={16} />
+                        {!isAutoTimeOut && (
+                            <div className="h-8 w-8 rounded-md bg-gray-200 overflow-hidden flex-shrink-0 relative">
+                                {entry.photoDataUrl ? (
+                                    <img src={entry.photoDataUrl} className="h-full w-full object-cover" alt="log" />
+                                ) : (
+                                    <div className="flex items-center justify-center h-full w-full text-gray-400">
+                                        <Users size={16} />
+                                    </div>
+                                )}
                             </div>
                         )}
-                        </div>
                         <div className="flex-1">
                             <div className="flex items-center justify-between">
                             <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${entry.type === 'in' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
                                 {entry.type.toUpperCase()}
                             </span>
+                            {!isAutoTimeOut && (
                             <span className="text-[11px] text-gray-900 font-medium group-hover:text-orange-700 transition-colors">
                                 {new Date(entry.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                             </span>
+                            )}
                             </div>
                             <div className="flex items-center justify-between mt-1">
                               <div className="text-[11px] text-gray-600">
                                 {new Date(entry.timestamp).toLocaleDateString()}
                               </div>
-                              <div className="inline-flex items-center gap-1.5 text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">
-                                <span className="w-1.5 h-1.5 rounded-full bg-green-600"></span>
-                                Approved by Supervisor
-                              </div>
+                              {isAutoTimeOut 
+                                ? <span className="text-[10px] font-bold text-red-500">AUTO TIME OUT</span>
+                                : (
+                                  <div className="inline-flex items-center gap-1.5 text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-green-600"></span>
+                                    Approved by Supervisor
+                                  </div>
+                                )
+                              }
                             </div>
                         </div>
                     </button>
-                    ))}
+                    );
+                    })}
                     {attendance.filter(a => a.status === "Approved").length === 0 && <div className="text-center text-gray-400 text-sm py-8">No approved records</div>}
                 </div>
                 </div>
@@ -890,6 +936,13 @@ interface StudentsViewProps {
   attendanceSummary: Record<string, number>;
   evaluation: EvaluationDetail | null;
   onViewedChange?: () => void;
+  overtimeShifts: { student_id: string; date: string; start: number; end: number }[];
+  scheduleConfigs: {
+      global: { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn: string; otOut: string } | null;
+      bySupervisor: Record<string, { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn: string; otOut: string }>;
+  };
+  overridesData: Record<string, any>;
+  studentSchedules: Record<string, any>;
 }
 
   const StudentAttendanceDetailView = ({ 
@@ -897,6 +950,8 @@ interface StudentsViewProps {
     attendance, 
     overtimeShifts,
     scheduleConfig: globalScheduleConfig,
+    studentSchedule,
+    overrides,
     onBack,
     evaluationStatuses,
     toggleEvaluation,
@@ -905,6 +960,8 @@ interface StudentsViewProps {
     attendance: AttendanceEntry[], 
     overtimeShifts: { student_id: string; date: string; start: number; end: number }[],
     scheduleConfig: any,
+    studentSchedule: any,
+    overrides: any,
     onBack: () => void,
     evaluationStatuses: Record<string, boolean>,
     toggleEvaluation: (id: string, current: boolean) => void,
@@ -952,14 +1009,9 @@ interface StudentsViewProps {
         return counts;
     }, [filteredAttendance, student.idnumber]);
 
-    // Helper to format hours
-    const formatHours = (ms: number) => {
-        if (!ms) return "0h 0m";
-        const totalSeconds = Math.floor(ms / 1000);
-        const h = Math.floor(totalSeconds / 3600);
-        const m = Math.floor((totalSeconds % 3600) / 60);
-        return `${h}h ${m}m`;
-    };
+    // Helper to format hours (Using centralized utility)
+    // const formatHours = (ms: number) => ... imported from lib
+
 
     // Helper to format time
     const formatTime = (ts: number) => {
@@ -983,171 +1035,172 @@ interface StudentsViewProps {
         const processedDays = Array.from(grouped.values())
             .sort((a, b) => b.date.getTime() - a.date.getTime())
             .map(day => {
-                const dayLogs = day.logs.sort((a, b) => a.timestamp - b.timestamp);
+                const dayLogs = day.logs.filter(l => l.status !== "Rejected").sort((a, b) => a.timestamp - b.timestamp);
 
                 const dayDate = new Date(day.date);
                 dayDate.setHours(0, 0, 0, 0);
                 const isToday = new Date().toDateString() === dayDate.toDateString();
 
-                const buildShift = (timeStr: string) => {
-                    const [h, m] = timeStr.split(":").map(Number);
-                    const d = new Date(dayDate.getTime());
-                    d.setHours(h || 0, m || 0, 0, 0);
-                    return d.getTime();
-                };
-
-                // Use passed config or default
-                const config = globalScheduleConfig || {
+                // Use centralized schedule builder
+                // Priority: Date Override > Student Local Schedule > Global Config > Default
+                const effectiveConfig = studentSchedule || globalScheduleConfig || {
                     amIn: "08:00", amOut: "12:00",
                     pmIn: "13:00", pmOut: "17:00",
                     otIn: "17:00", otOut: "18:00"
                 };
 
-                let schedule = {
-                    amIn: buildShift(config.amIn),
-                    amOut: buildShift(config.amOut),
-                    pmIn: buildShift(config.pmIn),
-                    pmOut: buildShift(config.pmOut),
-                    otStart: buildShift(config.otIn),
-                    otEnd: buildShift(config.otOut),
-                };
+                // Format date as YYYY-MM-DD for lookup
+                const dateStr = dayDate.getFullYear() + "-" + String(dayDate.getMonth() + 1).padStart(2, '0') + "-" + String(dayDate.getDate()).padStart(2, '0');
                 
-                // Dynamic OT check
-                const dateStr = dayDate.getFullYear() + "-" + 
-                              String(dayDate.getMonth() + 1).padStart(2, '0') + "-" + 
-                              String(dayDate.getDate()).padStart(2, '0');
-                const dynamicOt = overtimeShifts?.find(s => s.student_id === student.idnumber && s.date === dateStr);
-                if (dynamicOt) {
-                    schedule.otStart = dynamicOt.start;
-                    schedule.otEnd = dynamicOt.end;
-                }
+                // Check for Date Override
+                const override = overrides ? overrides[dateStr] : null;
+                const scheduleToUse = override ? {
+                    amIn: override.am?.start || effectiveConfig.amIn,
+                    amOut: override.am?.end || effectiveConfig.amOut,
+                    pmIn: override.pm?.start || effectiveConfig.pmIn,
+                    pmOut: override.pm?.end || effectiveConfig.pmOut,
+                    otIn: effectiveConfig.otIn,
+                    otOut: effectiveConfig.otOut
+                } : effectiveConfig;
 
-                const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+                const schedule = buildSchedule(dayDate, scheduleToUse, overtimeShifts?.find(s => s.student_id === student.idnumber && s.date === dateStr));
 
-                const computeShiftDuration = (
-                    logs: AttendanceEntry[],
-                    windowStart: number,
-                    windowEnd: number,
-                    requireApproved: boolean
-                ) => {
-                    let currentIn: number | null = null;
-                    let duration = 0;
-                    // 30 mins buffer for start, 12 hours for end (to allow late outs to close the shift)
-                    const BUFFER_START_MS = 30 * 60 * 1000;
-                    const BUFFER_END_MS = 12 * 60 * 60 * 1000;
-                    const searchStart = windowStart - BUFFER_START_MS;
-                    const searchEnd = windowEnd + BUFFER_END_MS;
+                // DEBUG LOGGING REMOVED
 
-                    logs.forEach(log => {
-                        if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
-                        if (requireApproved) {
-                             const status = String(log.status || "").toUpperCase();
-                             const isApproved = status === "APPROVED" || status === "VALIDATED" || !!log.validatedBy;
-                             if (!isApproved) return;
-                        }
-                        
-                        // Floor to minute
-                        const logTime = Math.floor(log.timestamp / 60000) * 60000;
 
-                        if (log.type === "in") {
-                            if (logTime > windowEnd) return;
-                            // Clamp start
-                            let effectiveIn = clamp(logTime, windowStart, windowEnd);
-                            currentIn = effectiveIn;
-                        } else if (log.type === "out") {
-                            if (currentIn === null) return;
-                            // Clamp end
-                            let effectiveOut = clamp(logTime, windowStart, windowEnd);
-                            if (effectiveOut > currentIn) {
-                                duration += effectiveOut - currentIn;
-                            }
+
+                const pairLogs = (logs: AttendanceEntry[]) => {
+                    const sessions: {in: AttendanceEntry, out: AttendanceEntry}[] = [];
+                    let currentIn: AttendanceEntry | null = null;
+                    
+                    const sortedLogs = [...logs].sort((a, b) => a.timestamp - b.timestamp);
+                    
+                    for (const log of sortedLogs) {
+                        if (log.type === 'in') {
+                            currentIn = log;
+                        } else if (log.type === 'out' && currentIn) {
+                            sessions.push({in: currentIn, out: log});
                             currentIn = null;
                         }
-                    });
-                    
-                    // Handle ongoing session for today
-                    if (currentIn !== null && isToday) {
-                         const nowFl = Math.floor(Date.now() / 60000) * 60000;
-                         const effectiveOut = clamp(nowFl, windowStart, windowEnd);
-                         if (effectiveOut > currentIn) {
-                             duration += effectiveOut - currentIn;
-                         }
                     }
 
-                    return duration;
+                    // Handle Auto-Timeout for past dates
+                    if (currentIn && !isToday) {
+                        const shift = determineShift(currentIn.timestamp, schedule);
+                        let outTs = shift === 'am' ? schedule.amOut : (shift === 'pm' ? schedule.pmOut : schedule.otEnd);
+                        
+                        // Ensure outTs > inTs
+                        if (outTs <= currentIn.timestamp) {
+                             outTs = currentIn.timestamp + 60000;
+                        }
+
+                        const virtualOut: AttendanceEntry = {
+                            id: -(currentIn.id || Math.floor(Math.random() * 1000000)),
+                            idnumber: currentIn.idnumber,
+                            type: 'out',
+                            timestamp: outTs,
+                            photoDataUrl: '',
+                            status: 'Pending',
+                            validated_by: 'AUTO TIME OUT',
+                            is_overtime: currentIn.is_overtime
+                        };
+                        sessions.push({in: currentIn, out: virtualOut});
+                    }
+
+                    return sessions;
                 };
 
-                const regularLogs = dayLogs.filter(l => !l.is_overtime);
-                const overtimeLogs = dayLogs.filter(l => l.is_overtime);
+                // Unified Calculation Logic (Check all shifts for all sessions)
+                // Note: We use calculateSessionDuration which implements the "Golden Rule" (strict window clamping)
+                // ensuring that hours are only counted within official schedule boundaries.
+                const allSessions = pairLogs(dayLogs);
 
-                const dayTotalAm = computeShiftDuration(regularLogs, schedule.amIn, schedule.amOut, false);
-                const dayTotalPm = computeShiftDuration(regularLogs, schedule.pmIn, schedule.pmOut, false);
-                const dayTotalOt = computeShiftDuration(overtimeLogs, schedule.otStart, schedule.otEnd, false);
+                const calculateUnifiedTotal = (sessions: {in: AttendanceEntry, out: AttendanceEntry}[], requireApproved: boolean) => {
+                    let total = 0;
+                    sessions.forEach(s => {
+                        if (requireApproved) {
+                             const inOk = s.in.status === "Approved";
+                             const outOk = s.out.status === "Approved";
+                             if (!inOk || !outOk) return;
+                        }
+                        // Sum all windows (AM + PM + OT) for this session
+                        // Overlap handling: calculateSessionDuration returns 0 if session is outside the window.
+                        // If a session spans multiple windows (e.g. 11:00 AM - 2:00 PM), it will be counted in both AM (11-12) and PM (1-2)
+                        // correctly handling the lunch break gap.
+                        const am = calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'am', schedule);
+                        const pm = calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'pm', schedule);
+                        const ot = calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'ot', schedule);
+                        total += am + pm + ot;
+                    });
+                    return total;
+                };
 
-                const dayValidatedAm = computeShiftDuration(regularLogs, schedule.amIn, schedule.amOut, true);
-                const dayValidatedPm = computeShiftDuration(regularLogs, schedule.pmIn, schedule.pmOut, true);
-                const dayValidatedOt = computeShiftDuration(overtimeLogs, schedule.otStart, schedule.otEnd, true);
+                const dayTotalMs = calculateUnifiedTotal(allSessions, false);
+                const dayValidatedMs = calculateUnifiedTotal(allSessions, true);
 
-                const dayTotalMs = dayTotalAm + dayTotalPm + dayTotalOt;
-                const dayValidatedMs = dayValidatedAm + dayValidatedPm + dayValidatedOt;
+                // For OT column display only (calculated from all sessions to catch bleed-over)
+                const calculateOtOnly = (sessions: {in: AttendanceEntry, out: AttendanceEntry}[], requireApproved: boolean) => {
+                    let total = 0;
+                    sessions.forEach(s => {
+                        if (requireApproved) {
+                             const inOk = s.in.status === "Approved";
+                             const outOk = s.out.status === "Approved";
+                             if (!inOk || !outOk) return;
+                        }
+                        total += calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'ot', schedule);
+                    });
+                    return total;
+                };
+                const overtimeMs = calculateOtOnly(allSessions, false);
 
                 totalMsAll += dayTotalMs;
                 totalValidatedMsAll += dayValidatedMs;
 
-                // Smart Pairing Logic to handle late lunches and avoid duplicates
-                const sortedRegular = [...regularLogs].sort((a, b) => a.timestamp - b.timestamp);
-                const sortedOvertime = [...overtimeLogs].sort((a, b) => a.timestamp - b.timestamp);
-                
+                // Smart Pairing Logic for Display (Flatten sessions back to slots)
                 const noonCutoff = new Date(day.date).setHours(12, 30, 0, 0);
 
-                // 1. Identify Start Points (INs) - Regular
-                const s1 = sortedRegular.find(l => l.type === "in" && l.timestamp < noonCutoff) || null;
-                const s3 = sortedRegular.find(l => l.type === "in" && l.timestamp >= noonCutoff) || null;
-                
-                // OT IN: First from overtime logs
-                // Ensure we don't pick up the same timestamp as a regular log (if duplicate logs exist)
-                const s5 = sortedOvertime.find(l => 
-                    l.type === "in" && 
-                    (!s1 || l.timestamp !== s1.timestamp) && 
-                    (!s3 || l.timestamp !== s3.timestamp)
-                ) || null;
+                // Filter sessions by type/time
+                const amSessions = allSessions.filter(s => !s.in.is_overtime && s.in.timestamp < noonCutoff);
+                const pmSessions = allSessions.filter(s => !s.in.is_overtime && s.in.timestamp >= noonCutoff);
+                const otSessions = allSessions.filter(s => s.in.is_overtime);
 
-                // 2. Identify End Points (OUTs) based on Pairs
-                
-                // s2 (AM OUT): Last regular OUT after s1 but before s3 (if s3 exists)
+                // s1/s2 (AM): Earliest IN, Latest OUT
+                let s1: AttendanceEntry | null = null;
                 let s2: AttendanceEntry | null = null;
-                if (s1) {
-                    const searchEnd = s3 ? s3.timestamp : (new Date(day.date).setHours(23, 59, 59, 999));
-                    const candidates = sortedRegular.filter(l => l.type === "out" && l.timestamp > s1.timestamp && l.timestamp < searchEnd);
-                    s2 = candidates.pop() || null;
+                if (amSessions.length > 0) {
+                    // Sort by IN time
+                    amSessions.sort((a, b) => a.in.timestamp - b.in.timestamp);
+                    s1 = amSessions[0].in;
+                    // Sort by OUT time descending to get latest
+                    const sortedByOut = [...amSessions].sort((a, b) => b.out.timestamp - a.out.timestamp);
+                    s2 = sortedByOut[0].out;
                 }
 
-                // s4 (PM OUT): Last regular OUT after s3
+                // s3/s4 (PM): Earliest IN, Latest OUT
+                let s3: AttendanceEntry | null = null;
                 let s4: AttendanceEntry | null = null;
-                if (s3) {
-                    const candidates = sortedRegular.filter(l => l.type === "out" && l.timestamp > s3.timestamp);
-                    s4 = candidates.pop() || null;
+                if (pmSessions.length > 0) {
+                    pmSessions.sort((a, b) => a.in.timestamp - b.in.timestamp);
+                    s3 = pmSessions[0].in;
+                    const sortedByOut = [...pmSessions].sort((a, b) => b.out.timestamp - a.out.timestamp);
+                    s4 = sortedByOut[0].out;
                 }
 
-                // s6 (OT OUT): Last OT OUT after s5
+                // s5/s6 (OT): Earliest IN, Latest OUT
+                let s5: AttendanceEntry | null = null;
                 let s6: AttendanceEntry | null = null;
-                if (s5) {
-                    const candidates = sortedOvertime.filter(l => 
-                        l.type === "out" && 
-                        l.timestamp > s5.timestamp &&
-                        (!s2 || l.timestamp !== s2.timestamp) &&
-                        (!s4 || l.timestamp !== s4.timestamp)
-                    );
-                    s6 = candidates.pop() || null;
+                if (otSessions.length > 0) {
+                    otSessions.sort((a, b) => a.in.timestamp - b.in.timestamp);
+                    s5 = otSessions[0].in;
+                    const sortedByOut = [...otSessions].sort((a, b) => b.out.timestamp - a.out.timestamp);
+                    s6 = sortedByOut[0].out;
                 }
-
-                const overtimeMs = dayTotalOt;
 
                 return { date: day.date, s1, s2, s3, s4, s5, s6, dayTotalMs, overtimeMs, dayTotalMsScheduled: dayTotalMs };
             });
 
         return { days: processedDays, overallTotal: totalMsAll, overallValidated: totalValidatedMsAll };
-    }, [student, filteredAttendance, now, globalScheduleConfig, overtimeShifts]);
+    }, [student, filteredAttendance, now, globalScheduleConfig, overtimeShifts, studentSchedule, overrides]);
 
     const [showEvalRestriction, setShowEvalRestriction] = useState(false);
     const [detailEvaluation, setDetailEvaluation] = useState<EvaluationDetail | null>(null);
@@ -1220,6 +1273,155 @@ interface StudentsViewProps {
         };
     }, [student.idnumber]);
 
+    const handleDownloadExcel = () => {
+        if (days.length === 0) return;
+
+        // Helper to get status with auto-close support
+        const getStatus = (inSlot?: AttendanceEntry | null, outSlot?: AttendanceEntry | null) => {
+            const s1 = inSlot?.status?.toLowerCase();
+            const s2 = outSlot?.status?.toLowerCase();
+            const v1 = inSlot?.validated_by;
+            const v2 = outSlot?.validated_by;
+
+            // If any part is rejected -> unvalidated
+            if (s1 === "rejected" || s2 === "rejected") {
+                return "unvalidated";
+            }
+
+            // If any part is approved/validated or has validator -> validated
+            if (s1 === "approved" || s1 === "validated" || 
+                s2 === "approved" || s2 === "validated" ||
+                v1 || v2) {
+                return "validated";
+            }
+
+            // If slots exist -> pending
+            if (inSlot || outSlot) {
+                return "pending";
+            }
+
+            return "-";
+        };
+
+        // 1. Define Headers
+        const headerRows = [
+            [`NAME: ${student.lastname}, ${student.firstname}`, "", "", `COURSE: ${student.course}-${student.section}`, "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", ""],
+            [`TOTAL HOURS: ${formatHours(overallTotal)}`, "", `TOTAL VALIDATED HOURS: ${formatHours(overallValidated)}`, "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", ""],
+            ["DATE", "MORNING", "", "STATUS", "AFTERNOON", "", "OVERTIME", "", "STATUS", "TOTAL HOURS"], // Row 5
+            ["", "TIME IN", "TIME OUT", "", "TIME IN", "TIME OUT", "TIME IN", "TIME OUT", "", ""]  // Row 6
+        ];
+
+        // 2. Map Data
+        const dataRows = days.map(day => {
+            const fmt = (slot: AttendanceEntry | null | undefined) => slot ? new Date(slot.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "-";
+            const fmtOut = (slot: AttendanceEntry | null | undefined) => {
+                if (!slot) return "-";
+                if (slot.validated_by === "SYSTEM_AUTO_CLOSE" || slot.validated_by === "AUTO TIME OUT") {
+                    return "AUTO TIME OUT";
+                }
+                return new Date(slot.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            };
+            
+            // Determine statuses
+            // AM Status: s1 or s2
+            const amStatus = getStatus(day.s1, day.s2);
+            
+            // PM/OT Status: s3, s4, s5, s6
+            // If any PM/OT logs exist, pick the most relevant status
+            let pmStatus = "-";
+            if (day.s3 || day.s4) {
+                pmStatus = getStatus(day.s3, day.s4);
+            } else if (day.s5 || day.s6) {
+                pmStatus = getStatus(day.s5, day.s6);
+            }
+            
+            return [
+                day.date.toLocaleDateString(), // DATE
+                fmt(day.s1),                   // MORNING IN
+                fmtOut(day.s2),                // MORNING OUT
+                amStatus,                      // STATUS (AM)
+                fmt(day.s3),                   // AFTERNOON IN
+                fmtOut(day.s4),                // AFTERNOON OUT
+                fmt(day.s5),                   // OVERTIME IN
+                fmtOut(day.s6),                // OVERTIME OUT
+                pmStatus,                      // STATUS (PM/OT)
+                formatHours(day.dayTotalMs)    // TOTAL HOURS
+            ];
+        });
+
+        // 3. Combine
+        const wsData = [...headerRows, ...dataRows];
+
+        // 4. Create Worksheet
+        const worksheet = XLSX.utils.aoa_to_sheet(wsData);
+
+        // Apply styles
+        const headerStyle = {
+            font: { bold: true },
+            alignment: { horizontal: "center", vertical: "center" }
+        };
+        const boldLeftStyle = {
+            font: { bold: true },
+            alignment: { horizontal: "left", vertical: "center" }
+        };
+
+        // Apply styles to Top Info (Rows 1 & 3)
+        // A1, D1, A3, C3 should be bold
+        const boldCells = ["A1", "D1", "A3", "C3"];
+        boldCells.forEach(ref => {
+            if (worksheet[ref]) worksheet[ref].s = boldLeftStyle;
+        });
+
+        // Apply styles to Table Headers (Rows 5 & 6)
+        // Range A5:J6
+        const range = XLSX.utils.decode_range(worksheet['!ref'] || "A1:J100");
+        for (let R = 4; R <= 5; ++R) { // Rows 5 and 6 (0-indexed: 4, 5)
+            for (let C = range.s.c; C <= range.e.c; ++C) {
+                const cell = worksheet[XLSX.utils.encode_cell({ r: R, c: C })];
+                if (cell) cell.s = headerStyle;
+            }
+        }
+
+        // 5. Define Merges
+        worksheet['!merges'] = [
+            // Top Header Info
+            { s: { r: 0, c: 0 }, e: { r: 0, c: 2 } }, // NAME (A1:C1)
+            { s: { r: 0, c: 3 }, e: { r: 0, c: 9 } }, // COURSE (D1:J1)
+            { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, // TOTAL HOURS (A3:B3)
+            { s: { r: 2, c: 2 }, e: { r: 2, c: 5 } }, // TOTAL VALIDATED (C3:F3)
+
+            // Row 5/6 Headers
+            { s: { r: 4, c: 0 }, e: { r: 5, c: 0 } }, // DATE (A5:A6)
+            { s: { r: 4, c: 1 }, e: { r: 4, c: 2 } }, // MORNING (B5:C5)
+            { s: { r: 4, c: 3 }, e: { r: 5, c: 3 } }, // STATUS (D5:D6)
+            { s: { r: 4, c: 4 }, e: { r: 4, c: 5 } }, // AFTERNOON (E5:F5)
+            { s: { r: 4, c: 6 }, e: { r: 4, c: 7 } }, // OVERTIME (G5:H5)
+            { s: { r: 4, c: 8 }, e: { r: 5, c: 8 } }, // STATUS (I5:I6)
+            { s: { r: 4, c: 9 }, e: { r: 5, c: 9 } }, // TOTAL HOURS (J5:J6)
+        ];
+
+        // 6. Set Column Widths
+        worksheet['!cols'] = [
+            { wch: 15 }, // Date
+            { wch: 12 }, // Morning In
+            { wch: 18 }, // Morning Out
+            { wch: 12 }, // Status (AM)
+            { wch: 12 }, // Afternoon In
+            { wch: 18 }, // Afternoon Out
+            { wch: 12 }, // Overtime In
+            { wch: 18 }, // Overtime Out
+            { wch: 12 }, // Status (PM)
+            { wch: 15 }, // Total Hours
+        ];
+
+        // 7. Create Workbook and Download
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Attendance");
+        XLSX.writeFile(workbook, `Attendance_${student.firstname}_${student.lastname}.xlsx`);
+    };
+
     return (
         <>
         <div className="space-y-6 animate-in slide-in-from-right duration-300">
@@ -1242,16 +1444,18 @@ interface StudentsViewProps {
                     <div>
                         <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">Total Hours</p>
                         <p className="text-2xl font-bold text-blue-900">{formatHours(overallTotal)}</p>
+                        <p className="text-[11px] text-gray-600 mt-1">Pending + Validated</p>
                     </div>
                     <div className="p-2 bg-blue-100 rounded-xl">
                          <Clock className="text-blue-600" size={20} />
                     </div>
                 </div>
+
                 <div className="bg-green-50 p-4 rounded-2xl border border-green-100 flex items-center justify-between shadow-sm">
                     <div>
-                        <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-1">Total Validated Time</p>
+                        <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-1">Total Validated</p>
                         <p className="text-2xl font-bold text-green-900">{formatHours(overallValidated)}</p>
-                        <p className="text-[11px] text-gray-600 mt-1">Requirement: 486 hours validated</p>
+                        <p className="text-[11px] text-gray-600 mt-1">Target: 486 hours</p>
                     </div>
                     <div className="p-2 bg-green-100 rounded-xl">
                         <ClipboardCheck className="text-green-600" size={20} />
@@ -1318,19 +1522,29 @@ interface StudentsViewProps {
                         Unvalidated: {statusCounts.Rejected}
                     </span>
                 </div>
-                <div className="w-full sm:w-40">
-                    <select
-                        value={monthFilter}
-                        onChange={e => setMonthFilter(e.target.value)}
-                        className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-900 bg-white focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                    <div className="w-full sm:w-40">
+                        <select
+                            value={monthFilter}
+                            onChange={e => setMonthFilter(e.target.value)}
+                            className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-900 bg-white focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                        >
+                            <option value="">All months</option>
+                            {monthOptions.map(opt => (
+                                <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                    <button
+                        onClick={handleDownloadExcel}
+                        disabled={days.length === 0}
+                        className="px-3 py-1.5 rounded-lg border border-gray-300 bg-white text-gray-700 text-xs font-bold hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap flex items-center gap-2"
                     >
-                        <option value="">All months</option>
-                        {monthOptions.map(opt => (
-                            <option key={opt.value} value={opt.value}>
-                                {opt.label}
-                            </option>
-                        ))}
-                    </select>
+                        <FileDown size={14} />
+                        Export Attendance
+                    </button>
                 </div>
             </div>
 
@@ -1375,18 +1589,29 @@ interface StudentsViewProps {
                                             year: "numeric",
                                         })}
                                     </td>
-                                    {[day.s1, day.s2, day.s3, day.s4, day.s5, day.s6].map((slot, idx) => (
+                                    {[day.s1, day.s2, day.s3, day.s4, day.s5, day.s6].map((slot, idx) => {
+                                        // Determine the pair OUT slot to check if the session is auto-timed out
+                                        const pairOut = (idx === 0 || idx === 1) ? day.s2 : (idx === 2 || idx === 3) ? day.s4 : day.s6;
+                                        const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
+
+                                        return (
                                         <td
                                             key={idx}
                                             className="px-2 py-3 border-r border-gray-100 text-center align-top w-[12%]"
                                         >
-                                            {slot ? (
+                                            {isSessionAutoTimeOut && slot?.type === 'out' ? (
+                                                slot?.type === 'out' ? (
+                                                    <span className="text-[11px] font-bold text-red-500 whitespace-nowrap block py-4">AUTO TIME OUT</span>
+                                                ) : (
+                                                    <span className="text-gray-300 block py-4">-</span>
+                                                )
+                                            ) : slot ? (
                                                 <div className="flex flex-col items-center gap-1.5">
                                                     <span className="text-xs font-semibold text-gray-900">
                                                         {formatTime(slot.timestamp)}
                                                     </span>
                                                     <span
-                                                        className={`text-[11px] font-semibold ${
+                                                        className={`text-[11px] font-semibold flex items-center justify-center gap-1 ${
                                                             slot.status === "Approved"
                                                                 ? "text-green-600"
                                                                 : slot.status === "Rejected"
@@ -1394,18 +1619,21 @@ interface StudentsViewProps {
                                                                 : "text-yellow-600"
                                                         }`}
                                                     >
-                                                        {slot.status === "Approved"
-                                                            ? "Validated"
-                                                            : slot.status === "Rejected"
-                                                            ? "Unvalidated"
-                                                            : "Pending"}
+                                                        {slot.status === "Approved" ? (
+                                                            "Validated"
+                                                        ) : slot.status === "Rejected" ? (
+                                                            "Unvalidated"
+                                                        ) : (
+                                                            "Pending"
+                                                        )}
                                                     </span>
                                                 </div>
                                             ) : (
                                                 <span className="text-gray-300 block py-4">-</span>
                                             )}
                                         </td>
-                                    ))}
+                                        );
+                                    })}
                                     <td className="px-6 py-4 text-center font-bold text-gray-900 whitespace-nowrap">
                                         {formatHours(day.dayTotalMs)}
                                     </td>
@@ -1541,6 +1769,9 @@ interface StudentsViewProps {
     evaluationStatuses,
     toggleEvaluation,
     overtimeShifts,
+    studentSchedules,
+    overridesData,
+    scheduleConfigs,
   }: {
     students: User[];
     attendance: AttendanceEntry[];
@@ -1549,6 +1780,12 @@ interface StudentsViewProps {
     evaluationStatuses: Record<string, boolean>;
     toggleEvaluation: (id: string, current: boolean) => void;
     overtimeShifts: { student_id: string; date: string; start: number; end: number }[];
+    studentSchedules: Record<string, any>;
+    overridesData: Record<string, any>;
+    scheduleConfigs: {
+        global: { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn: string; otOut: string } | null;
+        bySupervisor: Record<string, { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn: string; otOut: string }>;
+    };
   }) => {
 
     // 1. Calculate available weeks dynamically based on attendance data
@@ -1638,43 +1875,7 @@ interface StudentsViewProps {
         return () => clearInterval(id);
     }, []);
 
-    const [scheduleConfig, setScheduleConfig] = useState<{
-        amIn: string; amOut: string;
-        pmIn: string; pmOut: string;
-        otIn: string; otOut: string;
-    } | null>(null);
 
-    useEffect(() => {
-        const fetchSchedule = async () => {
-            try {
-                const res = await fetch('/api/shifts');
-                const data = await res.json();
-                if (data.shifts) {
-                    const config = {
-                        amIn: "07:00", amOut: "11:00",
-                        pmIn: "13:00", pmOut: "17:00",
-                        otIn: "17:00", otOut: "18:00"
-                    };
-                    data.shifts.forEach((s: any) => {
-                        if (s.shift_name === "Morning Shift") {
-                            config.amIn = s.official_start;
-                            config.amOut = s.official_end;
-                        } else if (s.shift_name === "Afternoon Shift") {
-                            config.pmIn = s.official_start;
-                            config.pmOut = s.official_end;
-                        } else if (s.shift_name === "Overtime Shift") {
-                            config.otIn = s.official_start;
-                            config.otOut = s.official_end;
-                        }
-                    });
-                    setScheduleConfig(config);
-                }
-            } catch (e) {
-                console.error("Failed to fetch schedule", e);
-            }
-        };
-        fetchSchedule();
-    }, []);
 
     const weekMs = 7 * 24 * 60 * 60 * 1000;
     const weekEnd = selectedWeekStart + weekMs;
@@ -1749,112 +1950,91 @@ interface StudentsViewProps {
                 const baseDate = new Date(day.date);
                 baseDate.setHours(0, 0, 0, 0);
 
-                const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+                // Priority: Date Override > Student Local Schedule > Supervisor Config > Global Config > Default
+                const localSched = studentSchedules[s.idnumber];
+                const overrides = s.supervisorid ? overridesData[s.supervisorid] : null;
+                
+                const y = baseDate.getFullYear();
+                const m = String(baseDate.getMonth() + 1).padStart(2, '0');
+                const d = String(baseDate.getDate()).padStart(2, '0');
+                const dateStr = `${y}-${m}-${d}`;
 
-                const buildShift = (timeStr: string) => {
-                    const [h, m] = timeStr.split(":").map(Number);
-                    const d = new Date(baseDate.getTime());
-                    d.setHours(h || 0, m || 0, 0, 0);
-                    return d.getTime();
+                const override = overrides ? overrides[dateStr] : null;
+                const dynamicOt = overtimeShifts.find(shift => String(shift.student_id) === String(s.idnumber) && (shift.date === dateStr || (shift as any).effective_date === dateStr));
+
+                const supSched = s.supervisorid ? scheduleConfigs.bySupervisor[s.supervisorid] : null;
+                const globalSched = scheduleConfigs.global;
+                const fallbackSched = supSched || globalSched || {
+                    amIn: "08:00", amOut: "12:00",
+                    pmIn: "13:00", pmOut: "17:00",
+                    otIn: "17:00", otOut: "18:00"
                 };
 
-                let schedule: {
-                    amIn: number; amOut: number;
-                    pmIn: number; pmOut: number;
-                    otStart: number; otEnd: number;
-                };
-
-                if (scheduleConfig) {
-                    schedule = {
-                        amIn: buildShift(scheduleConfig.amIn),
-                        amOut: buildShift(scheduleConfig.amOut),
-                        pmIn: buildShift(scheduleConfig.pmIn),
-                        pmOut: buildShift(scheduleConfig.pmOut),
-                        otStart: buildShift(scheduleConfig.otIn),
-                        otEnd: buildShift(scheduleConfig.otOut),
-                    };
-                } else {
-                    schedule = {
-                        amIn: buildShift("08:00"),
-                        amOut: buildShift("12:00"),
-                        pmIn: buildShift("13:00"),
-                        pmOut: buildShift("17:00"),
-                        otStart: buildShift("17:00"),
-                        otEnd: buildShift("18:00"),
-                    };
-                }
+                const schedule = buildSchedule(
+                    baseDate,
+                    {
+                        amIn: override?.am?.start || localSched?.am_in || fallbackSched.amIn,
+                        amOut: override?.am?.end || localSched?.am_out || fallbackSched.amOut,
+                        pmIn: override?.pm?.start || localSched?.pm_in || fallbackSched.pmIn,
+                        pmOut: override?.pm?.end || localSched?.pm_out || fallbackSched.pmOut,
+                        otIn: localSched?.ot_in || fallbackSched.otIn,
+                        otOut: localSched?.ot_out || fallbackSched.otOut
+                    },
+                    dynamicOt ? { start: dynamicOt.start || (dynamicOt as any).overtime_start, end: dynamicOt.end || (dynamicOt as any).overtime_end } : undefined
+                );
 
                 const regularLogs = dayLogs.filter(l => !l.is_overtime);
                 const overtimeLogs = dayLogs.filter(l => l.is_overtime);
 
-                const computeShiftDuration = (
-                    entries: AttendanceEntry[],
-                    windowStart: number,
-                    windowEnd: number,
-                    requireApproved: boolean
-                ) => {
-                    let currentIn: number | null = null;
-                    let duration = 0;
-                    // 30 mins buffer for start, 12 hours for end (clamped)
-                    const BUFFER_START_MS = 30 * 60 * 1000;
-                    const BUFFER_END_MS = 12 * 60 * 60 * 1000;
-                    const searchStart = windowStart - BUFFER_START_MS;
-                    const searchEnd = windowEnd + BUFFER_END_MS;
+                const pairLogs = (logs: AttendanceEntry[]) => {
+                    const sessions: {in: number, out: number}[] = [];
+                    let currentIn: AttendanceEntry | null = null;
+                    
+                    // Sort logs just in case
+                    const sortedLogs = logs.slice().sort((a, b) => a.timestamp - b.timestamp);
 
-                    entries.forEach(log => {
-                        if (log.timestamp < searchStart || log.timestamp > searchEnd) return;
-                        if (requireApproved && log.status !== "Approved") {
-                            return;
-                        }
-                        if (log.type === "in") {
-                            if (log.timestamp > windowEnd) return;
-                            let effectiveIn = clamp(log.timestamp, windowStart, windowEnd);
-                            effectiveIn = Math.floor(effectiveIn / 60000) * 60000;
-                            currentIn = effectiveIn;
-                        } else if (log.type === "out") {
-                            if (currentIn === null) return;
-                            let effectiveOut = clamp(log.timestamp, windowStart, windowEnd);
-                            effectiveOut = Math.floor(effectiveOut / 60000) * 60000;
-                            if (effectiveOut > currentIn) {
-                                duration += effectiveOut - currentIn;
-                            }
+                    for (const log of sortedLogs) {
+                        if (log.type === 'in') {
+                            currentIn = log;
+                        } else if (log.type === 'out' && currentIn) {
+                            sessions.push({in: currentIn.timestamp, out: log.timestamp});
                             currentIn = null;
                         }
-                    });
-
-                    if (currentIn !== null) {
-                        // Live calculation removed to enforce strict pairing
                     }
 
-                    // Uniform rounding: Floor to nearest minute
-                    return Math.floor(duration / 60000) * 60000;
+                    // Auto-Timeout Logic (Consistent with Detail View)
+                    const isToday = new Date().toDateString() === baseDate.toDateString();
+                    if (currentIn && !isToday) {
+                         const shift = determineShift(currentIn.timestamp, schedule);
+                         let outTs = shift === 'am' ? schedule.amOut : (shift === 'pm' ? schedule.pmOut : schedule.otEnd);
+                         
+                         // Ensure outTs > inTs
+                         if (outTs <= currentIn.timestamp) {
+                             outTs = currentIn.timestamp + 60000;
+                         }
+                         sessions.push({in: currentIn.timestamp, out: outTs});
+                    }
+
+                    return sessions;
                 };
 
-                const computeOtDuration = (logs: AttendanceEntry[]) => {
-                    let duration = 0;
-                    let currentIn: number | null = null;
-                    const sorted = [...logs].sort((a,b) => a.timestamp - b.timestamp);
+                const regularSessions = pairLogs(regularLogs);
+                const overtimeSessions = pairLogs(overtimeLogs);
+
+                let dayTotalMs = 0;
+
+                // Regular sessions contribute to AM and PM windows
+                regularSessions.forEach(session => {
+                    const am = calculateSessionDuration(session.in, session.out, 'am', schedule, false);
+                    const pm = calculateSessionDuration(session.in, session.out, 'pm', schedule, false);
                     
-                    sorted.forEach(log => {
-                        if (log.type === "in") {
-                            currentIn = Math.floor(log.timestamp / 60000) * 60000;
-                        } else if (log.type === "out") {
-                            if (currentIn !== null) {
-                                const effectiveOut = Math.floor(log.timestamp / 60000) * 60000;
-                                if (effectiveOut > currentIn) {
-                                    duration += effectiveOut - currentIn;
-                                }
-                                currentIn = null;
-                            }
-                        }
-                    });
-                    return duration;
-                };
+                    dayTotalMs += am + pm;
+                });
 
-                const dayTotalMs =
-                    computeShiftDuration(regularLogs, schedule.amIn, schedule.amOut, false) +
-                    computeShiftDuration(regularLogs, schedule.pmIn, schedule.pmOut, false) +
-                    computeOtDuration(overtimeLogs);
+                // Overtime sessions contribute to OT window
+                overtimeSessions.forEach(session => {
+                    dayTotalMs += calculateSessionDuration(session.in, session.out, 'ot', schedule, false);
+                });
 
                 let dayIdx = day.date.getDay() - 1;
                 if (dayIdx === -1) dayIdx = 6;
@@ -1867,15 +2047,9 @@ interface StudentsViewProps {
         });
 
         return map;
-    }, [filteredStudents, attendance, selectedWeekStart, weekEnd, now, scheduleConfig]);
+    }, [filteredStudents, attendance, selectedWeekStart, weekEnd, now, scheduleConfigs, studentSchedules, overridesData, overtimeShifts]);
 
-    const formatHours = (ms: number) => {
-        if (!ms) return "-";
-        const totalSeconds = Math.floor(ms / 1000);
-        const h = Math.floor(totalSeconds / 3600);
-        const m = Math.floor((totalSeconds % 3600) / 60);
-        return `${h}h ${m}m`;
-    };
+
 
     const weekNumber = useMemo(() => {
         const d = new Date(selectedWeekStart);
@@ -1900,12 +2074,16 @@ interface StudentsViewProps {
     };
 
     if (selectedStudentDetail) {
+        const fallbackConfig = (selectedStudentDetail.supervisorid && scheduleConfigs.bySupervisor[selectedStudentDetail.supervisorid]) || scheduleConfigs.global;
+
         return (
             <StudentAttendanceDetailView 
                 student={selectedStudentDetail}
                 attendance={attendance}
                 overtimeShifts={overtimeShifts}
-                scheduleConfig={scheduleConfig}
+                scheduleConfig={fallbackConfig}
+                studentSchedule={studentSchedules[selectedStudentDetail.idnumber]}
+                overrides={selectedStudentDetail.supervisorid ? overridesData[selectedStudentDetail.supervisorid] : null}
                 onBack={() => setSelectedStudentDetail(null)}
                 evaluationStatuses={evaluationStatuses}
                 toggleEvaluation={toggleEvaluation}
@@ -1944,11 +2122,10 @@ interface StudentsViewProps {
                              {uniqueCourses.map(c => <option key={c} value={c}>{c}</option>)}
                          </select>
                          <select 
-                             value={filterSection}
-                             onChange={e => setFilterSection(e.target.value)}
-                             disabled={!filterCourse}
-                             className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 bg-gray-50 hover:bg-white transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed min-w-[100px]"
-                         >
+                            value={filterSection}
+                            onChange={e => setFilterSection(e.target.value)}
+                            className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 bg-gray-50 hover:bg-white transition-all cursor-pointer min-w-[100px]"
+                        >
                              <option value="">Section</option>
                              {availableSections.map(s => <option key={s} value={s}>{s}</option>)}
                          </select>
@@ -2180,7 +2357,11 @@ interface StudentsViewProps {
   activeSessions,
   attendanceSummary,
   evaluation,
-  onViewedChange
+  onViewedChange,
+  overtimeShifts,
+  scheduleConfigs,
+  overridesData,
+  studentSchedules
 }: StudentsViewProps) => {
     const [searchTerm, setSearchTerm] = useState("");
     const [filterCourse, setFilterCourse] = useState("");
@@ -2202,6 +2383,23 @@ interface StudentsViewProps {
 
     // Persistent Broadcast Channel
     const [broadcastChannel, setBroadcastChannel] = useState<RealtimeChannel | null>(null);
+
+    const effectiveScheduleConfig = useMemo(() => {
+        if (!selected) return null;
+        const studentSchedule = selected.idnumber ? studentSchedules[selected.idnumber] : null;
+        const supervisorConfig = selected?.supervisorid ? scheduleConfigs.bySupervisor[selected.supervisorid] : null;
+        const globalConfig = scheduleConfigs.global;
+        
+        return studentSchedule ? {
+             amIn: studentSchedule.am_in, amOut: studentSchedule.am_out,
+             pmIn: studentSchedule.pm_in, pmOut: studentSchedule.pm_out,
+             otIn: studentSchedule.ot_in, otOut: studentSchedule.ot_out
+        } : (supervisorConfig || globalConfig || {
+            amIn: "08:00", amOut: "12:00",
+            pmIn: "13:00", pmOut: "17:00",
+            otIn: "17:00", otOut: "18:00"
+        });
+    }, [selected, studentSchedules, scheduleConfigs]);
 
     useEffect(() => {
         if (selected && window.innerWidth < 1024) {
@@ -2503,6 +2701,9 @@ interface StudentsViewProps {
               onViewAttendanceEntry={setSelectedAttendanceEntry}
               evaluation={evaluation}
               openEvaluationModal={() => { if (selected?.idnumber) { markViewedNow("att", selected.idnumber); markViewedNow("rep", selected.idnumber); } setEvaluationModalOpen(true); }}
+              overtimeShifts={overtimeShifts}
+              scheduleConfig={effectiveScheduleConfig}
+              overrides={selected?.supervisorid ? overridesData[selected.supervisorid] : undefined}
             />
           </div>
         </div>
@@ -2514,7 +2715,7 @@ interface StudentsViewProps {
                     <div className="p-6 border-b border-gray-100 flex items-center justify-between">
                         <div>
                             <h3 className="text-xl font-bold text-gray-900">{viewingReport.title || "Untitled Report"}</h3>
-                            <p className="text-sm text-gray-500 mt-1">Submitted on {new Date(viewingReport.submittedAt).toLocaleDateString()} at {new Date(viewingReport.submittedAt).toLocaleTimeString()}</p>
+                            <p className="text-sm text-gray-500 mt-1">Submitted on {new Date(viewingReport.submittedAt).toLocaleDateString()} at {new Date(viewingReport.submittedAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</p>
                         </div>
                         <button onClick={() => setViewingReport(null)} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
                             <X size={20} className="text-gray-500" />
@@ -2649,33 +2850,40 @@ interface StudentsViewProps {
                 {filteredAttendance.length === 0 ? (
                   <div className="p-6 text-center bg-gray-50 rounded-xl border border-dashed border-gray-200 text-gray-500 text-sm">No attendance records found</div>
                 ) : (
-                  filteredAttendance.slice().sort((a,b) => b.timestamp - a.timestamp).map((entry, idx) => (
+                  filteredAttendance.slice().sort((a,b) => b.timestamp - a.timestamp).map((entry, idx) => {
+                    const isAutoTimeOut = entry.validated_by === 'SYSTEM_AUTO_CLOSE' || entry.validated_by === 'AUTO TIME OUT';
+                    return (
                     <button 
                         key={`${entry.timestamp}-${idx}`} 
                         onClick={() => setSelectedAttendanceEntry(entry)}
                         className="w-full flex items-center gap-2 p-2 rounded-xl bg-gray-50 border border-gray-100 hover:border-orange-200 hover:bg-orange-50/50 transition-all text-left group"
                     >
-                      <div className="h-8 w-8 rounded-md bg-gray-200 overflow-hidden flex-shrink-0 relative">
-                        {entry.photoDataUrl ? (
-                            <img src={entry.photoDataUrl} className="h-full w-full object-cover" alt="log" />
-                        ) : (
-                            <div className="flex items-center justify-center h-full w-full text-gray-400">
-                                <Users size={16} />
-                            </div>
-                        )}
-                      </div>
+                      {!isAutoTimeOut && (
+                          <div className="h-8 w-8 rounded-md bg-gray-200 overflow-hidden flex-shrink-0 relative">
+                            {entry.photoDataUrl ? (
+                                <img src={entry.photoDataUrl} className="h-full w-full object-cover" alt="log" />
+                            ) : (
+                                <div className="flex items-center justify-center h-full w-full text-gray-400">
+                                    <Users size={16} />
+                                </div>
+                            )}
+                          </div>
+                      )}
                       <div className="flex-1">
                         <div className="flex items-center justify-between">
                           <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${entry.type === 'in' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
                             {entry.type.toUpperCase()}
                           </span>
+                          {!isAutoTimeOut && (
                           <span className="text-[11px] text-gray-900 font-medium group-hover:text-orange-700 transition-colors">
                             {new Date(entry.timestamp).toLocaleString()}
                           </span>
+                          )}
                         </div>
+                        {isAutoTimeOut && <span className="text-[10px] font-bold text-red-500 mt-1 block">AUTO TIME OUT</span>}
                       </div>
                     </button>
-                  ))
+                  )})
                 )}
               </div>
             </div>
@@ -2922,6 +3130,20 @@ export default function InstructorPage() {
   const [activeSessions, setActiveSessions] = useState<Record<string, number>>({});
   const [serverSummary, setServerSummary] = useState<Record<string, number>>({});
   const [overtimeShifts, setOvertimeShifts] = useState<{ student_id: string; date: string; start: number; end: number }[]>([]);
+  
+  // Global Data for Summary Calculation
+  const [allStudentSchedules, setAllStudentSchedules] = useState<Record<string, any>>({});
+  const [allOverrides, setAllOverrides] = useState<Record<string, Record<string, any>>>({});
+  const [allOvertimeShifts, setAllOvertimeShifts] = useState<any[]>([]);
+
+  const userSupervisorMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    students.forEach(s => {
+        if (s.supervisorid) map[s.idnumber] = s.supervisorid;
+    });
+    return map;
+  }, [students]);
+
   const [evaluationStatuses, setEvaluationStatuses] = useState<Record<string, boolean>>({});
   const [allowApproval, setAllowApproval] = useState<boolean>(true);
   const [broadcastChannel, setBroadcastChannel] = useState<RealtimeChannel | null>(null);
@@ -2939,43 +3161,128 @@ export default function InstructorPage() {
   const [availableSections, setAvailableSections] = useState<Section[]>([]);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
-  const [scheduleConfig, setScheduleConfig] = useState<{
-    amIn: string; amOut: string;
-    pmIn: string; pmOut: string;
-    otIn: string; otOut: string;
-  } | null>(null);
+  const [scheduleConfigs, setScheduleConfigs] = useState<{
+        global: { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn: string; otOut: string } | null;
+        bySupervisor: Record<string, { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn: string; otOut: string }>;
+    }>({ global: null, bySupervisor: {} });
 
+    const effectiveScheduleConfig = useMemo(() => {
+        if (!selected) return null;
+        const studentSchedule = selected.idnumber ? allStudentSchedules[selected.idnumber] : null;
+        const supervisorConfig = selected?.supervisorid ? scheduleConfigs.bySupervisor[selected.supervisorid] : null;
+        const globalConfig = scheduleConfigs.global;
+        
+        return studentSchedule ? {
+             amIn: studentSchedule.am_in, amOut: studentSchedule.am_out,
+             pmIn: studentSchedule.pm_in, pmOut: studentSchedule.pm_out,
+             otIn: studentSchedule.ot_in, otOut: studentSchedule.ot_out
+        } : (supervisorConfig || globalConfig || {
+            amIn: "08:00", amOut: "12:00",
+            pmIn: "13:00", pmOut: "17:00",
+            otIn: "17:00", otOut: "18:00"
+        });
+    }, [selected, allStudentSchedules, scheduleConfigs]);
+
+  // Consolidate fetch logic
   useEffect(() => {
-    const fetchSchedule = async () => {
-        try {
-            const res = await fetch('/api/shifts');
-            const data = await res.json();
-            if (data.shifts) {
-                const config = {
-                    amIn: "07:00", amOut: "11:00",
-                    pmIn: "13:00", pmOut: "17:00",
-                    otIn: "17:00", otOut: "18:00"
-                };
-                data.shifts.forEach((s: any) => {
-                    if (s.shift_name === "Morning Shift") {
-                        config.amIn = s.official_start;
-                        config.amOut = s.official_end;
-                    } else if (s.shift_name === "Afternoon Shift") {
-                        config.pmIn = s.official_start;
-                        config.pmOut = s.official_end;
-                    } else if (s.shift_name === "Overtime Shift") {
-                        config.otIn = s.official_start;
-                        config.otOut = s.official_end;
-                    }
-                });
-                setScheduleConfig(config);
+        const fetchSchedule = async () => {
+            try {
+                // Fetch student schedules
+                const resSchedules = await fetch('/api/student-schedules');
+                const dataSchedules = await resSchedules.json();
+                if (dataSchedules.schedules) {
+                    setAllStudentSchedules(dataSchedules.schedules);
+                }
+
+                // Fetch shifts (Global + Supervisor + Overrides)
+                const res = await fetch('/api/shifts?all=true');
+                const data = await res.json();
+                if (data.shifts) {
+                    const globalShifts: any[] = [];
+                    const supervisorShiftsMap: Record<string, any[]> = {};
+                    const overridesMap: Record<string, Record<string, any>> = {};
+
+                    data.shifts.forEach((s: any) => {
+                        if (s.shift_name && s.shift_name.startsWith("OVERRIDE:::")) {
+                            const parts = s.shift_name.split(':::');
+                            if (parts.length === 3 && s.supervisor_id) {
+                                const date = parts[1];
+                                const type = parts[2]; // AM or PM
+                                const supId = s.supervisor_id;
+                                
+                                if (!overridesMap[supId]) overridesMap[supId] = {};
+                                if (!overridesMap[supId][date]) overridesMap[supId][date] = {};
+                                
+                                if (type === 'AM') {
+                                    overridesMap[supId][date].am = { start: s.official_start, end: s.official_end };
+                                } else if (type === 'PM') {
+                                    overridesMap[supId][date].pm = { start: s.official_start, end: s.official_end };
+                                }
+                            }
+                        } else if (s.supervisor_id) {
+                            if (!supervisorShiftsMap[s.supervisor_id]) {
+                                supervisorShiftsMap[s.supervisor_id] = [];
+                            }
+                            supervisorShiftsMap[s.supervisor_id].push(s);
+                        } else {
+                            globalShifts.push(s);
+                        }
+                    });
+
+                    setAllOverrides(overridesMap);
+
+                    const parseConfig = (shifts: any[]) => {
+                        const config = {
+                            amIn: "08:00", amOut: "12:00",
+                            pmIn: "13:00", pmOut: "17:00",
+                            otIn: "17:00", otOut: "18:00"
+                        };
+                        shifts.forEach(s => {
+                            if (s.shift_name === "Morning Shift") {
+                                config.amIn = s.official_start || "08:00";
+                                config.amOut = s.official_end || "12:00";
+                            } else if (s.shift_name === "Afternoon Shift") {
+                                config.pmIn = s.official_start || "13:00";
+                                config.pmOut = s.official_end || "17:00";
+                            } else if (s.shift_name === "Overtime Shift") {
+                                config.otIn = s.official_start || "17:00";
+                                config.otOut = s.official_end || "18:00";
+                            }
+                        });
+                        return config;
+                    };
+
+                    const globalConfig = parseConfig(globalShifts);
+                    const bySupervisor: Record<string, any> = {};
+                    
+                    Object.keys(supervisorShiftsMap).forEach(supId => {
+                        bySupervisor[supId] = parseConfig(supervisorShiftsMap[supId]);
+                    });
+
+                    setScheduleConfigs({
+                        global: globalConfig,
+                        bySupervisor
+                    });
+                }
+                
+                // Fetch Overtime Shifts
+                 const otRes = await fetch('/api/overtime');
+                 const otData = await otRes.json();
+                 if (otData.overtime_shifts) {
+                      setAllOvertimeShifts(otData.overtime_shifts.map((s: any) => ({
+                          student_id: String(s.student_id),
+                          date: s.effective_date,
+                          start: s.overtime_start,
+                          end: s.overtime_end
+                      })));
+                 }
+
+            } catch (e) {
+                console.error("Failed to fetch schedule", e);
             }
-        } catch (e) {
-            console.error("Failed to fetch schedule", e);
-        }
-    };
-    fetchSchedule();
-  }, []);
+        };
+        fetchSchedule();
+    }, [refreshTrigger]);
 
   // User Info
   const myIdnumber = useMemo(() => {
@@ -3011,12 +3318,13 @@ export default function InstructorPage() {
   // --- Effects ---
 
   // Fetch Students & Profile
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch("/api/users", { cache: "no-store" });
-        const json = await res.json();
-        if (Array.isArray(json.users)) {
+    useEffect(() => {
+      (async () => {
+        try {
+          // Fetch all users (high limit to ensure we get everyone)
+          const res = await fetch("/api/users?limit=10000", { cache: "no-store" });
+          const json = await res.json();
+          if (Array.isArray(json.users)) {
           const me = (json.users as User[]).find(u => String(u.idnumber) === String(myIdnumber) && String(u.role).toLowerCase() === "instructor");
           setMyProfile(me || null);
 
@@ -3070,6 +3378,46 @@ export default function InstructorPage() {
         const data = await res.json();
         if (data.courses) setAvailableCourses(data.courses);
         if (data.sections) setAvailableSections(data.sections);
+      } catch {}
+    })();
+  }, []);
+
+  // Fetch Schedule Configs & Student Schedules
+  useEffect(() => {
+    (async () => {
+      try {
+        const [shiftsRes, schedulesRes] = await Promise.all([
+          fetch("/api/shifts?all=true"),
+          fetch("/api/student-schedules")
+        ]);
+
+        const shiftsJson = await shiftsRes.json();
+        if (shiftsJson.shifts && Array.isArray(shiftsJson.shifts)) {
+          const defaultSchedule = { amIn: "08:00", amOut: "12:00", pmIn: "13:00", pmOut: "17:00", otIn: "17:00", otOut: "18:00" };
+          const global = { ...defaultSchedule };
+          const bySupervisor: Record<string, typeof defaultSchedule> = {};
+
+          shiftsJson.shifts.forEach((s: any) => {
+            const target = s.supervisor_id ? (bySupervisor[s.supervisor_id] ||= { ...defaultSchedule }) : global;
+            
+            if (s.shift_name === "Morning Shift") {
+              target.amIn = s.official_start;
+              target.amOut = s.official_end;
+            } else if (s.shift_name === "Afternoon Shift") {
+              target.pmIn = s.official_start;
+              target.pmOut = s.official_end;
+            } else if (s.shift_name === "Overtime Shift") {
+              target.otIn = s.official_start;
+              target.otOut = s.official_end;
+            }
+          });
+          setScheduleConfigs({ global, bySupervisor });
+        }
+
+        const schedulesJson = await schedulesRes.json();
+        if (schedulesJson.schedules) {
+          setAllStudentSchedules(schedulesJson.schedules);
+        }
       } catch {}
     })();
   }, []);
@@ -3199,8 +3547,42 @@ export default function InstructorPage() {
     if (!supabase) return;
     const ch = supabase
       .channel('instructor_global_attendance_summary')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, (payload: RealtimePostgresChangesPayload<any>) => {
         setRefreshTrigger(prev => prev + 1);
+
+        // Optimistic Update for immediate UI feedback
+        const row = payload.new;
+        if (!row) return;
+
+        if (payload.eventType === 'INSERT') {
+            const newEntry: AttendanceEntry = {
+                id: row.id,
+                idnumber: row.idnumber,
+                type: String(row.type || "").toLowerCase().includes("out") ? "out" : "in",
+                timestamp: Number(row.ts),
+                photoDataUrl: row.photourl || "",
+                status: (String(row.status || "").toUpperCase() === 'VALIDATED' || String(row.status || "").toUpperCase() === 'APPROVED') ? 'Approved' : (String(row.status || "").toUpperCase() === 'REJECTED' ? 'Rejected' : 'Pending'),
+                validatedBy: row.validated_by,
+                validated_by: row.validated_by,
+                validatedAt: row.validated_at ? Number(new Date(row.validated_at).getTime()) : undefined,
+                is_overtime: row.is_overtime
+            };
+            setAttendance(prev => [...prev, newEntry]);
+        } else if (payload.eventType === 'UPDATE') {
+             setAttendance(prev => prev.map(p => {
+                 if (p.id === row.id) {
+                     return {
+                        ...p,
+                        status: (String(row.status || "").toUpperCase() === 'VALIDATED' || String(row.status || "").toUpperCase() === 'APPROVED') ? 'Approved' : (String(row.status || "").toUpperCase() === 'REJECTED' ? 'Rejected' : 'Pending'),
+                        validatedBy: row.validated_by,
+                        validated_by: row.validated_by,
+                        validatedAt: row.validated_at ? Number(new Date(row.validated_at).getTime()) : undefined,
+                        is_overtime: row.is_overtime
+                     };
+                 }
+                 return p;
+             }));
+        }
       })
       .subscribe();
     return () => {
@@ -3291,6 +3673,7 @@ export default function InstructorPage() {
             const isRejected = sStr === "rejected";
             const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
             return {
+              id: e.id,
               idnumber: e.idnumber,
               type: e.type,
               timestamp: e.ts,
@@ -3298,6 +3681,7 @@ export default function InstructorPage() {
               status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
               validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
               validatedBy: e.validated_by || undefined,
+              validated_by: e.validated_by || undefined,
               is_overtime: e.is_overtime
             };
           }) as AttendanceEntry[];
@@ -3319,61 +3703,44 @@ export default function InstructorPage() {
 
     const calculateOngoing = (start: number, studentId: string) => {
         const d = new Date(start);
-        const dayDate = new Date(d);
-        dayDate.setHours(0,0,0,0);
-
-        const makeTime = (t: string) => {
-            const [h, m] = t.split(":").map(Number);
-            const ts = new Date(dayDate);
-            ts.setHours(h, m, 0, 0);
-            return ts.getTime();
-        };
-
-        const config = scheduleConfig || {
+        
+        const globalConfig = scheduleConfigs.global || {
              amIn: "07:00", amOut: "11:00",
              pmIn: "13:00", pmOut: "17:00",
              otIn: "17:00", otOut: "18:00"
         };
 
-        const amIn = makeTime(config.amIn);
-        const amOut = makeTime(config.amOut);
-        const pmIn = makeTime(config.pmIn);
-        const pmOut = makeTime(config.pmOut);
+        const studentSched = allStudentSchedules[studentId];
+        const supervisorId = userSupervisorMap[studentId];
+        const dateStr = d.toLocaleDateString('en-CA');
+        const override = allOverrides[supervisorId]?.[dateStr];
+
+        const config = {
+            amIn: override?.amIn || studentSched?.am_in || globalConfig.amIn,
+            amOut: override?.amOut || studentSched?.am_out || globalConfig.amOut,
+            pmIn: override?.pmIn || studentSched?.pm_in || globalConfig.pmIn,
+            pmOut: override?.pmOut || studentSched?.pm_out || globalConfig.pmOut,
+            otIn: studentSched?.ot_in || globalConfig.otIn,
+            otOut: studentSched?.ot_out || globalConfig.otOut
+        };
         
-        // Dynamic OT Lookup
-        const dateStr = dayDate.toLocaleDateString('en-CA');
-        const otShift = overtimeShifts.find(s => s.student_id === studentId && s.date === dateStr);
-        
-        let otIn, otOut;
-        if (otShift) {
-             otIn = otShift.start;
-             otOut = otShift.end;
-        } else {
-             otIn = makeTime(config.otIn);
-             otOut = makeTime(config.otOut);
+        const otShiftRaw = allOvertimeShifts.find(s => s.student_id === studentId && s.date === dateStr);
+        let otShift;
+        if (otShiftRaw) {
+             otShift = { start: otShiftRaw.start, end: otShiftRaw.end };
         }
         
-        const floorToMin = (ms: number) => Math.floor(ms / 60000) * 60000;
-        const startFl = floorToMin(start);
-        const nowFl = floorToMin(nowTs);
+        const schedule = buildSchedule(d, config, otShift);
 
-        const BUFFER_START_MS = 30 * 60 * 1000;
-        const BUFFER_END_MS = 4 * 60 * 60 * 1000;
+        // Calculate duration from start to now
+        // NOTE: We don't apply the BUFFER check here explicitly because 
+        // calculateTotalDuration -> calculateHoursWithinOfficialTime 
+        // will clamp the start to the official start anyway.
+        // If the start is WAY before (e.g. 5 hours early), it still clamps to official start.
+        // The original code had a check `start < wS - BUFFER_START_MS` which returned 0.
+        // This behavior is implicitly handled if we trust activeSessions contains valid punches.
         
-        const calcWindow = (wS: number, wE: number) => {
-             if (start < wS - BUFFER_START_MS || start > wE + BUFFER_END_MS) return 0;
-             const inT = clamp(startFl, wS, wE);
-             const outT = clamp(nowFl, wS, wE);
-             if (outT > inT) return outT - inT;
-             return 0;
-        };
-
-        let dur = 0;
-        dur += calcWindow(amIn, amOut);
-        dur += calcWindow(pmIn, pmOut);
-        dur += calcWindow(otIn, otOut);
-
-        return dur;
+        return calculateTotalDuration(start, nowTs, schedule);
     };
 
     Object.keys(activeSessions).forEach(id => {
@@ -3385,7 +3752,15 @@ export default function InstructorPage() {
     });
 
     setAttendanceSummary(nextSummary);
-  }, [serverSummary, activeSessions, scheduleConfig, overtimeShifts]);
+  }, [serverSummary, activeSessions, scheduleConfigs, overtimeShifts, allStudentSchedules, allOverrides, userSupervisorMap, allOvertimeShifts, refreshTrigger]);
+
+  // Timer for live updates (every minute)
+  useEffect(() => {
+    const interval = setInterval(() => {
+        setRefreshTrigger(prev => prev + 1);
+    }, 60000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Realtime Attendance subscription removed - relying on global attendance refreshTrigger
   // which updates whenever any attendance record changes (insert/update/delete)
@@ -3444,6 +3819,38 @@ export default function InstructorPage() {
       }
     })();
   }, [selected]);
+
+  // Fetch Overtime Shifts (Selected)
+  useEffect(() => {
+    const fetchOvertime = async () => {
+        if (!selected?.idnumber) {
+             setOvertimeShifts([]);
+             return;
+        }
+        try {
+            const res = await fetch(`/api/overtime?student_id=${encodeURIComponent(selected.idnumber)}`);
+            const json = await res.json();
+            if (json.overtime_shifts) {
+                const shifts = json.overtime_shifts.map((s: any) => ({
+                    ...s,
+                    start: Number(s.overtime_start),
+                    end: Number(s.overtime_end),
+                    overtime_start: Number(s.overtime_start),
+                    overtime_end: Number(s.overtime_end)
+                }));
+                setOvertimeShifts(shifts);
+            } else {
+                setOvertimeShifts([]);
+            }
+        } catch (e) {
+            console.error("Failed to fetch overtime shifts", e);
+            setOvertimeShifts([]);
+        }
+    };
+    fetchOvertime();
+    const interval = setInterval(fetchOvertime, 60000);
+    return () => clearInterval(interval);
+  }, [selected?.idnumber]);
 
   // Fetch Evaluation (Selected) & Realtime Updates
   useEffect(() => {
@@ -3654,15 +4061,15 @@ export default function InstructorPage() {
         };
     }, []);
 
-    const fetchReports = (force = false) => {
+    const fetchReports = (force = false, silent = false) => {
         const now = Date.now();
         if (!force && cachedReportsData && (now - lastReportsFetchTime < REPORTS_CACHE_DURATION)) {
-            setLoading(false);
+            if (!silent) setLoading(false);
             setAllReports(cachedReportsData);
             return;
         }
         
-        setLoading(true);
+        if (!silent) setLoading(true);
         fetch('/api/reports')
           .then(res => res.json())
           .then(data => {
@@ -3684,7 +4091,9 @@ export default function InstructorPage() {
                   setAllReports(mapped);
               }
           })
-          .finally(() => setLoading(false));
+          .finally(() => {
+              if (!silent) setLoading(false);
+          });
     };
 
     useEffect(() => {
@@ -3723,6 +4132,11 @@ export default function InstructorPage() {
                     cachedReportsData = newReports;
                     return newReports;
                 });
+
+                // Do NOT force fetch immediately to avoid race conditions. 
+                // The optimistic update is sufficient, and background realtime/cache invalidation will handle the rest.
+                // If we fetch too fast, we might get the stale 'reviewedby' from a replica or before commit visibility.
+                // fetchReports(true, true); 
             } else {
                 alert("Failed to save comment");
             }
@@ -3746,19 +4160,29 @@ export default function InstructorPage() {
     const TOTAL_WEEKS = 15;
 
     // Course-specific deadlines: { "BSIT": { 1: "2023-..." }, "ALL": { ... } }
-    const [courseDeadlines, setCourseDeadlines] = useState<Record<string, Record<number, string>>>({});
+    const [courseDeadlines, setCourseDeadlines] = useState<Record<string, Record<number, string>>>(cachedDeadlinesData || {});
+    const [deadlinesLoading, setDeadlinesLoading] = useState(!cachedDeadlinesData);
     const [editingDeadline, setEditingDeadline] = useState<{week: number, date: string} | null>(null);
 
     // Fetch deadlines from API
-    const fetchDeadlines = async () => {
+    const fetchDeadlines = async (force = false) => {
+        if (!force && cachedDeadlinesData) {
+            setCourseDeadlines(cachedDeadlinesData);
+            setDeadlinesLoading(false);
+        }
+
         try {
             const res = await fetch("/api/instructor/deadlines");
             if (res.ok) {
                 const json = await res.json();
-                setCourseDeadlines(json.deadlines || {});
+                const newDeadlines = json.deadlines || {};
+                cachedDeadlinesData = newDeadlines;
+                setCourseDeadlines(newDeadlines);
             }
         } catch (e) {
             console.error("Failed to fetch deadlines", e);
+        } finally {
+            setDeadlinesLoading(false);
         }
     };
 
@@ -3774,7 +4198,7 @@ export default function InstructorPage() {
                 body: JSON.stringify({ course, section, week, date })
             });
             if (res.ok) {
-                await fetchDeadlines();
+                await fetchDeadlines(true);
                 setEditingDeadline(null);
             } else {
                 alert("Failed to save deadline");
@@ -3969,17 +4393,22 @@ export default function InstructorPage() {
                                                             ) : (
                                                                 <button
                                                                     onClick={() => setEditingDeadline({ week, date: currentDeadline || "" })}
+                                                                    disabled={deadlinesLoading}
                                                                     className={`text-[10px] font-medium px-2 py-1 rounded-md border flex items-center justify-center gap-1.5 transition-all w-full max-w-[100px] ${
                                                                         currentDeadline 
                                                                             ? "bg-red-50 text-red-600 border-red-200 hover:bg-red-100" 
-                                                                            : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100 hover:text-gray-600 dashed border-gray-300"
+                                                                            : deadlinesLoading 
+                                                                                ? "bg-gray-50 text-gray-400 border-gray-200 cursor-wait opacity-70"
+                                                                                : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100 hover:text-gray-600 dashed border-gray-300"
                                                                     }`}
                                                                 >
                                                                     <Calendar size={10} />
                                                                     <span className="truncate">
-                                                                        {currentDeadline 
-                                                                            ? new Date(currentDeadline).toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) 
-                                                                            : "Set Due"}
+                                                                        {deadlinesLoading 
+                                                                            ? "..." 
+                                                                            : currentDeadline 
+                                                                                ? new Date(currentDeadline).toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) 
+                                                                                : "Set Due"}
                                                                     </span>
                                                                 </button>
                                                             )}
@@ -4062,116 +4491,114 @@ export default function InstructorPage() {
                           <X size={24} />
                         </button>
                         
-                        <div className="flex flex-col h-full">
-                            {/* Header */}
-                            <div className="p-6 border-b border-gray-100 flex-none bg-gray-50/30">
-                                <div className="flex items-start justify-between mb-4 pr-8">
-                                    <div>
-                                        <h2 className="text-xl font-bold text-gray-900 mb-1">{selectedReport.title}</h2>
-                                        <div className="flex items-center gap-2 text-sm text-gray-500">
-                                            <UserIcon size={14} />
-                                            <span>
-                                                {(() => {
-                                                    const s = students.find(st => st.idnumber === selectedReport.idnumber);
-                                                    return s ? `${s.firstname} ${s.lastname}` : selectedReport.idnumber;
-                                                })()}
-                                            </span>
-                                            <span className="mx-1">•</span>
-                                            <Clock size={14} />
-                                            <span>{new Date(selectedReport.submittedAt).toLocaleString()}</span>
-                                        </div>
+                        {/* Header */}
+                        <div className="p-6 border-b border-gray-100 flex-none bg-gray-50/30">
+                            <div className="flex items-start justify-between mb-4 pr-8">
+                                <div>
+                                    <h2 className="text-xl font-bold text-gray-900 mb-1">{selectedReport.title}</h2>
+                                    <div className="flex items-center gap-2 text-sm text-gray-500">
+                                        <UserIcon size={14} />
+                                        <span>
+                                            {(() => {
+                                                const s = students.find(st => st.idnumber === selectedReport.idnumber);
+                                                return s ? `${s.firstname} ${s.lastname}` : selectedReport.idnumber;
+                                            })()}
+                                        </span>
+                                        <span className="mx-1">•</span>
+                                        <Clock size={14} />
+                                        <span>{new Date(selectedReport.submittedAt).toLocaleString()}</span>
                                     </div>
-                                    {selectedReport.isViewedByInstructor || selectedReport.instructorComment ? 
-                                        <span className="px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 border border-green-200">Reviewed</span> : 
-                                        <span className="px-3 py-1 rounded-full text-xs font-bold bg-yellow-100 text-yellow-700 border border-yellow-200">Needs Review</span>
-                                    }
                                 </div>
+                                {selectedReport.isViewedByInstructor || selectedReport.instructorComment ? 
+                                    <span className="px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 border border-green-200">Reviewed</span> : 
+                                    <span className="px-3 py-1 rounded-full text-xs font-bold bg-yellow-100 text-yellow-700 border border-yellow-200">Needs Review</span>
+                                }
+                            </div>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent space-y-6">
+                            <div className="prose prose-sm max-w-none text-gray-700 whitespace-pre-wrap">
+                                {(() => {
+                                    const primary = (selectedReport.body || "").trim();
+                                    if (primary) return primary;
+                                    const fallback = String(selectedReport.text || "").trim();
+                                    if (fallback) return fallback;
+                                    return "No report content provided.";
+                                })()}
                             </div>
 
-                            <div className="flex-1 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent space-y-6">
-                                <div className="prose prose-sm max-w-none text-gray-700 whitespace-pre-wrap">
-                                    {(() => {
-                                        const primary = (selectedReport.body || "").trim();
-                                        if (primary) return primary;
-                                        const fallback = String(selectedReport.text || "").trim();
-                                        if (fallback) return fallback;
-                                        return "No report content provided.";
-                                    })()}
+                            {/* Attachment */}
+                            {selectedReport.fileUrl && (
+                                <div className="mt-4">
+                                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Attachment</div>
+                                    <a 
+                                        href={selectedReport.fileUrl} 
+                                        target="_blank" 
+                                        rel="noopener noreferrer"
+                                        className="flex items-center gap-3 p-3 rounded-xl border border-gray-200 hover:bg-gray-50 transition-colors group"
+                                    >
+                                        <div className="p-2 bg-orange-100 text-orange-600 rounded-lg group-hover:bg-orange-200 transition-colors">
+                                            <FileText size={20} />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-sm font-bold text-gray-900 truncate">{selectedReport.fileName || "Attached File"}</div>
+                                            <div className="text-xs text-gray-500">{selectedReport.fileType || "Document"}</div>
+                                        </div>
+                                        <Download size={18} className="text-gray-400 group-hover:text-gray-600" />
+                                    </a>
                                 </div>
+                            )}
 
-                                {/* Attachment */}
-                                {selectedReport.fileUrl && (
-                                    <div className="mt-4">
-                                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Attachment</div>
-                                        <a 
-                                            href={selectedReport.fileUrl} 
-                                            target="_blank" 
-                                            rel="noopener noreferrer"
-                                            className="flex items-center gap-3 p-3 rounded-xl border border-gray-200 hover:bg-gray-50 transition-colors group"
-                                        >
-                                            <div className="p-2 bg-orange-100 text-orange-600 rounded-lg group-hover:bg-orange-200 transition-colors">
-                                                <FileText size={20} />
+                            {/* Feedback Section (Moved into scrollable area) */}
+                            <div className="pt-6 border-t border-gray-100">
+                                {selectedReport.instructorComment ? (
+                                    <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <div className="p-1.5 bg-green-100 text-green-600 rounded-lg">
+                                                <CheckCircle2 size={16} />
                                             </div>
-                                            <div className="flex-1 min-w-0">
-                                                <div className="text-sm font-bold text-gray-900 truncate">{selectedReport.fileName || "Attached File"}</div>
-                                                <div className="text-xs text-gray-500">{selectedReport.fileType || "Document"}</div>
+                                            <span className="text-xs font-bold text-gray-900 uppercase tracking-wider">Instructor Feedback</span>
+                                        </div>
+                                        <p className="text-gray-700 text-sm whitespace-pre-wrap pl-1">{selectedReport.instructorComment}</p>
+                                    </div>
+                                ) : (
+                                    <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+                                        <div className="flex items-center gap-2 mb-3">
+                                            <MessageSquare size={16} className="text-orange-600" />
+                                            <span className="text-sm font-bold text-gray-900">Add Feedback</span>
+                                        </div>
+                                        
+                                        <div className="space-y-2">
+                                            <div className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+                                                Instructor Comment
                                             </div>
-                                            <Download size={18} className="text-gray-400 group-hover:text-gray-600" />
-                                        </a>
+                                            <textarea
+                                                value={commentText}
+                                                onChange={e => setCommentText(e.target.value)}
+                                                className="w-full p-4 rounded-xl border-2 border-orange-200 focus:outline-none focus:border-orange-500 focus:ring-4 focus:ring-orange-100 min-h-[140px] text-sm resize-y bg-white text-gray-900 placeholder-gray-400 shadow-sm transition-all"
+                                                placeholder="Write your feedback here..."
+                                            />
+                                        </div>
+                                        
+                                        <div className="flex items-center justify-between mt-3">
+                                            <p className="text-[10px] text-gray-400 px-1 hidden sm:block">
+                                                Clicking &quot;View&quot; will mark this report as reviewed.
+                                            </p>
+                                            <div className="flex items-center gap-3 ml-auto">
+                                                <span className="text-xs text-gray-400 font-medium">
+                                                    {commentText.trim() ? "Sending comment..." : "Mark as Viewed"}
+                                                </span>
+                                                <button 
+                                                    onClick={handleSaveLocalComment}
+                                                    disabled={isSavingComment}
+                                                    className="px-6 py-2 text-sm font-bold text-white bg-orange-600 hover:bg-orange-700 rounded-xl shadow-md shadow-orange-600/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all active:scale-95"
+                                                >
+                                                    {isSavingComment ? "Saving..." : "View"}
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
                                 )}
-
-                                {/* Feedback Section (Moved into scrollable area) */}
-                                <div className="pt-6 border-t border-gray-100">
-                                    {selectedReport.instructorComment ? (
-                                        <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
-                                            <div className="flex items-center gap-2 mb-2">
-                                                <div className="p-1.5 bg-green-100 text-green-600 rounded-lg">
-                                                    <CheckCircle2 size={16} />
-                                                </div>
-                                                <span className="text-xs font-bold text-gray-900 uppercase tracking-wider">Instructor Feedback</span>
-                                            </div>
-                                            <p className="text-gray-700 text-sm whitespace-pre-wrap pl-1">{selectedReport.instructorComment}</p>
-                                        </div>
-                                    ) : (
-                                        <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
-                                            <div className="flex items-center gap-2 mb-3">
-                                                <MessageSquare size={16} className="text-orange-600" />
-                                                <span className="text-sm font-bold text-gray-900">Add Feedback</span>
-                                            </div>
-                                            
-                                            <div className="space-y-2">
-                                                <div className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
-                                                    Instructor Comment
-                                                </div>
-                                                <textarea
-                                                    value={commentText}
-                                                    onChange={e => setCommentText(e.target.value)}
-                                                    className="w-full p-4 rounded-xl border-2 border-orange-200 focus:outline-none focus:border-orange-500 focus:ring-4 focus:ring-orange-100 min-h-[140px] text-sm resize-y bg-white text-gray-900 placeholder-gray-400 shadow-sm transition-all"
-                                                    placeholder="Write your feedback here..."
-                                                />
-                                            </div>
-                                            
-                                            <div className="flex items-center justify-between mt-3">
-                                                <p className="text-[10px] text-gray-400 px-1 hidden sm:block">
-                                                    Clicking &quot;View&quot; will mark this report as reviewed.
-                                                </p>
-                                                <div className="flex items-center gap-3 ml-auto">
-                                                    <span className="text-xs text-gray-400 font-medium">
-                                                        {commentText.trim() ? "Sending comment..." : "Mark as Viewed"}
-                                                    </span>
-                                                    <button 
-                                                        onClick={handleSaveLocalComment}
-                                                        disabled={isSavingComment}
-                                                        className="px-6 py-2 text-sm font-bold text-white bg-orange-600 hover:bg-orange-700 rounded-xl shadow-md shadow-orange-600/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all active:scale-95"
-                                                    >
-                                                        {isSavingComment ? "Saving..." : "View"}
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -4214,6 +4641,14 @@ export default function InstructorPage() {
 
     const filteredStudents = useMemo(() => {
         const normalize = (s: string) => s.toLowerCase().trim();
+        
+        // Use raw profile data for strict permission check (robust against metadata mismatches)
+        const myCourseNames = (myProfile?.course || "").split(",").map(normalize).filter(Boolean);
+        const mySectionNames = (myProfile?.section || "").split(",").map(normalize).filter(Boolean);
+
+        // If instructor has no assignments, show nothing (Security Default)
+        if (myCourseNames.length === 0 && mySectionNames.length === 0) return [];
+
         return students.filter(s => {
             // Search filter
             const search = normalize(searchTerm);
@@ -4221,21 +4656,43 @@ export default function InstructorPage() {
             const id = normalize(s.idnumber);
             const matchesSearch = !search || name.includes(search) || id.includes(search);
 
-            // Course filter
-            const sCourse = normalize(s.course || "");
-            const matchesCourse = !filterCourse || sCourse.includes(normalize(filterCourse));
+            // Normalize Student Data
+            const sCourses = (s.course || "").split(",").map(normalize).filter(Boolean);
+            const sSections = (s.section || "").split(",").map(normalize).filter(Boolean);
 
-            // Section filter
-            const sSection = normalize(s.section || "");
-            const matchesSection = !filterSection || sSection.includes(normalize(filterSection));
+            // STRICT PERMISSION CHECK: Match against Instructor's raw assignments
+            // If instructor has courses, student MUST match at least one
+            const isCourseAllowed = myCourseNames.length === 0 || sCourses.some(sc => myCourseNames.includes(sc));
+            
+            // If instructor has sections, student MUST match at least one
+            const isSectionAllowed = mySectionNames.length === 0 || sSections.some(ss => mySectionNames.includes(ss));
+
+            // If instructor has specific assignments, enforce them.
+            // But if one is empty (e.g. has Course but no Section), what is the rule?
+            // "Show ONLY students matching... assigned Course AND Section"
+            // If Section is assigned, enforce it. If not, maybe allow all? 
+            // Based on "Strict Filtering" memory: "If an instructor has no assigned courses or sections, the student list is empty".
+            // But here we check `length === 0` above.
+            
+            // If myCourseNames is NOT empty, isCourseAllowed must be true.
+            // If mySectionNames is NOT empty, isSectionAllowed must be true.
+            
+            if (myCourseNames.length > 0 && !isCourseAllowed) return false;
+            if (mySectionNames.length > 0 && !isSectionAllowed) return false;
+            
+            // If both are empty, we already returned [] above.
+
+            // UI Filters (Dropdowns)
+            const matchesCourseFilter = !filterCourse || sCourses.some(sc => sc.includes(normalize(filterCourse)));
+            const matchesSectionFilter = !filterSection || sSections.some(ss => ss.includes(normalize(filterSection)));
 
             // Status filter
             const sStatus = s.signup_status || 'APPROVED';
             const matchesStatus = filterStatus === "ALL" || sStatus === filterStatus;
 
-            return matchesSearch && matchesCourse && matchesSection && matchesStatus;
+            return matchesSearch && matchesCourseFilter && matchesSectionFilter && matchesStatus;
         });
-    }, [students, searchTerm, filterCourse, filterSection, filterStatus]);
+    }, [students, searchTerm, filterCourse, filterSection, filterStatus, myProfile]);
 
     // Clear selection when filters change
     useEffect(() => {
@@ -4280,16 +4737,19 @@ export default function InstructorPage() {
                       reason: `Instructor ${action}`,
                       rejectionNote: action === 'reject' ? (note || "") : undefined
                     })
-                }).then(res => {
-                    if (!res.ok) throw new Error(`Failed to ${action} ${id}`);
+                }).then(async res => {
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({}));
+                        throw new Error(err.error || `Failed to ${action} ${id}`);
+                    }
                     return res;
                 })
             ));
             
             setRefreshTrigger(prev => prev + 1);
             setSelectedIds(new Set());
-        } catch (e) {
-            alert(`Failed to ${action} one or more students`);
+        } catch (e: any) {
+            alert(e.message || `Failed to ${action} one or more students`);
         } finally {
             setActionLoading(null);
             setIsBulkApproving(false);
@@ -4324,7 +4784,18 @@ export default function InstructorPage() {
                 className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
             >
                 <option value="">All Sections</option>
-                {allowedSections.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                {/* Deduplicate sections by name */}
+                {Array.from(new Set(allowedSections
+                    .filter(s => {
+                        if (!filterCourse) return true;
+                        const c = allowedCourses.find(ac => ac.name === filterCourse);
+                        return c ? s.course_id === c.id : true;
+                    })
+                    .map(s => s.name)
+                )).map(name => {
+                    const s = allowedSections.find(sec => sec.name === name);
+                    return <option key={s?.id || name} value={name}>{name}</option>;
+                })}
             </select>
             <select 
                 value={filterStatus}
@@ -4385,7 +4856,13 @@ export default function InstructorPage() {
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                         {filteredStudents.length === 0 ? (
-                            <tr><td colSpan={6} className="px-6 py-8 text-center text-gray-500">No students found</td></tr>
+                            <tr>
+                                <td colSpan={6} className="px-6 py-8 text-center text-gray-500">
+                                    {allowedCourses.length === 0 && allowedSections.length === 0 
+                                        ? "No students found. You are not assigned to any courses or sections in your profile." 
+                                        : "No students found matching the current filters."}
+                                </td>
+                            </tr>
                         ) : (
                             filteredStudents.map(s => {
                                 const isPending = (s.signup_status || 'APPROVED') !== 'APPROVED';
@@ -4456,7 +4933,9 @@ export default function InstructorPage() {
             <div className="md:hidden">
                 {filteredStudents.length === 0 ? (
                     <div className="px-4 py-8 text-center text-gray-500 text-sm">
-                        No students found
+                        {allowedCourses.length === 0 && allowedSections.length === 0 
+                            ? "No students found. You are not assigned to any courses or sections in your profile." 
+                            : "No students found matching the current filters."}
                     </div>
                 ) : (
                     <div className="divide-y divide-gray-100">
@@ -4549,6 +5028,7 @@ export default function InstructorPage() {
                         setRejectionNote(value);
                     }
                 }}
+                isLoading={actionLoading !== null || isBulkApproving}
                 onConfirm={() => {
                     if (confirmAction.action === 'reject' && (!rejectionNote || !rejectionNote.trim())) {
                         return;
@@ -4896,7 +5376,7 @@ export default function InstructorPage() {
 
         {/* View Area */}
         <main className="flex-1 overflow-auto p-4 lg:p-8">
-          {activeTab === "attendance" && <AttendanceMonitoringView students={students} attendance={attendance} onNavigateToApproval={() => setActiveTab("approval")} attendanceSummary={attendanceSummary} evaluationStatuses={evaluationStatuses} toggleEvaluation={toggleEvaluation} overtimeShifts={overtimeShifts} />}
+          {activeTab === "attendance" && <AttendanceMonitoringView students={students} attendance={attendance} onNavigateToApproval={() => setActiveTab("approval")} attendanceSummary={attendanceSummary} evaluationStatuses={evaluationStatuses} toggleEvaluation={toggleEvaluation} overtimeShifts={overtimeShifts} studentSchedules={allStudentSchedules} overridesData={allOverrides} scheduleConfigs={scheduleConfigs} />}
           {activeTab === "reports" && <ReportsView />}
           {activeTab === "approval" && (allowApproval ? <AccountApprovalView /> : <ApprovalRestrictedView />)}
           {activeTab === "profile" && <ProfileView />}

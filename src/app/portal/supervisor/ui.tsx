@@ -29,9 +29,18 @@ import {
   Plus,
   XCircle
 } from 'lucide-react';
+import { calculateSessionDuration, determineShift, buildSchedule, ShiftSchedule as LibShiftSchedule, formatHours, calculateShiftDurations } from "@/lib/attendance";
+import * as XLSX from 'xlsx-js-style';
+
+type ShiftSchedule = LibShiftSchedule;
 
 // --- Types ---
-export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; photourl?: string; photoUrl?: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; idnumber?: string };
+export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; photourl?: string; photoUrl?: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; idnumber?: string; validated_by?: string | null };
+export type DateOverride = {
+  date: string; // YYYY-MM-DD
+  am?: { start: string; end: string };
+  pm?: { start: string; end: string };
+};
 export type ServerAttendanceEntry = {
   id: number;
   type: "in" | "out";
@@ -64,6 +73,7 @@ export type User = {
   supervisorid?: string;
   company?: string;
   location?: string;
+  avatar_url?: string;
 };
 export type ApprovalRow = {
   id: number;
@@ -78,16 +88,7 @@ export type ApprovalRow = {
 };
 
 // --- Helpers ---
-function formatDuration(ms: number): string {
-  if (ms <= 0) return "-";
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  
-  if (hours > 0 && minutes > 0) return `${hours}h ${minutes}m`;
-  if (hours > 0) return `${hours}h`;
-  return `${minutes}m`;
-}
+
 
 // --- Components ---
 export function EvaluationButton({ 
@@ -131,7 +132,7 @@ export function EvaluationButton({
 }
 
 // --- Set Official Time View ---
-export function SetOfficialTimeView({ students }: { students: User[] }) {
+export function SetOfficialTimeView({ students, myIdnumber }: { students: User[], myIdnumber?: string }) {
   // Time Settings State
   const [timeSettings, setTimeSettings] = useState<{
     amIn: string;
@@ -141,12 +142,12 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
     pmInTime: string; // "13:00"
     pmOut: string;
   }>({ 
-    amIn: "08:00", 
-    amOut: "12:00", 
-    amOutTime: "12:00", 
-    pmIn: "13:00", 
-    pmInTime: "13:00", 
-    pmOut: "17:00"
+    amIn: "", 
+    amOut: "", 
+    amOutTime: "", 
+    pmIn: "", 
+    pmInTime: "", 
+    pmOut: ""
   });
 
   const [isSaving, setIsSaving] = useState(false);
@@ -159,18 +160,102 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
   const [noChangeModal, setNoChangeModal] = useState(false);
   const [successModal, setSuccessModal] = useState(false);
 
+  // Overrides State
+  const [dateOverrides, setDateOverrides] = useState<DateOverride[]>([]);
+  const [overrideModal, setOverrideModal] = useState<{
+    isOpen: boolean;
+    date: string | null;
+    amIn: string; amOut: string;
+    pmIn: string; pmOut: string;
+  }>({ isOpen: false, date: null, amIn: "", amOut: "", pmIn: "", pmOut: "" });
+  const [isSavingOverride, setIsSavingOverride] = useState(false);
+
+  const fetchOverrides = async () => {
+    try {
+        const supervisorId = myIdnumber || localStorage.getItem("idnumber") || "";
+        if (!supervisorId) return;
+        const res = await fetch(`/api/shifts/overrides?supervisor_id=${encodeURIComponent(supervisorId)}`);
+        const json = await res.json();
+        if (json.overrides) {
+            setDateOverrides(json.overrides);
+        }
+    } catch (e) {
+        console.error("Failed to fetch overrides", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchOverrides();
+  }, [myIdnumber]);
+
+  const handleSaveOverride = async () => {
+    if (!overrideModal.date) return;
+    setIsSavingOverride(true);
+    try {
+        const supervisorId = myIdnumber || localStorage.getItem("idnumber") || "";
+        const res = await fetch("/api/shifts/overrides", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                supervisor_id: supervisorId,
+                date: overrideModal.date,
+                amIn: overrideModal.amIn,
+                amOut: overrideModal.amOut,
+                pmIn: overrideModal.pmIn,
+                pmOut: overrideModal.pmOut
+            })
+        });
+        if (!res.ok) throw new Error("Failed to save");
+        setOverrideModal({ ...overrideModal, isOpen: false });
+        fetchOverrides();
+    } catch (e) {
+        alert("Failed to save schedule override");
+    } finally {
+        setIsSavingOverride(false);
+    }
+  };
+
+  const handleDeleteOverride = async (date: string) => {
+    if (!confirm("Are you sure you want to delete this schedule override?")) return;
+    try {
+        const supervisorId = myIdnumber || localStorage.getItem("idnumber") || "";
+        await fetch(`/api/shifts/overrides?supervisor_id=${encodeURIComponent(supervisorId)}&date=${date}`, {
+            method: "DELETE"
+        });
+        fetchOverrides();
+    } catch (e) {
+        alert("Failed to delete override");
+    }
+  };
+
+  const formatDisplayTime = (time: string) => {
+    if(!time) return "";
+    const [h, m] = time.split(':');
+    const date = new Date();
+    date.setHours(Number(h));
+    date.setMinutes(Number(m));
+    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  };
+
   // Load global settings
   useEffect(() => {
     const loadSchedule = async () => {
       try {
-        const res = await fetch("/api/shifts");
+        let supervisorId = myIdnumber || "";
+        if (!supervisorId) {
+          try {
+            supervisorId = typeof window !== "undefined" ? localStorage.getItem("idnumber") || "" : "";
+          } catch {}
+        }
+
+        const res = await fetch(`/api/shifts${supervisorId ? `?supervisor_id=${encodeURIComponent(supervisorId)}` : ''}`);
         const json = await res.json();
 
         if (res.ok && Array.isArray(json.shifts) && json.shifts.length > 0) {
-          let amIn = "08:00";
-          let amOut = "12:00";
-          let pmIn = "13:00";
-          let pmOut = "17:00";
+          let amIn = "";
+          let amOut = "";
+          let pmIn = "";
+          let pmOut = "";
 
           json.shifts.forEach((s: any) => {
             const name = (s.shift_name || "").toLowerCase();
@@ -205,60 +290,22 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
         console.error("Failed to fetch schedule from API", e);
       }
 
-      // Fallback to localStorage or defaults if API fails
-      try {
-        const stored = localStorage.getItem(`schedule_default`);
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          const next = {
-            amIn: parsed.amIn || "08:00",
-            amOut: parsed.amOut || "12:00",
-            amOutTime: parsed.amOutTime || parsed.amOut || "12:00",
-            pmIn: parsed.pmIn || "13:00",
-            pmInTime: parsed.pmInTime || parsed.pmIn || "13:00",
-            pmOut: parsed.pmOut || "17:00"
-          };
-          setTimeSettings(next);
-          setInitialSettings({
-            amIn: next.amIn,
-            amOut: next.amOut,
-            pmIn: next.pmIn,
-            pmOut: next.pmOut
-          });
-        } else {
-          const next = { 
-            amIn: "08:00", 
-            amOut: "12:00", 
-            amOutTime: "12:00",
-            pmIn: "13:00", 
-            pmInTime: "13:00",
-            pmOut: "17:00"
-          };
-          setTimeSettings(next);
-          setInitialSettings({
-            amIn: next.amIn,
-            amOut: next.amOut,
-            pmIn: next.pmIn,
-            pmOut: next.pmOut
-          });
-        }
-      } catch {
-        const next = { 
-          amIn: "08:00", 
-          amOut: "12:00", 
-          amOutTime: "12:00",
-          pmIn: "13:00", 
-          pmInTime: "13:00",
-          pmOut: "17:00"
-        };
-        setTimeSettings(next);
-        setInitialSettings({
-          amIn: next.amIn,
-          amOut: next.amOut,
-          pmIn: next.pmIn,
-          pmOut: next.pmOut
-        });
-      }
+      // No fallback to defaults - let user set it
+      const next = { 
+        amIn: "", 
+        amOut: "", 
+        amOutTime: "",
+        pmIn: "", 
+        pmInTime: "",
+        pmOut: ""
+      };
+      setTimeSettings(next);
+      setInitialSettings({
+        amIn: next.amIn,
+        amOut: next.amOut,
+        pmIn: next.pmIn,
+        pmOut: next.pmOut
+      });
     };
 
     loadSchedule();
@@ -278,11 +325,13 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
 
     setIsSaving(true);
     try {
-      let supervisorId = "";
-      try {
-        supervisorId = typeof window !== "undefined" ? localStorage.getItem("idnumber") || "" : "";
-      } catch {
-        supervisorId = "";
+      let supervisorId = myIdnumber || "";
+      if (!supervisorId) {
+        try {
+          supervisorId = typeof window !== "undefined" ? localStorage.getItem("idnumber") || "" : "";
+        } catch {
+          supervisorId = "";
+        }
       }
 
       const res = await fetch("/api/shifts", {
@@ -292,7 +341,8 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
           amIn: timeSettings.amIn,
           amOut: timeSettings.amOut,
           pmIn: timeSettings.pmIn,
-          pmOut: timeSettings.pmOut
+          pmOut: timeSettings.pmOut,
+          supervisor_id: supervisorId
         }),
       });
 
@@ -307,6 +357,28 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
       setIsSaving(false);
     }
   };
+
+  const calculateDuration = (start: string, end: string) => {
+    if (!start || !end) return 0;
+    const [sh, sm] = start.split(':').map(Number);
+    const [eh, em] = end.split(':').map(Number);
+    const startMins = sh * 60 + sm;
+    const endMins = eh * 60 + em;
+    return Math.max(0, endMins - startMins);
+  };
+
+  const formatDuration = (mins: number) => {
+    if (mins === 0) return "0h";
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    if (h > 0 && m > 0) return `${h}h ${m}m`;
+    if (h > 0) return `${h}h`;
+    return `${m}m`;
+  };
+
+  const amDuration = calculateDuration(overrideModal.amIn, overrideModal.amOut);
+  const pmDuration = calculateDuration(overrideModal.pmIn, overrideModal.pmOut);
+  const totalDuration = amDuration + pmDuration;
 
   return (
     <div className="max-w-4xl mx-auto animate-in fade-in duration-500">
@@ -446,6 +518,202 @@ export function SetOfficialTimeView({ students }: { students: User[] }) {
             </button>
           </div>
         </div>
+
+      {/* Specific Date Schedules Section */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-8 mt-6">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+              <div className="p-2 bg-blue-100 rounded-lg text-blue-600">
+                <Calendar size={20} />
+              </div>
+              <div>
+                 <h3 className="font-bold text-gray-900">Specific Date Schedules</h3>
+                 <p className="text-xs text-gray-500">Set custom official times for specific dates.</p>
+              </div>
+          </div>
+          <button
+            onClick={() => setOverrideModal({ 
+              isOpen: true, 
+              date: new Date().toISOString().split('T')[0], 
+              amIn: timeSettings.amIn, amOut: timeSettings.amOut, 
+              pmIn: timeSettings.pmIn, pmOut: timeSettings.pmOut 
+            })}
+            className="px-4 py-2 rounded-xl bg-blue-50 text-blue-600 font-bold text-sm hover:bg-blue-100 transition-colors flex items-center gap-2"
+          >
+            <Plus size={16} />
+            Add Date Schedule
+          </button>
+        </div>
+
+        {dateOverrides.length === 0 ? (
+          <div className="text-center py-8 text-gray-400 text-sm bg-gray-50 rounded-xl border border-dashed border-gray-200">
+            No specific date schedules set.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {dateOverrides.map((override) => (
+              <div key={override.date} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-200">
+                 <div className="flex items-center gap-4">
+                    <div className="text-center bg-white p-2 rounded-lg border border-gray-200 min-w-[60px]">
+                       <div className="text-xs font-bold text-gray-500 uppercase">{new Date(override.date).toLocaleDateString('en-US', { month: 'short' })}</div>
+                       <div className="text-xl font-bold text-gray-900">{new Date(override.date).getDate()}</div>
+                    </div>
+                    <div>
+                       <div className="text-sm font-bold text-gray-900">
+                          {new Date(override.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                       </div>
+                       <div className="text-xs text-gray-500 mt-1 flex gap-3">
+                          {override.am && (
+                              <span className="flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-orange-400"></span>
+                                  AM: {formatDisplayTime(override.am.start)} - {formatDisplayTime(override.am.end)}
+                              </span>
+                          )}
+                          {override.pm && (
+                              <span className="flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-orange-400"></span>
+                                  PM: {formatDisplayTime(override.pm.start)} - {formatDisplayTime(override.pm.end)}
+                              </span>
+                          )}
+                       </div>
+                    </div>
+                 </div>
+                 <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => setOverrideModal({
+                          isOpen: true,
+                          date: override.date,
+                          amIn: override.am?.start || "", amOut: override.am?.end || "",
+                          pmIn: override.pm?.start || "", pmOut: override.pm?.end || ""
+                      })}
+                      className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                    >
+                       <UserCog size={16} />
+                    </button>
+                    <button 
+                      onClick={() => handleDeleteOverride(override.date)}
+                      className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                    >
+                       <XCircle size={16} />
+                    </button>
+                 </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Override Modal */}
+      {overrideModal.isOpen && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden">
+            <div className="p-6 border-b border-gray-100 flex items-center justify-between">
+               <h2 className="text-xl font-bold text-gray-900">Specific Date Schedule</h2>
+               <button onClick={() => setOverrideModal({ ...overrideModal, isOpen: false })} className="text-gray-400 hover:text-gray-600">
+                 <X size={24} />
+               </button>
+            </div>
+            
+            <div className="p-6 space-y-6">
+               {/* Summary Section */}
+               <div className="bg-orange-50 rounded-xl p-4 border border-orange-100 flex items-center justify-between">
+                  <div>
+                     <div className="text-xs font-bold text-orange-600 uppercase tracking-wider mb-1">Total Schedule Duration</div>
+                     <div className="text-2xl font-bold text-gray-900">{formatDuration(totalDuration)}</div>
+                  </div>
+                  <div className="flex gap-4">
+                     <div className="text-right">
+                         <div className="text-[10px] font-bold text-gray-500 uppercase">AM Shift</div>
+                         <div className="text-sm font-bold text-gray-700">{formatDuration(amDuration)}</div>
+                     </div>
+                     <div className="text-right">
+                         <div className="text-[10px] font-bold text-gray-500 uppercase">PM Shift</div>
+                         <div className="text-sm font-bold text-gray-700">{formatDuration(pmDuration)}</div>
+                     </div>
+                  </div>
+               </div>
+
+               <div>
+                  <label className="block text-sm font-bold text-gray-900 mb-2">Select Date</label>
+                  <input 
+                    type="date"
+                    value={overrideModal.date || ""}
+                    onChange={(e) => setOverrideModal({ ...overrideModal, date: e.target.value })}
+                    className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-gray-50 font-semibold text-gray-900 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none"
+                  />
+               </div>
+
+               <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-4 p-4 bg-orange-50/50 rounded-xl border border-orange-100/50">
+                     <h4 className="text-xs font-bold text-orange-600 uppercase tracking-wider flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-orange-500"></span>
+                        Morning Shift
+                     </h4>
+                     <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Time In</label>
+                        <input 
+                           type="time" 
+                           value={overrideModal.amIn} 
+                           onChange={(e) => setOverrideModal({...overrideModal, amIn: e.target.value})} 
+                           className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm font-bold text-gray-900 bg-white focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none transition-all" 
+                        />
+                     </div>
+                     <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Time Out</label>
+                        <input 
+                           type="time" 
+                           value={overrideModal.amOut} 
+                           onChange={(e) => setOverrideModal({...overrideModal, amOut: e.target.value})} 
+                           className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm font-bold text-gray-900 bg-white focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none transition-all" 
+                        />
+                     </div>
+                  </div>
+                  <div className="space-y-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100/50">
+                     <h4 className="text-xs font-bold text-blue-600 uppercase tracking-wider flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                        Afternoon Shift
+                     </h4>
+                     <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Time In</label>
+                        <input 
+                           type="time" 
+                           value={overrideModal.pmIn} 
+                           onChange={(e) => setOverrideModal({...overrideModal, pmIn: e.target.value})} 
+                           className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm font-bold text-gray-900 bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all" 
+                        />
+                     </div>
+                     <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Time Out</label>
+                        <input 
+                           type="time" 
+                           value={overrideModal.pmOut} 
+                           onChange={(e) => setOverrideModal({...overrideModal, pmOut: e.target.value})} 
+                           className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm font-bold text-gray-900 bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all" 
+                        />
+                     </div>
+                  </div>
+               </div>
+            </div>
+
+            <div className="p-6 bg-gray-50 border-t border-gray-100 flex justify-end gap-3">
+               <button 
+                 onClick={() => setOverrideModal({ ...overrideModal, isOpen: false })}
+                 className="px-6 py-2 rounded-xl text-gray-600 font-bold hover:bg-gray-200 transition-colors"
+               >
+                 Cancel
+               </button>
+               <button 
+                 onClick={handleSaveOverride}
+                 disabled={!overrideModal.date || isSavingOverride}
+                 className="px-6 py-2 rounded-xl bg-blue-600 text-white font-bold hover:bg-blue-700 transition-colors shadow-lg shadow-blue-200 disabled:opacity-70 disabled:cursor-not-allowed"
+               >
+                 {isSavingOverride ? "Saving..." : "Save Schedule"}
+               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
     </div>
   );
@@ -683,6 +951,30 @@ export function StudentAttendanceDetailView({
   const [monthFilter, setMonthFilter] = useState("");
   const [showValidateModal, setShowValidateModal] = useState(false);
   const [showRejectModal, setShowRejectModal] = useState(false);
+  const [dateOverrides, setDateOverrides] = useState<Record<string, any>>({});
+
+  useEffect(() => {
+    const fetchOverrides = async () => {
+        if (!student.supervisorid) {
+            setDateOverrides({});
+            return;
+        }
+        try {
+            const res = await fetch(`/api/shifts/overrides?supervisor_id=${student.supervisorid}`);
+            const json = await res.json();
+            const map: Record<string, any> = {};
+            if (json.overrides) {
+                json.overrides.forEach((o: any) => {
+                    map[o.date] = o;
+                });
+            }
+            setDateOverrides(map);
+        } catch (e) {
+            console.error("Failed to fetch overrides", e);
+        }
+    };
+    fetchOverrides();
+  }, [student.supervisorid]);
 
   useEffect(() => {
     setLogs(attendance);
@@ -714,7 +1006,8 @@ export function StudentAttendanceDetailView({
             timestamp: Number(e.ts),
             photoDataUrl: e.photourl,
             status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
-            validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined
+            validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
+            validated_by: e.validated_by
           };
           setLogs(prev => {
             const others = prev.filter(x => x.id !== entry.id);
@@ -746,7 +1039,8 @@ export function StudentAttendanceDetailView({
                       timestamp: tsNum,
                       photoDataUrl: e.photourl,
                       status: updatedStatus,
-                      validatedAt: updatedValidatedAt
+                      validatedAt: updatedValidatedAt,
+                      validated_by: e.validated_by
                     }
                   : log
               )
@@ -773,14 +1067,32 @@ export function StudentAttendanceDetailView({
     };
   }, [student.idnumber]);
 
-  // Helper to format hours
-  const formatHours = (ms: number) => {
-      if (!ms) return "0h 0m";
-      const totalSeconds = Math.floor(ms / 1000);
-      const h = Math.floor(totalSeconds / 3600);
-      const m = Math.floor((totalSeconds % 3600) / 60);
-      return `${h}h ${m}m`;
-  };
+  const [studentDbSchedule, setStudentDbSchedule] = useState<any>(null);
+
+  useEffect(() => {
+      const fetchStudentSchedule = async () => {
+          if (!student?.idnumber || !supabase) return;
+          const { data } = await supabase
+              .from('student_shift_schedules')
+              .select('*')
+              .eq('student_id', student.idnumber)
+              .single();
+          
+          if (data) {
+              setStudentDbSchedule({
+                  amIn: data.am_in,
+                  amOut: data.am_out,
+                  pmIn: data.pm_in,
+                  pmOut: data.pm_out,
+                  otIn: data.ot_in,
+                  otOut: data.ot_out
+              });
+          } else {
+              setStudentDbSchedule(null);
+          }
+      };
+      fetchStudentSchedule();
+  }, [student.idnumber]);
 
   // Helper to format time
   const formatTime = (ts: number) => {
@@ -793,12 +1105,13 @@ export function StudentAttendanceDetailView({
   };
 
   const toggleSlotPairSelection = (entryIn?: AttendanceEntry | null, entryOut?: AttendanceEntry | null) => {
-    if (!entryIn || entryIn.id == null) return;
     const ids: number[] = [];
-    ids.push(Number(entryIn.id));
-    if (entryOut && entryOut.id != null) {
-      ids.push(Number(entryOut.id));
-    }
+    // Only toggle Pending entries
+    if (entryIn && entryIn.id != null && (entryIn.status || 'Pending') === 'Pending') ids.push(Number(entryIn.id));
+    if (entryOut && entryOut.id != null && (entryOut.status || 'Pending') === 'Pending') ids.push(Number(entryOut.id));
+    
+    if (ids.length === 0) return;
+
     setSelectedIds(prev => {
       const next = new Set(prev);
       const allSelected = ids.every(id => next.has(id));
@@ -813,9 +1126,12 @@ export function StudentAttendanceDetailView({
 
   const isSlotPairSelected = (entryIn?: AttendanceEntry | null, entryOut?: AttendanceEntry | null) => {
     const ids: number[] = [];
-    if (entryIn && entryIn.id != null) ids.push(Number(entryIn.id));
-    if (entryOut && entryOut.id != null) ids.push(Number(entryOut.id));
+    // Only check Pending entries (supports negative IDs for virtual entries)
+    if (entryIn && entryIn.id != null && (entryIn.status || 'Pending') === 'Pending') ids.push(Number(entryIn.id));
+    if (entryOut && entryOut.id != null && (entryOut.status || 'Pending') === 'Pending') ids.push(Number(entryOut.id));
+    
     if (ids.length === 0) return false;
+    // Check if ALL pending IDs in the pair are selected
     return ids.every(id => selectedIds.has(id));
   };
 
@@ -823,12 +1139,21 @@ export function StudentAttendanceDetailView({
     const ids = new Set<number>();
 
     days.forEach(day => {
-      [day.s1, day.s2, day.s3, day.s4, day.s5, day.s6].forEach(slot => {
-        if (!slot || slot.id == null) return;
-        const status = (slot.status || "Pending").toString().trim();
-        if (status === "Pending") {
-          ids.add(Number(slot.id));
-        }
+      const pairs = [
+          { in: day.s1, out: day.s2 },
+          { in: day.s3, out: day.s4 },
+          { in: day.s5, out: day.s6 }
+      ];
+
+      pairs.forEach(pair => {
+          // Check if either slot in the pair is Pending
+          const inPending = pair.in && (pair.in.status || "Pending") === "Pending";
+          const outPending = pair.out && (pair.out.status || "Pending") === "Pending";
+          
+          if (inPending || outPending) {
+              if (pair.in && pair.in.id != null && (pair.in.status || "Pending") === "Pending") ids.add(Number(pair.in.id));
+              if (pair.out && pair.out.id != null && (pair.out.status || "Pending") === "Pending") ids.add(Number(pair.out.id));
+          }
       });
     });
 
@@ -848,27 +1173,7 @@ export function StudentAttendanceDetailView({
     }
   };
 
-  const handleConfirmValidate = () => {
-    setIsBulkValidating(true);
-    const ids = Array.from(selectedIds);
-    const entries = logs.filter(e => e.id != null && ids.includes(Number(e.id)));
-    entries.forEach(entry => onValidate(entry, "approve"));
-    setSelectedIds(new Set());
-    setIsBulkValidating(false);
-    if (onRefresh) onRefresh();
-    setShowValidateModal(false);
-  };
 
-  const handleConfirmReject = () => {
-    setIsBulkValidating(true);
-    const ids = Array.from(selectedIds);
-    const entries = logs.filter(e => e.id != null && ids.includes(Number(e.id)));
-    entries.forEach(entry => onValidate(entry, "reject"));
-    setSelectedIds(new Set());
-    setIsBulkValidating(false);
-    if (onRefresh) onRefresh();
-    setShowRejectModal(false);
-  };
 
   const monthOptions = useMemo(() => {
     const map = new Map<string, string>();
@@ -963,56 +1268,63 @@ export function StudentAttendanceDetailView({
               const otAuthLog = day.logs.find(l => l.photoDataUrl && l.photoDataUrl.startsWith("OT_AUTH:"));
               const processingLogs = day.logs.filter(l => !l.photoDataUrl?.startsWith("OT_AUTH:"));
 
-              const dayLogs = processingLogs.sort((a, b) => a.timestamp - b.timestamp);
+              // Deduplicate logs to prevent double-counting (robustness against subscription duplicates)
+              const uniqueMap = new Map<string, AttendanceEntry>();
+              processingLogs.forEach(l => {
+                  const key = l.id ? String(l.id) : `${l.timestamp}-${l.type}`;
+                  if (!uniqueMap.has(key)) uniqueMap.set(key, l);
+              });
 
-              const baseDate = new Date(day.date);
-              baseDate.setHours(0, 0, 0, 0);
+              const dayLogs = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp);
 
-              const buildShift = (timeStr: string) => {
-                  let [hStr, mStr] = timeStr.split(":");
-                  let h = parseInt(hStr);
-                  let m = parseInt(mStr);
-                  
-                  // Handle 12-hour format if present
-                  const lowerStr = timeStr.toLowerCase();
-                  if (lowerStr.includes("pm") && h < 12) h += 12;
-                  if (lowerStr.includes("am") && h === 12) h = 0;
-                  
-                  const d = new Date(baseDate.getTime());
-                  d.setHours(h || 0, m || 0, 0, 0);
-                  return d.getTime();
+              const dateStr = day.date.toLocaleDateString('en-CA');
+              const dynamicOt = (overtimeShifts || []).find((ot: any) => ot.effective_date === dateStr);
+
+              const effSchedule = studentDbSchedule || scheduleConfig || {
+                  amIn: "08:00", amOut: "12:00",
+                  pmIn: "13:00", pmOut: "17:00",
+                  otIn: "17:00", otOut: "18:00"
               };
 
-              let schedule = {
-                  amIn: buildShift("07:00"),
-                  amOut: buildShift("12:00"),
-                  pmIn: buildShift("13:00"),
-                  pmOut: buildShift("17:00"),
-                  otStart: buildShift("17:00"),
-                  otEnd: buildShift("18:00"),
-              };
+              // Check for Date Override
+              const override = Array.isArray(dateOverrides) 
+                  ? dateOverrides.find(o => o.date === dateStr)
+                  : (dateOverrides as any)[dateStr]; // Fallback if it somehow becomes a Map
+              const scheduleToUse = override ? {
+                  amIn: override.am?.start || effSchedule.amIn,
+                  amOut: override.am?.end || effSchedule.amOut,
+                  pmIn: override.pm?.start || effSchedule.pmIn,
+                  pmOut: override.pm?.end || effSchedule.pmOut,
+                  otIn: effSchedule.otIn,
+                  otOut: effSchedule.otOut
+              } : effSchedule;
 
-              if (scheduleConfig) {
-                  schedule = {
-                      amIn: buildShift(scheduleConfig.amIn || "07:00"),
-                      amOut: buildShift(scheduleConfig.amOut || "12:00"),
-                      pmIn: buildShift(scheduleConfig.pmIn || "13:00"),
-                      pmOut: buildShift(scheduleConfig.pmOut || "17:00"),
-                      otStart: buildShift(scheduleConfig.otIn || "17:00"),
-                      otEnd: buildShift(scheduleConfig.otOut || "18:00"),
-                  };
-              }
+              const schedule = buildSchedule(
+                  day.date,
+                  {
+                      amIn: scheduleToUse.amIn || "08:00",
+                      amOut: scheduleToUse.amOut || "12:00",
+                      pmIn: scheduleToUse.pmIn || "13:00",
+                      pmOut: scheduleToUse.pmOut || "17:00",
+                      otIn: scheduleToUse.otIn,
+                      otOut: scheduleToUse.otOut
+                  },
+                  dynamicOt ? { start: dynamicOt.overtime_start, end: dynamicOt.overtime_end } : undefined
+              );
 
               // --- New Session Logic (Consistent with Dashboard) ---
               type Session = { in: AttendanceEntry; out: AttendanceEntry | null; shift: 'am' | 'pm' | 'ot' };
               const sessions: Session[] = [];
               let currentIn: AttendanceEntry | null = null;
 
-              const determineShift = (ts: number): 'am' | 'pm' | 'ot' => {
-                  // Use schedule windows for more accurate shift determination
-                  if (ts < schedule.amOut) return 'am';
-                  if (ts < schedule.pmOut) return 'pm';
-                  return 'ot';
+              const today = new Date();
+              today.setHours(0,0,0,0);
+              const isPastDate = day.date < today;
+              const isToday = day.date.toDateString() === today.toDateString();
+
+              const shouldAutoClose = (shiftEndTs: number) => {
+                  // Only auto-close for past dates (New Day logic)
+                  return isPastDate;
               };
 
               for (const log of dayLogs) {
@@ -1020,20 +1332,60 @@ export function StudentAttendanceDetailView({
 
                   if (log.type === "in") {
                       if (currentIn) {
-                          // Previous session incomplete (forgot to time out). Close it as incomplete.
-                          sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.timestamp) });
+                          // Previous session incomplete (forgot to time out).
+                          const shift = determineShift(currentIn.timestamp, schedule);
+                          let outEntry: AttendanceEntry | null = null;
+                          
+                          const shiftEnd = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
+                          if (shouldAutoClose(shiftEnd)) {
+                              let outTime = new Date(shiftEnd);
+                              if (currentIn.timestamp > outTime.getTime()) {
+                                  outTime = new Date(currentIn.timestamp + 60000);
+                              }
+
+                              outEntry = {
+                                  id: currentIn.id ? -currentIn.id : -Math.floor(Math.random() * 1000000),
+                                  idnumber: currentIn.idnumber,
+                                  type: 'out',
+                                  timestamp: outTime.getTime(),
+                                  photoDataUrl: '',
+                                  status: 'Pending',
+                                  validated_by: 'AUTO TIME OUT'
+                              };
+                          }
+                          sessions.push({ in: currentIn, out: outEntry, shift });
                       }
                       currentIn = log;
                   } else if (log.type === "out") {
                       if (currentIn) {
                           // Normal Session
-                          sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.timestamp) });
+                          sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.timestamp, schedule) });
                           currentIn = null;
                       }
                   }
               }
               if (currentIn) {
-                  sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.timestamp) });
+                  const shift = determineShift(currentIn.timestamp, schedule);
+                  let outEntry: AttendanceEntry | null = null;
+                  
+                  const shiftEnd = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
+                  if (shouldAutoClose(shiftEnd)) {
+                      let outTime = new Date(shiftEnd);
+                      if (currentIn.timestamp > outTime.getTime()) {
+                          outTime = new Date(currentIn.timestamp + 60000);
+                      }
+
+                      outEntry = {
+                          id: currentIn.id ? -currentIn.id : -Math.floor(Math.random() * 1000000),
+                          idnumber: currentIn.idnumber,
+                          type: 'out',
+                          timestamp: outTime.getTime(),
+                          photoDataUrl: '',
+                          status: 'Pending',
+                          validated_by: 'AUTO TIME OUT'
+                      };
+                  }
+                  sessions.push({ in: currentIn, out: outEntry, shift });
               }
 
               // Calculate Hours (Shift Window Intersection - Strict Shift Isolation)
@@ -1041,36 +1393,17 @@ export function StudentAttendanceDetailView({
                   let total = 0;
                   sessions.forEach(session => {
                       const isInValid = !requireApproved || session.in.status === "Approved";
-                      const isOutValid = !session.out || !requireApproved || session.out.status === "Approved";
+                      const isOutValid = !session.out || !requireApproved || session.out?.status === "Approved";
                       if (!isInValid || !isOutValid) return;
                       
                       if (!session.out) return;
 
-                      // Strict Shift Isolation: Only calculate hours for the shift the session started in
-                      if (session.shift === 'am') {
-                          // Check AM Window Only
-                          const amIn = Math.max(session.in.timestamp, schedule.amIn);
-                          const amOut = Math.min(session.out.timestamp, schedule.amOut);
-                          const amInFl = Math.floor(amIn / 60000) * 60000;
-                          const amOutFl = Math.floor(amOut / 60000) * 60000;
-                          total += Math.max(0, amOutFl - amInFl);
-                      } else if (session.shift === 'pm') {
-                          // Check PM Window Only
-                          const pmIn = Math.max(session.in.timestamp, schedule.pmIn);
-                          const pmOut = Math.min(session.out.timestamp, schedule.pmOut);
-                          const pmInFl = Math.floor(pmIn / 60000) * 60000;
-                          const pmOutFl = Math.floor(pmOut / 60000) * 60000;
-                          total += Math.max(0, pmOutFl - pmInFl);
-                      } else if (session.shift === 'ot') {
-                          // Check OT Window Only
-                          const otIn = Math.max(session.in.timestamp, schedule.otStart);
-                          const otOut = Math.min(session.out.timestamp, schedule.otEnd);
-                          const otInFl = Math.floor(otIn / 60000) * 60000;
-                          const otOutFl = Math.floor(otOut / 60000) * 60000;
-                          total += Math.max(0, otOutFl - otInFl);
-                      }
+                      // Use shared utility for uniform calculation (Check all shifts)
+                      const { am, pm, ot } = calculateShiftDurations(session.in.timestamp, session.out.timestamp, schedule);
+
+                      total += am + pm + ot;
                   });
-                  return Math.round(total / 60000) * 60000;
+                  return total;
               };
 
               const dayTotalMs = calculateHours(false);
@@ -1086,16 +1419,10 @@ export function StudentAttendanceDetailView({
                       if (!isInValid || !isOutValid) return;
                       if (!session.out) return;
 
-                      const startWindow = schedule.otStart;
-                      const endWindow = schedule.otEnd;
-                      
-                      const effIn = Math.max(session.in.timestamp, startWindow);
-                      const effOut = Math.min(session.out.timestamp, endWindow);
-                      const effInFl = Math.floor(effIn / 60000) * 60000;
-                      const effOutFl = Math.floor(effOut / 60000) * 60000;
-                      total += Math.max(0, effOutFl - effInFl);
+                      const durations = calculateShiftDurations(session.in.timestamp, session.out.timestamp, schedule);
+                      total += durations[targetShift];
                    });
-                   return Math.round(total / 60000) * 60000;
+                   return total;
               };
               
               const overtimeMs = calculateSpecificShiftHours('ot', false);
@@ -1121,7 +1448,53 @@ export function StudentAttendanceDetailView({
           });
 
       return { days: processedDays, overallTotal: totalMsAll, overallValidated: totalValidatedMsAll };
-  }, [filteredLogs, scheduleConfig, now]);
+  }, [filteredLogs, scheduleConfig, now, studentDbSchedule, dateOverrides]);
+
+  const handleConfirmValidate = () => {
+    setIsBulkValidating(true);
+    const ids = Array.from(selectedIds);
+    
+    ids.forEach(id => {
+        let entry = logs.find(e => Number(e.id) === id);
+        if (!entry && id < 0) {
+            // Search in days for virtual entry
+            for (const day of days) {
+                if (day.s2 && Number(day.s2.id) === id) { entry = day.s2; break; }
+                if (day.s4 && Number(day.s4.id) === id) { entry = day.s4; break; }
+                if (day.s6 && Number(day.s6.id) === id) { entry = day.s6; break; }
+            }
+        }
+        if (entry) onValidate(entry, "approve");
+    });
+    
+    setSelectedIds(new Set());
+    setIsBulkValidating(false);
+    if (onRefresh) onRefresh();
+    setShowValidateModal(false);
+  };
+
+  const handleConfirmReject = () => {
+    setIsBulkValidating(true);
+    const ids = Array.from(selectedIds);
+    
+    ids.forEach(id => {
+        let entry = logs.find(e => Number(e.id) === id);
+        if (!entry && id < 0) {
+            // Search in days for virtual entry
+            for (const day of days) {
+                if (day.s2 && Number(day.s2.id) === id) { entry = day.s2; break; }
+                if (day.s4 && Number(day.s4.id) === id) { entry = day.s4; break; }
+                if (day.s6 && Number(day.s6.id) === id) { entry = day.s6; break; }
+            }
+        }
+        if (entry) onValidate(entry, "reject");
+    });
+
+    setSelectedIds(new Set());
+    setIsBulkValidating(false);
+    if (onRefresh) onRefresh();
+    setShowRejectModal(false);
+  };
 
   const selectedPairCount = useMemo(() => {
     let count = 0;
@@ -1142,6 +1515,203 @@ export function StudentAttendanceDetailView({
     return count;
   }, [days, selectedIds]);
 
+  const handleDownloadExcel = () => {
+    if (days.length === 0) return;
+
+    let overallTotal = 0;
+    let overallValidated = 0;
+
+    days.forEach(day => {
+        overallTotal += day.dayTotalMs;
+        
+        // Rebuild schedule for this day to ensure accurate calculation
+        const dateStr = day.date.toLocaleDateString('en-CA');
+        const dynamicOt = (overtimeShifts || []).find((ot: any) => ot.effective_date === dateStr);
+        
+        const effSchedule = studentDbSchedule || scheduleConfig || {
+            amIn: "08:00", amOut: "12:00",
+            pmIn: "13:00", pmOut: "17:00",
+            otIn: "17:00", otOut: "18:00"
+        };
+
+        const override = dateOverrides[dateStr];
+        const scheduleToUse = override ? {
+            amIn: override.am?.start || effSchedule.amIn,
+            amOut: override.am?.end || effSchedule.amOut,
+            pmIn: override.pm?.start || effSchedule.pmIn,
+            pmOut: override.pm?.end || effSchedule.pmOut,
+            otIn: effSchedule.otIn,
+            otOut: effSchedule.otOut
+        } : effSchedule;
+
+        const daySchedule = buildSchedule(
+            day.date,
+            {
+                amIn: scheduleToUse.amIn || "08:00",
+                amOut: scheduleToUse.amOut || "12:00",
+                pmIn: scheduleToUse.pmIn || "13:00",
+                pmOut: scheduleToUse.pmOut || "17:00",
+                otIn: scheduleToUse.otIn,
+                otOut: scheduleToUse.otOut
+            },
+            dynamicOt ? { start: dynamicOt.overtime_start, end: dynamicOt.overtime_end } : undefined
+        );
+
+        const isAmValidated = (day.s1?.status === 'Approved' || day.s2?.status === 'Approved');
+        const isPmValidated = (day.s3?.status === 'Approved' || day.s4?.status === 'Approved');
+        const isOtValidated = (day.s5?.status === 'Approved' || day.s6?.status === 'Approved');
+
+        if (isAmValidated) overallValidated += calculateSessionDuration(day.s1?.timestamp || 0, day.s2?.timestamp || 0, 'am', daySchedule);
+        if (isPmValidated) overallValidated += calculateSessionDuration(day.s3?.timestamp || 0, day.s4?.timestamp || 0, 'pm', daySchedule);
+        if (isOtValidated) overallValidated += calculateSessionDuration(day.s5?.timestamp || 0, day.s6?.timestamp || 0, 'ot', daySchedule);
+    });
+
+    // Helper for formatting time
+    const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    // 1. Define Headers
+    const headerRows = [
+      [`NAME: ${student.lastname || ""}, ${student.firstname || ""}`, "", "", `COURSE: ${student.course || ""}-${student.section || ""}`, "", "", "", "", "", ""],
+      ["", "", "", "", "", "", "", "", "", ""],
+      [`TOTAL HOURS: ${formatHours(overallTotal)}`, "", `TOTAL VALIDATED HOURS: ${formatHours(overallValidated)}`, "", "", "", "", "", "", ""],
+      ["", "", "", "", "", "", "", "", "", ""],
+      ["DATE", "MORNING", "", "STATUS", "AFTERNOON", "", "OVERTIME", "", "STATUS", "TOTAL HOURS"], 
+      ["", "TIME IN", "TIME OUT", "", "TIME IN", "TIME OUT", "TIME IN", "TIME OUT", "", ""] 
+    ];
+
+    // 2. Map Data
+    const dataRows = days.map(day => {
+      const fmt = (slot: AttendanceEntry | null | undefined) => slot ? fmtTime(slot.timestamp) : "-";
+      const fmtOut = (slot: AttendanceEntry | null | undefined) => {
+        if (!slot) return "-";
+        if (slot.validated_by === "SYSTEM_AUTO_CLOSE" || slot.validated_by === "AUTO TIME OUT") {
+            return "AUTO TIME OUT";
+        }
+        return fmtTime(slot.timestamp);
+      };
+      
+      const getStatus = (inSlot?: AttendanceEntry | null, outSlot?: AttendanceEntry | null) => {
+          const s1 = inSlot?.status?.toLowerCase();
+          const s2 = outSlot?.status?.toLowerCase();
+          const v1 = inSlot?.validated_by;
+          const v2 = outSlot?.validated_by;
+
+          // If any part is rejected -> unvalidated
+          if (s1 === "rejected" || s2 === "rejected") {
+            return "unvalidated";
+          }
+
+          // If any part is approved/validated or has validator -> validated
+          if (s1 === "approved" || s1 === "validated" || 
+              s2 === "approved" || s2 === "validated" ||
+              v1 || v2) {
+            return "validated";
+          }
+
+          // If slots exist -> pending
+          if (inSlot || outSlot) {
+            return "pending";
+          }
+
+          return "-";
+      };
+
+      // AM Status: s1 or s2
+      const amStatus = getStatus(day.s1, day.s2);
+      
+      // PM/OT Status: s3, s4, s5, s6
+      let pmStatus = "-";
+      if (day.s3 || day.s4) {
+          pmStatus = getStatus(day.s3, day.s4);
+      } else if (day.s5 || day.s6) {
+          pmStatus = getStatus(day.s5, day.s6);
+      }
+      
+      return [
+        day.date.toLocaleDateString(), // DATE
+        fmt(day.s1),                   // MORNING IN
+        fmtOut(day.s2),                // MORNING OUT
+        amStatus,                      // STATUS (AM)
+        fmt(day.s3),                   // AFTERNOON IN
+        fmtOut(day.s4),                // AFTERNOON OUT
+        fmt(day.s5),                   // OVERTIME IN
+        fmtOut(day.s6),                // OVERTIME OUT
+        pmStatus,                      // STATUS (PM/OT)
+        formatHours(day.dayTotalMs)    // TOTAL HOURS
+      ];
+    });
+
+    // 3. Combine
+    const wsData = [...headerRows, ...dataRows];
+
+    // 4. Create Worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(wsData);
+
+    // Apply styles
+    const headerStyle = {
+      font: { bold: true },
+      alignment: { horizontal: "center", vertical: "center" }
+    };
+    const boldLeftStyle = {
+      font: { bold: true },
+      alignment: { horizontal: "left", vertical: "center" }
+    };
+
+    // Apply styles to Top Info (Rows 1 & 3)
+    // A1, D1, A3, C3 should be bold
+    const boldCells = ["A1", "D1", "A3", "C3"];
+    boldCells.forEach(ref => {
+      if (worksheet[ref]) worksheet[ref].s = boldLeftStyle;
+    });
+
+    // Apply styles to Table Headers (Rows 5 & 6)
+    // Range A5:J6
+    const range = XLSX.utils.decode_range(worksheet['!ref'] || "A1:J100");
+    for (let R = 4; R <= 5; ++R) { // Rows 5 and 6 (0-indexed: 4, 5)
+      for (let C = range.s.c; C <= range.e.c; ++C) {
+        const cell = worksheet[XLSX.utils.encode_cell({ r: R, c: C })];
+        if (cell) cell.s = headerStyle;
+      }
+    }
+
+    // 5. Define Merges
+    worksheet['!merges'] = [
+      // Top Header Info
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 2 } }, // NAME (A1:C1)
+      { s: { r: 0, c: 3 }, e: { r: 0, c: 9 } }, // COURSE (D1:J1)
+      { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, // TOTAL HOURS (A3:B3)
+      { s: { r: 2, c: 2 }, e: { r: 2, c: 5 } }, // TOTAL VALIDATED (C3:F3)
+
+      // Row 5/6 Headers
+      { s: { r: 4, c: 0 }, e: { r: 5, c: 0 } }, // DATE (A5:A6)
+      { s: { r: 4, c: 1 }, e: { r: 4, c: 2 } }, // MORNING (B5:C5)
+      { s: { r: 4, c: 3 }, e: { r: 5, c: 3 } }, // STATUS (D5:D6)
+      { s: { r: 4, c: 4 }, e: { r: 4, c: 5 } }, // AFTERNOON (E5:F5)
+      { s: { r: 4, c: 6 }, e: { r: 4, c: 7 } }, // OVERTIME (G5:H5)
+      { s: { r: 4, c: 8 }, e: { r: 5, c: 8 } }, // STATUS (I5:I6)
+      { s: { r: 4, c: 9 }, e: { r: 5, c: 9 } }, // TOTAL HOURS (J5:J6)
+    ];
+
+    // 6. Set Column Widths
+    worksheet['!cols'] = [
+      { wch: 15 }, // Date
+      { wch: 12 }, // Morning In
+      { wch: 18 }, // Morning Out
+      { wch: 12 }, // Status (AM)
+      { wch: 12 }, // Afternoon In
+      { wch: 18 }, // Afternoon Out
+      { wch: 12 }, // Overtime In
+      { wch: 18 }, // Overtime Out
+      { wch: 12 }, // Status (PM)
+      { wch: 15 }, // Total Hours
+    ];
+
+    // 7. Create Workbook and Download
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Attendance");
+    XLSX.writeFile(workbook, `Attendance_${student.firstname}_${student.lastname}.xlsx`);
+  };
+
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
         <div className="flex items-center gap-4">
@@ -1161,17 +1731,20 @@ export function StudentAttendanceDetailView({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-blue-50 p-6 rounded-2xl border border-blue-100 flex items-center justify-between shadow-sm">
                 <div>
-                    <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">Total Hours</p>
+                    <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">Total Tracked</p>
                     <p className="text-3xl font-bold text-blue-900">{formatHours(overallTotal)}</p>
+                    <p className="text-[11px] text-gray-600 mt-1">Pending + Validated</p>
                 </div>
                 <div className="p-3 bg-blue-100 rounded-xl">
                      <Clock className="text-blue-600" size={24} />
                 </div>
             </div>
+
             <div className="bg-green-50 p-6 rounded-2xl border border-green-100 flex items-center justify-between shadow-sm">
                 <div>
-                    <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-1">Total Validated Time</p>
+                    <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-1">Total Validated</p>
                     <p className="text-3xl font-bold text-green-900">{formatHours(overallValidated)}</p>
+                    <p className="text-[11px] text-gray-600 mt-1">Approved Hours</p>
                 </div>
                 <div className="p-3 bg-green-100 rounded-xl">
                     <ClipboardCheck className="text-green-600" size={24} />
@@ -1210,6 +1783,15 @@ export function StudentAttendanceDetailView({
                       ))}
                     </select>
                   </div>
+                  <button
+                      type="button"
+                      onClick={handleDownloadExcel}
+                      disabled={days.length === 0}
+                      className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-green-700 hover:bg-green-50 hover:border-green-200 transition-colors flex items-center gap-2"
+                  >
+                      <Download size={14} />
+                      Export Attendance
+                  </button>
                   <button
                       type="button"
                       onClick={selectAllPending}
@@ -1300,14 +1882,17 @@ export function StudentAttendanceDetailView({
                                         isInCell = idx === 4;
                                     }
 
-                                    const pairSelected = isSlotPairSelected(pairIn, pairOut);
+                                    const isAutoTimeOut = slot?.type === 'out' && (slot?.validated_by === 'SYSTEM_AUTO_CLOSE' || slot?.validated_by === 'AUTO TIME OUT');
+                                   const pairSelected = isSlotPairSelected(pairIn, pairOut);
 
-                                    return (
-                                        <td key={idx} className="px-1.5 py-2 border-r border-gray-100 text-center align-top min-w-[100px]">
-                                            {slot ? (
-                                                <div className="flex flex-col items-center gap-2">
+                                   return (
+                                       <td key={idx} className={`px-1.5 py-2 border-r border-gray-100 text-center min-w-[100px] ${isAutoTimeOut ? 'align-middle' : 'align-top'}`}>
+                                           {slot ? (
+                                                <div className={`flex flex-col items-center gap-2 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
                                                     <div className="flex items-center gap-2">
-                                                        {isInCell && pairIn && (!pairIn.status || pairIn.status === 'Pending') && (
+                                                        {isInCell && pairIn && (
+                                                            (!pairIn.status || pairIn.status === 'Pending' || (pairOut && pairOut.status === 'Pending'))
+                                                        ) && (
                                                             <input
                                                                 type="checkbox"
                                                                 checked={pairSelected}
@@ -1315,11 +1900,15 @@ export function StudentAttendanceDetailView({
                                                                 className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
                                                             />
                                                         )}
-                                                        <span className="text-xs font-semibold text-gray-900">
-                                                            {formatTime(slot.timestamp)}
-                                                        </span>
+                                                        {isAutoTimeOut ? (
+                                                            <span className="text-[11px] font-bold text-red-500 whitespace-nowrap">AUTO TIME OUT</span>
+                                                        ) : (
+                                                            <span className="text-xs font-semibold text-gray-900">
+                                                                {formatTime(slot.timestamp)}
+                                                            </span>
+                                                        )}
                                                     </div>
-                                {getEntryPhoto(slot) && (
+                                {getEntryPhoto(slot) && !isAutoTimeOut && (
                                     <div 
                                         className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm group cursor-zoom-in bg-gray-100" 
                                         onClick={() => setSelectedImage({ url: getEntryPhoto(slot)!, timestamp: slot.timestamp })}
@@ -1433,8 +2022,11 @@ export function StudentAttendanceDetailView({
                                                 const isInCell = idx === 0;
                                                 const pairSelected = isSlotPairSelected(pairIn, pairOut);
 
+                                                const valBy = (slot?.validated_by || "").trim();
+                                                const isAutoTimeOut = slot?.type === 'out' && (valBy === 'SYSTEM_AUTO_CLOSE' || valBy === 'AUTO TIME OUT');
+
                                                 return (
-                                                <div key={idx} className="flex flex-col items-center gap-2">
+                                                <div key={idx} className={`flex flex-col items-center gap-2 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
                                                     {slot ? (
                                                         <>
                                                             <div className="flex items-center gap-2">
@@ -1446,11 +2038,15 @@ export function StudentAttendanceDetailView({
                                                                         className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
                                                                     />
                                                                 )}
+                                                                {isAutoTimeOut ? (
+                                                                    <span className="text-[11px] font-bold text-red-500 whitespace-nowrap">AUTO TIME OUT</span>
+                                                                ) : (
                                                                 <span className={`text-xs font-bold px-2 py-1 rounded-md ${slot.type === 'in' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                                                                     {formatTime(slot.timestamp)}
                                                                 </span>
+                                                                )}
                                                             </div>
-                                                            {slot.photoDataUrl && (
+                                                            {slot.photoDataUrl && !isAutoTimeOut && (
                                                                 <div 
                                                                     className="relative w-20 h-20 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100"
                                                                     onClick={() => setSelectedImage({ url: slot.photoDataUrl!, timestamp: slot.timestamp })}
@@ -1459,19 +2055,21 @@ export function StudentAttendanceDetailView({
                                                                 </div>
                                                             )}
                                                             <div className="flex gap-1.5 mt-1 justify-center h-8 items-center">
-                                                                {slot.status === 'Approved' ? (
-                                                                    <span className="text-[11px] font-semibold text-green-600">
-                                                                        Validated
-                                                                    </span>
-                                                                ) : slot.status === 'Rejected' ? (
-                                                                    <span className="text-[11px] font-semibold text-red-600">
-                                                                        Unvalidated
-                                                                    </span>
-                                                                ) : (
-                                                                    <span className="text-[11px] font-semibold text-yellow-500">
-                                                                        Pending
-                                                                    </span>
-                                                                )}
+                                                                {(() => {
+                                                                    return slot.status === 'Approved' ? (
+                                                                        <span className="text-[11px] font-semibold text-green-600">
+                                                                            Validated
+                                                                        </span>
+                                                                    ) : slot.status === 'Rejected' ? (
+                                                                        <span className="text-[11px] font-semibold text-red-600">
+                                                                            Unvalidated
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="text-[11px] font-semibold text-yellow-500">
+                                                                            Pending
+                                                                        </span>
+                                                                    );
+                                                                })()}
                                                             </div>
                                                         </>
                                                     ) : (
@@ -1490,8 +2088,11 @@ export function StudentAttendanceDetailView({
                                                 const isInCell = idx === 0;
                                                 const pairSelected = isSlotPairSelected(pairIn, pairOut);
 
+                                                const valBy = (slot?.validated_by || "").trim();
+                                                const isAutoTimeOut = slot?.type === 'out' && (valBy === 'SYSTEM_AUTO_CLOSE' || valBy === 'AUTO TIME OUT');
+
                                                 return (
-                                                <div key={idx} className="flex flex-col items-center gap-2">
+                                                <div key={idx} className={`flex flex-col items-center gap-2 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
                                                     {slot ? (
                                                         <>
                                                             <div className="flex items-center gap-2">
@@ -1503,11 +2104,15 @@ export function StudentAttendanceDetailView({
                                                                         className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
                                                                     />
                                                                 )}
+                                                                {isAutoTimeOut ? (
+                                                                    <span className="text-[11px] font-bold text-red-500 whitespace-nowrap">AUTO TIME OUT</span>
+                                                                ) : (
                                                                 <span className={`text-xs font-bold px-2 py-1 rounded-md ${slot.type === 'in' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                                                                     {formatTime(slot.timestamp)}
                                                                 </span>
+                                                                )}
                                                             </div>
-                                                            {slot.photoDataUrl && (
+                                                            {slot.photoDataUrl && !isAutoTimeOut && (
                                                                 <div 
                                                                     className="relative w-20 h-20 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100"
                                                                     onClick={() => setSelectedImage({ url: slot.photoDataUrl!, timestamp: slot.timestamp })}
@@ -1598,14 +2203,23 @@ export function StudentAttendanceDetailView({
                                             )}
                                         </div>
                                         <div className="grid grid-cols-2 gap-3">
-                                            {[day.s5, day.s6].map((slot, idx) => (
-                                                <div key={idx} className="flex flex-col items-center gap-2">
+                                            {[day.s5, day.s6].map((slot, idx) => {
+                                                const pairOut = day.s6;
+                                                const valBy = (slot?.validated_by || "").trim();
+                                                const isAutoTimeOut = slot?.type === 'out' && (valBy === 'SYSTEM_AUTO_CLOSE' || valBy === 'AUTO TIME OUT');
+
+                                                return (
+                                                <div key={idx} className={`flex flex-col items-center gap-2 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
                                                     {slot ? (
                                                         <>
+                                                            {isAutoTimeOut ? (
+                                                                <span className="text-[11px] font-bold text-red-500 whitespace-nowrap">AUTO TIME OUT</span>
+                                                            ) : (
                                                             <span className={`text-xs font-bold px-2 py-1 rounded-md ${slot.type === 'in' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                                                                 {formatTime(slot.timestamp)}
                                                             </span>
-                                                            {slot.photoDataUrl && (
+                                                            )}
+                                                            {slot.photoDataUrl && !isAutoTimeOut && (
                                                                 <div 
                                                                     className="relative w-20 h-20 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100"
                                                                     onClick={() => setSelectedImage({ url: slot.photoDataUrl!, timestamp: slot.timestamp })}
@@ -1614,7 +2228,8 @@ export function StudentAttendanceDetailView({
                                                                 </div>
                                                             )}
                                                             <div className="flex gap-1.5 mt-1 justify-center h-8 items-center">
-                                                                {slot.status === 'Approved' ? (
+                                                                {(() => {
+                                                                    return slot.status === 'Approved' ? (
                                                                     <span className="text-[11px] font-semibold text-green-600">
                                                                         Validated
                                                                     </span>
@@ -1626,14 +2241,15 @@ export function StudentAttendanceDetailView({
                                                                     <span className="text-[11px] font-semibold text-yellow-500">
                                                                         Pending
                                                                     </span>
-                                                                )}
+                                                                );
+                                                                })()}
                                                             </div>
                                                         </>
                                                     ) : (
                                                         <span className="text-gray-300">-</span>
                                                     )}
                                                 </div>
-                                            ))}
+                                            ); })}
                                         </div>
                                     </div>
                                     <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
@@ -2038,6 +2654,122 @@ export function EvaluationView({
   );
 }
 
+// --- Calendar Modal ---
+function CalendarModal({ 
+  isOpen, 
+  onClose, 
+  onSelectDate, 
+  attendanceData 
+}: { 
+  isOpen: boolean; 
+  onClose: () => void; 
+  onSelectDate: (date: Date) => void; 
+  attendanceData: AttendanceEntry[];
+}) {
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+
+  // Reset to current month when opened
+  useEffect(() => {
+    if (isOpen) {
+      setCurrentMonth(new Date());
+    }
+  }, [isOpen]);
+
+  const dataDates = useMemo(() => {
+    const dates = new Set<string>();
+    attendanceData.forEach(entry => {
+      const d = new Date(entry.timestamp);
+      dates.add(d.toDateString());
+    });
+    return dates;
+  }, [attendanceData]);
+
+  if (!isOpen) return null;
+
+  const daysInMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate();
+  const firstDayOfMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1).getDay(); // 0 = Sun
+
+  const days = [];
+  for (let i = 0; i < firstDayOfMonth; i++) {
+    days.push(null);
+  }
+  for (let i = 1; i <= daysInMonth; i++) {
+    days.push(new Date(currentMonth.getFullYear(), currentMonth.getMonth(), i));
+  }
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+         <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+            <h3 className="font-bold text-gray-900">Select Date</h3>
+            <button onClick={onClose} className="p-1 hover:bg-gray-200 rounded-full text-gray-500">
+              <X size={20} />
+            </button>
+         </div>
+         <div className="p-6">
+            <div className="flex items-center justify-between mb-6">
+               <button 
+                 onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1))}
+                 className="p-2 hover:bg-gray-100 rounded-xl text-gray-600"
+               >
+                 <ChevronLeft size={20} />
+               </button>
+               <span className="font-bold text-lg text-gray-900">
+                 {currentMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
+               </span>
+               <button 
+                 onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1))}
+                 className="p-2 hover:bg-gray-100 rounded-xl text-gray-600"
+               >
+                 <ChevronRight size={20} />
+               </button>
+            </div>
+
+            <div className="grid grid-cols-7 gap-2 mb-2">
+              {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map(d => (
+                <div key={d} className="text-center text-xs font-bold text-gray-400 uppercase tracking-wider py-1">
+                  {d}
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-7 gap-2">
+               {days.map((date, i) => {
+                 if (!date) return <div key={`empty-${i}`} />;
+                 const hasData = dataDates.has(date.toDateString());
+
+                 return (
+                   <button
+                     key={date.toISOString()}
+                     disabled={!hasData}
+                     onClick={() => {
+                        onSelectDate(date);
+                        onClose();
+                     }}
+                     className={`
+                       h-10 w-full rounded-xl flex items-center justify-center text-sm font-bold transition-all
+                       ${hasData 
+                         ? 'bg-orange-50 text-orange-600 hover:bg-orange-100 hover:scale-105 border border-orange-100' 
+                         : 'text-gray-300 cursor-not-allowed bg-gray-50/50'
+                       }
+                     `}
+                   >
+                     {date.getDate()}
+                   </button>
+                 );
+               })}
+            </div>
+            
+            <div className="mt-4 flex items-center justify-center gap-2 text-xs text-gray-400">
+               <div className="w-2 h-2 rounded-full bg-orange-500"></div>
+               <span>Dates with attendance data</span>
+            </div>
+         </div>
+      </div>
+    </div>
+  );
+}
+
 // --- Dashboard View ---
 export function DashboardView({ 
   students, 
@@ -2063,8 +2795,29 @@ export function DashboardView({
     pmIn: string; pmOut: string;
     otIn: string; otOut: string;
   } | null>(null);
+  const [studentSchedules, setStudentSchedules] = useState<Record<string, any>>({});
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [overtimeShifts, setOvertimeShifts] = useState<any[]>([]);
+  const [dateOverrides, setDateOverrides] = useState<DateOverride[]>([]);
+  const [daysToShow, setDaysToShow] = useState(1);
+  const [showCalendar, setShowCalendar] = useState(false);
+
+  useEffect(() => {
+    const fetchOverrides = async () => {
+        try {
+            const supervisorId = myIdnumber || localStorage.getItem("idnumber") || "";
+            if (!supervisorId) return;
+            const res = await fetch(`/api/shifts/overrides?supervisor_id=${encodeURIComponent(supervisorId)}`);
+            const json = await res.json();
+            if (json.overrides) {
+                setDateOverrides(json.overrides);
+            }
+        } catch (e) {
+            console.error("Failed to fetch overrides", e);
+        }
+    };
+    fetchOverrides();
+  }, [myIdnumber, refreshKey]);
 
   useEffect(() => {
     const fetchOvertime = async () => {
@@ -2087,15 +2840,31 @@ export function DashboardView({
   }, [myIdnumber, refreshKey]);
 
   useEffect(() => {
+    const fetchStudentSchedules = async () => {
+        if (!supabase) return;
+        const { data } = await supabase.from('student_shift_schedules').select('*');
+        if (data) {
+            const map: Record<string, any> = {};
+             data.forEach((s: any) => {
+                 map[String(s.student_id)] = s;
+             });
+             setStudentSchedules(map);
+        }
+    };
+    fetchStudentSchedules();
+  }, [refreshKey]);
+
+  useEffect(() => {
     const fetchSchedule = async () => {
       try {
-        const res = await fetch('/api/shifts');
+        const supervisorId = myIdnumber || localStorage.getItem("idnumber") || "";
+        const res = await fetch(`/api/shifts?supervisor_id=${encodeURIComponent(supervisorId)}`);
         const data = await res.json();
         if (data.shifts) {
           const config = {
-            amIn: "07:00", amOut: "12:00",
+            amIn: "08:00", amOut: "12:00",
             pmIn: "13:00", pmOut: "17:00",
-            otIn: "17:00", otOut: "18:00"
+            otIn: "", otOut: ""
           };
           data.shifts.forEach((s: any) => {
             if (s.shift_name === "Morning Shift") {
@@ -2104,10 +2873,9 @@ export function DashboardView({
             } else if (s.shift_name === "Afternoon Shift") {
               config.pmIn = s.official_start || "13:00";
               config.pmOut = s.official_end || "17:00";
-            } else if (s.shift_name === "Overtime Shift") {
-              config.otIn = s.official_start || "17:00";
-              config.otOut = s.official_end || "18:00";
             }
+            // Overtime Shift from DB is ignored here to prevent it from being applied globally.
+            // Overtime is only enabled via explicit authorization (dynamicOt).
           });
           setScheduleConfig(config);
         }
@@ -2116,15 +2884,22 @@ export function DashboardView({
       }
     };
     fetchSchedule();
-  }, []);
+  }, [myIdnumber]);
 
   const [previewImage, setPreviewImage] = useState<{ url: string; timestamp?: number; status?: string } | null>(null);
 
   // Filter States
+  // Filter States
   const [search, setSearch] = useState("");
   const [filterCourse, setFilterCourse] = useState("");
   const [filterSection, setFilterSection] = useState("");
-  
+
+  const [selectedDate, setSelectedDate] = useState(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+  });
+
   const handleViewStudentAttendance = async (student: User) => {
     setIsFetchingModalData(true);
     try {
@@ -2148,6 +2923,7 @@ export function DashboardView({
           photoDataUrl: e.photourl,
           status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
           validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
+          validated_by: e.validated_by,
         };
       });
 
@@ -2192,25 +2968,24 @@ export function DashboardView({
   const [isSavingOt, setIsSavingOt] = useState(false);
   
   // Helpers
-  const formatTime = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  const formatTime = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   const formatHours = (ms: number) => {
     if (!ms) return "-";
     const totalSeconds = Math.floor(ms / 1000);
     const h = Math.floor(totalSeconds / 3600);
     const m = Math.floor((totalSeconds % 3600) / 60);
-    const s = totalSeconds % 60;
-    return `${h}h ${m}m ${s}s`;
+    return `${h}h ${m}m`;
   };
 
-  const todayLabel = useMemo(
+  const displayDateLabel = useMemo(
     () =>
-      new Date().toLocaleDateString(undefined, {
+      selectedDate.toLocaleDateString(undefined, {
         weekday: "long",
         year: "numeric",
         month: "long",
         day: "numeric",
       }),
-    []
+    [selectedDate]
   );
 
   const togglePairSelection = (entryIn?: AttendanceEntry | null, entryOut?: AttendanceEntry | null) => {
@@ -2239,20 +3014,18 @@ export function DashboardView({
   };
 
   const selectAllPending = () => {
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    const start = startOfToday.getTime();
-    const end = start + 24 * 60 * 60 * 1000 - 1;
-
-    const pendingIds = attendanceData
-      .filter((e) => {
-        const status = (e.status || "Pending").toString().trim();
-        const isPending = status === "Pending" && e.id != null;
-        return isPending && e.timestamp >= start && e.timestamp <= end;
-      })
-      .map((e) => Number(e.id));
-
-    setSelectedIds(new Set(pendingIds));
+    const ids = new Set<number>();
+    studentSummaries.forEach(summary => {
+        const slots = summary.todaySlots;
+        if (slots) {
+            [slots.s1, slots.s2, slots.s3, slots.s4, slots.s5, slots.s6].forEach(slot => {
+                if (slot && (slot.status || "Pending") === "Pending" && slot.id != null) {
+                    ids.add(Number(slot.id));
+                }
+            });
+        }
+    });
+    setSelectedIds(ids);
   };
 
   const bulkValidate = async (action: "approve" | "reject") => {
@@ -2260,9 +3033,21 @@ export function DashboardView({
     setIsBulkValidating(true);
     const ids = Array.from(selectedIds);
     
-    // Process sequentially or parallel
+    // Process sequentially
     for (const id of ids) {
-        const entry = attendanceData.find(e => Number(e.id) === id);
+        let entry = attendanceData.find(e => Number(e.id) === id);
+        
+        // If not found in raw data, check derived state (for auto-generated entries)
+        if (!entry && id < 0) {
+             for (const summary of studentSummaries) {
+                  const slots = summary.todaySlots;
+                  if (!slots) continue;
+                  if (slots.s2?.id === id) { entry = slots.s2; break; }
+                  if (slots.s4?.id === id) { entry = slots.s4; break; }
+                  if (slots.s6?.id === id) { entry = slots.s6; break; }
+             }
+        }
+
         if (entry) await handleValidation(entry, action);
     }
     
@@ -2352,6 +3137,8 @@ export function DashboardView({
       byStudent[id].push(e as any);
     });
 
+    const targetDateStr = selectedDate.toLocaleDateString();
+
     return filteredStudents.map(student => {
       const logs = (byStudent[student.idnumber] || []).slice().sort((a, b) => a.timestamp - b.timestamp);
       
@@ -2370,8 +3157,6 @@ export function DashboardView({
           grouped.get(key)!.logs.push(log);
       });
 
-      const todayStr = new Date().toLocaleDateString();
-
       grouped.forEach(({ date, logs: dayLogs }) => {
           // Pending Days Count
           if (dayLogs.some(l => l.status === "Pending")) {
@@ -2382,50 +3167,32 @@ export function DashboardView({
           const baseDate = new Date(date);
           baseDate.setHours(0, 0, 0, 0);
 
-          const buildShift = (timeStr: string) => {
-              const [h, m] = timeStr.split(":").map(Number);
-              const d = new Date(baseDate.getTime());
-              d.setHours(h || 0, m || 0, 0, 0);
-              return d.getTime();
-          };
+          // Dynamic OT check: Apply authorized overtime window if exists for this student/date
+          const y = date.getFullYear();
+          const m = String(date.getMonth() + 1).padStart(2, '0');
+          const d = String(date.getDate()).padStart(2, '0');
+          const dateStr = `${y}-${m}-${d}`;
 
-       // Use global scheduleConfig to match Detail View
-      let schedule = {
-          amIn: buildShift("07:00"),
-          amOut: buildShift("12:00"),
-          pmIn: buildShift("13:00"),
-          pmOut: buildShift("17:00"),
-          otStart: buildShift("17:00"),
-          otEnd: buildShift("18:00"),
-      };
+          const dynamicOt = overtimeShifts.find((s: any) => 
+              String(s.student_id) === String(student.idnumber) && 
+              s.effective_date === dateStr
+          );
 
-      if (scheduleConfig) {
-          schedule = {
-              amIn: buildShift(scheduleConfig.amIn || "07:00"),
-              amOut: buildShift(scheduleConfig.amOut || "12:00"),
-              pmIn: buildShift(scheduleConfig.pmIn || "13:00"),
-              pmOut: buildShift(scheduleConfig.pmOut || "17:00"),
-              otStart: buildShift(scheduleConfig.otIn || "17:00"),
-              otEnd: buildShift(scheduleConfig.otOut || "18:00"),
-          };
-      }
+          const override = dateOverrides.find(o => o.date === dateStr);
+          const studentSched = studentSchedules[student.idnumber];
 
-      // Dynamic OT check: Apply authorized overtime window if exists for this student/date
-      const y = date.getFullYear();
-      const m = String(date.getMonth() + 1).padStart(2, '0');
-      const d = String(date.getDate()).padStart(2, '0');
-      const dateStr = `${y}-${m}-${d}`;
-
-      const dynamicOt = overtimeShifts.find((s: any) => 
-          String(s.student_id) === String(student.idnumber) && 
-          s.effective_date === dateStr
-      );
-
-      if (dynamicOt) {
-          // overtime_start/end are timestamps from DB/Optimistic update
-          schedule.otStart = dynamicOt.overtime_start;
-          schedule.otEnd = dynamicOt.overtime_end;
-      }
+          const schedule = buildSchedule(
+            baseDate,
+            {
+              amIn: override?.am?.start || studentSched?.am_in || scheduleConfig?.amIn || "08:00",
+              amOut: override?.am?.end || studentSched?.am_out || scheduleConfig?.amOut || "12:00",
+              pmIn: override?.pm?.start || studentSched?.pm_in || scheduleConfig?.pmIn || "13:00",
+              pmOut: override?.pm?.end || studentSched?.pm_out || scheduleConfig?.pmOut || "17:00",
+              otIn: studentSched?.ot_in || scheduleConfig?.otIn,
+              otOut: studentSched?.ot_out || scheduleConfig?.otOut
+            },
+            dynamicOt ? { start: dynamicOt.overtime_start, end: dynamicOt.overtime_end } : undefined
+          );
 
           // Sort logs strictly by time
           const sortedLogs = [...dayLogs].sort((a, b) => a.timestamp - b.timestamp);
@@ -2436,34 +3203,60 @@ export function DashboardView({
           const sessions: Session[] = [];
           let currentIn: AttendanceEntry | null = null;
 
-          const determineShift = (ts: number): 'am' | 'pm' | 'ot' => {
-              const date = new Date(ts);
-              const h = date.getHours();
-              if (h < 12) return 'am'; // Noon cutoff
-              if (h < 17) return 'pm';
-              return 'ot';
-          };
+          const today = new Date();
+          today.setHours(0,0,0,0);
+          const isPastDate = date < today;
 
           for (const log of sortedLogs) {
               if (log.status === "Rejected") continue;
 
               if (log.type === "in") {
                   if (currentIn) {
-                      // Previous session incomplete (forgot to time out). Close it as incomplete.
-                      sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.timestamp) });
+                      // Previous session incomplete (forgot to time out).
+                      const shift = determineShift(currentIn.timestamp, schedule);
+                      let outEntry: AttendanceEntry | null = null;
+                      
+                      if (isPastDate) {
+                              const outTs = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
+                              outEntry = {
+                                  id: currentIn.id ? -currentIn.id : -Math.floor(Math.random() * 1000000),
+                                  idnumber: currentIn.idnumber,
+                                  type: 'out',
+                                  timestamp: outTs,
+                                  photoDataUrl: '',
+                                  status: 'Pending',
+                                  validated_by: 'AUTO TIME OUT'
+                              };
+                          }
+                      sessions.push({ in: currentIn, out: outEntry, shift });
                   }
                   currentIn = log;
               } else if (log.type === "out") {
                   if (currentIn) {
                       // Close session
-                      sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.timestamp) });
+                      sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.timestamp, schedule) });
                       currentIn = null;
                   }
                   // Orphaned OUTs are ignored
               }
           }
           if (currentIn) {
-              sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.timestamp) });
+              const shift = determineShift(currentIn.timestamp, schedule);
+              let outEntry: AttendanceEntry | null = null;
+              
+              if (isPastDate) {
+                  const outTs = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
+                  outEntry = {
+                      id: currentIn.id ? -currentIn.id : -Math.floor(Math.random() * 1000000),
+                      idnumber: currentIn.idnumber,
+                      type: 'out',
+                      timestamp: outTs,
+                      photoDataUrl: '',
+                      status: 'Pending',
+                      validated_by: 'AUTO TIME OUT'
+                  };
+              }
+              sessions.push({ in: currentIn, out: outEntry, shift });
           }
 
           // Calculate Hours (Shift Window Intersection - All Windows)
@@ -2476,29 +3269,12 @@ export function DashboardView({
                   
                   if (!session.out) return;
 
-                  // Check AM Window
-                  const amIn = Math.max(session.in.timestamp, schedule.amIn);
-                  const amOut = Math.min(session.out.timestamp, schedule.amOut);
-                  const amInFl = Math.floor(amIn / 60000) * 60000;
-                  const amOutFl = Math.floor(amOut / 60000) * 60000;
-                  total += Math.max(0, amOutFl - amInFl);
-
-                  // Check PM Window
-                  const pmIn = Math.max(session.in.timestamp, schedule.pmIn);
-                  const pmOut = Math.min(session.out.timestamp, schedule.pmOut);
-                  const pmInFl = Math.floor(pmIn / 60000) * 60000;
-                  const pmOutFl = Math.floor(pmOut / 60000) * 60000;
-                  total += Math.max(0, pmOutFl - pmInFl);
-
-                  // Check OT Window
-                  const otIn = Math.max(session.in.timestamp, schedule.otStart);
-                  const otOut = Math.min(session.out.timestamp, schedule.otEnd);
-                  const otInFl = Math.floor(otIn / 60000) * 60000;
-                  const otOutFl = Math.floor(otOut / 60000) * 60000;
-                  total += Math.max(0, otOutFl - otInFl);
+                  // Use shared utility for uniform calculation
+                  const { am, pm, ot } = calculateShiftDurations(session.in.timestamp, session.out.timestamp, schedule);
+                  total += am + pm + ot;
               });
               
-              return Math.floor(total / 60000) * 60000;
+              return total;
           };
 
           const dayVal = calculateHours(true);
@@ -2507,14 +3283,19 @@ export function DashboardView({
           totalValidatedMs += dayVal;
           totalRawMs += dayRaw;
           
-          // Capture Today's Slots
-          if (date.toLocaleDateString() === todayStr) {
+          // Capture Selected Date's Slots
+          if (date.toLocaleDateString() === targetDateStr) {
              const otAuthLog = dayLogs.find(l => l.photoDataUrl && l.photoDataUrl.startsWith("OT_AUTH:"));
              
-             const todayISO = new Date().toLocaleDateString('en-CA');
+             // Use selectedDate for matching overtime shifts visually if needed (though we matched above via dateStr)
+             const yT = selectedDate.getFullYear();
+             const mT = String(selectedDate.getMonth() + 1).padStart(2, '0');
+             const dT = String(selectedDate.getDate()).padStart(2, '0');
+             const targetDateISO = `${yT}-${mT}-${dT}`;
+
              const isOvertimeAuthorized = overtimeShifts.some((s: any) => 
                  String(s.student_id) === String(student.idnumber) && 
-                 s.effective_date === todayISO
+                 s.effective_date === targetDateISO
              );
 
              // Map sessions to UI slots (No Visual Clamping)
@@ -2548,7 +3329,7 @@ export function DashboardView({
         todaySlots
       };
     });
-  }, [filteredStudents, attendanceData, scheduleConfig, overtimeShifts]);
+  }, [filteredStudents, attendanceData, scheduleConfig, overtimeShifts, selectedDate, studentSchedules, dateOverrides]);
 
   // Fetch Attendance
   useEffect(() => {
@@ -2582,8 +3363,9 @@ export function DashboardView({
              timestamp: Number(e.ts),
              photoDataUrl: e.photourl,
             status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
-            validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined
-          }});
+             validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
+             validated_by: e.validated_by
+           }});
            setAttendanceData(mapped);
         }
       } catch (e) {
@@ -2597,7 +3379,7 @@ export function DashboardView({
 
   // Validate Function
   const handleValidation = async (entry: AttendanceEntry, action: 'approve' | 'reject' | 'reset') => {
-    if (!entry.id) return;
+    if (!entry.id && entry.id !== 0) return;
     if (!myIdnumber) {
         // Try to recover from localStorage
         const stored = localStorage.getItem("idnumber");
@@ -2629,18 +3411,55 @@ export function DashboardView({
         });
       }
 
-      const res = await fetch("/api/attendance", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          id: entry.id, 
-          approve: action === 'approve', 
-          reject: action === 'reject', 
-          validated_by: validatorId 
-        }),
-      });
+      let res;
+      if (Number(entry.id) < 0) {
+          // Auto-generated entry (negative ID). Use POST to create it.
+          res = await fetch("/api/attendance", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+              idnumber: entry.idnumber,
+              type: entry.type,
+              timestamp: entry.timestamp,
+              validated_by: validatorId,
+              status: newStatus,
+              photoDataUrl: entry.photoDataUrl || "" 
+            }),
+          });
+      } else {
+          // Existing entry. Use PATCH.
+          res = await fetch("/api/attendance", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+              id: entry.id, 
+              approve: action === 'approve', 
+              reject: action === 'reject', 
+              validated_by: validatorId 
+            }),
+          });
+      }
+
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Failed");
+
+      // Update ID if created
+      if (Number(entry.id) < 0 && json.id) {
+          const updateId = (e: AttendanceEntry) => 
+            e.id === entry.id ? { ...e, id: json.id } : e;
+          
+          setAttendanceData(prev => prev.map(updateId));
+          if (selectedModalData) {
+            setSelectedModalData(prev => {
+                if (!prev) return null;
+                return {
+                    ...prev,
+                    attendance: prev.attendance.map(updateId)
+                };
+            });
+          }
+      }
+
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to validate";
       alert(msg);
@@ -2709,12 +3528,12 @@ export function DashboardView({
            <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-gray-100 md:border-t-0 md:pt-0">
              <button
                onClick={() => {
-                   const today = new Date();
-                   today.setHours(0, 0, 0, 0);
+                   const d = new Date(selectedDate);
+                   d.setHours(0, 0, 0, 0);
                    setBulkOvertimeModal({ 
                        isOpen: true, 
                        selectedStudentIds: new Set(), 
-                       date: today 
+                       date: d 
                    });
                    setOtInTime("17:00");
                    setOtHours(1);
@@ -2769,13 +3588,72 @@ export function DashboardView({
          )}
       </div>
 
+     {/* Calendar Modal */}
+     <CalendarModal 
+       isOpen={showCalendar} 
+       onClose={() => setShowCalendar(false)} 
+       onSelectDate={setSelectedDate} 
+       attendanceData={attendanceData} 
+     />
+
+      {/* Date Navigation Header */}
+      <div className="bg-white p-2 rounded-2xl border border-gray-200 shadow-sm flex items-center justify-between">
+          <button 
+            onClick={() => setSelectedDate(new Date())}
+            className="px-4 py-2 text-sm font-semibold text-orange-600 bg-orange-50 hover:bg-orange-100 rounded-xl transition-colors"
+          >
+            Today
+          </button>
+
+          <div className="flex items-center gap-2 md:gap-4">
+            <button 
+              onClick={() => {
+                  const d = new Date(selectedDate);
+                  d.setDate(d.getDate() - 1);
+                  setSelectedDate(d);
+              }}
+              className="p-2 hover:bg-gray-100 rounded-xl text-gray-500 transition-colors"
+            >
+                <ChevronLeft size={20} />
+            </button>
+            
+            <div className="flex flex-col items-center">
+              <span className="text-sm md:text-lg font-bold text-gray-900">
+                  {selectedDate.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
+              </span>
+              <span className="text-xs text-gray-500 font-medium md:hidden">
+                  {selectedDate.getFullYear()}
+              </span>
+            </div>
+
+            <button 
+              onClick={() => {
+                  const d = new Date(selectedDate);
+                  d.setDate(d.getDate() + 1);
+                  setSelectedDate(d);
+              }}
+              className="p-2 hover:bg-gray-100 rounded-xl text-gray-500 transition-colors"
+            >
+                <ChevronRight size={20} />
+            </button>
+          </div>
+
+          <button 
+            onClick={() => setShowCalendar(true)}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 hover:text-gray-900 rounded-xl border border-gray-200 transition-all shadow-sm hover:shadow"
+          >
+              <Calendar size={18} />
+              <span className="hidden md:inline">Calendar</span>
+          </button>
+      </div>
+
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="px-4 py-2 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
           <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">
-            Date
+            Selected Date
           </span>
           <span className="text-sm font-semibold text-gray-900">
-            {todayLabel}
+            {displayDateLabel}
           </span>
         </div>
         <div className="hidden md:block overflow-x-auto">
@@ -2817,7 +3695,7 @@ export function DashboardView({
               ) : (
                 studentSummaries.map(({ student, totalMs, totalRawMs, todaySlots }) => {
                   const todayMs = todaySlots?.todayTotalMs || 0;
-                  // Use todayMs (Daily Validated + Pending) for the Total Hours column
+                  // Use todayMs for the Total Hours column (Daily View)
                   const displayTotal = todayMs;
                   const renderSlot = (
                     slot: AttendanceEntry | null,
@@ -2871,7 +3749,11 @@ export function DashboardView({
                     let statusLabel = "Pending";
                     let statusClass = "text-yellow-600";
 
-                    if (status === "Approved") {
+                    const valBy = (slot.validated_by || "").trim();
+                    if (valBy === "SYSTEM_AUTO_CLOSE" || valBy === "AUTO TIME OUT") {
+            statusLabel = "AUTO TIME OUT";
+            statusClass = "text-orange-600 font-bold";
+          } else if (status === "Approved") {
                       statusLabel = "Validated";
                       statusClass = "text-green-600";
                     } else if (status === "Rejected") {
@@ -2906,7 +3788,7 @@ export function DashboardView({
                               {formatTime(slot.timestamp)}
                             </span>
                           </div>
-                          {slot.photoDataUrl && (
+                          {slot.photoDataUrl ? (
                             <div
                               className="w-8 h-8 rounded-lg overflow-hidden bg-gray-100 border border-gray-200 cursor-zoom-in"
                               onClick={() =>
@@ -2923,7 +3805,7 @@ export function DashboardView({
                                 className="w-full h-full object-cover"
                               />
                             </div>
-                          )}
+                          ) : null}
                           <span className={`text-[11px] font-semibold ${statusClass}`}>
                             {statusLabel}
                           </span>
@@ -2938,8 +3820,21 @@ export function DashboardView({
                         <button
                           onClick={() => handleViewStudentAttendance(student)}
                           disabled={isFetchingModalData}
-                          className="flex items-center text-left w-full group"
+                          className="flex items-center gap-3 text-left w-full group"
                         >
+                          <div className="flex-shrink-0 h-9 w-9 rounded-full overflow-hidden bg-gray-100 border border-gray-200">
+                            {student.avatar_url ? (
+                              <img
+                                src={student.avatar_url}
+                                alt="Profile"
+                                className="h-full w-full object-cover"
+                              />
+                            ) : (
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-full h-full text-gray-400">
+                                <path fillRule="evenodd" d="M18.685 19.097A9.723 9.723 0 0021.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12a9.723 9.723 0 003.065 7.097A9.716 9.716 0 0012 21.75a9.716 9.716 0 006.685-2.653zm-12.54-1.285A7.486 7.486 0 0112 15a7.486 7.486 0 015.855 2.812A8.224 8.224 0 0112 20.25a8.224 8.224 0 01-5.855-2.438zM15.75 9a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" clipRule="evenodd" />
+                              </svg>
+                            )}
+                          </div>
                           <div className="min-w-0">
                             <div className="font-bold text-sm text-gray-900 group-hover:text-orange-600 group-hover:underline truncate">
                               {student.lastname}, {student.firstname}
@@ -2975,7 +3870,7 @@ export function DashboardView({
           ) : (
             studentSummaries.map(({ student, totalMs, totalRawMs, pendingDays, todaySlots }) => {
               const todayMs = todaySlots?.todayTotalMs || 0;
-              const displayTotal = todayMs;
+              const displayTotal = totalMs;
               const courseSection = [
                 student.course || "",
                 student.section || ""
@@ -2990,7 +3885,20 @@ export function DashboardView({
                     disabled={isFetchingModalData}
                     className="flex items-start justify-between gap-3 w-full text-left"
                   >
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-3">
+                      <div className="flex-shrink-0 h-10 w-10 rounded-full overflow-hidden bg-gray-100 border border-gray-200">
+                        {student.avatar_url ? (
+                          <img
+                            src={student.avatar_url}
+                            alt="Profile"
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-full h-full text-gray-400">
+                            <path fillRule="evenodd" d="M18.685 19.097A9.723 9.723 0 0021.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12a9.723 9.723 0 003.065 7.097A9.716 9.716 0 0012 21.75a9.716 9.716 0 006.685-2.653zm-12.54-1.285A7.486 7.486 0 0112 15a7.486 7.486 0 015.855 2.812A8.224 8.224 0 0112 20.25a8.224 8.224 0 01-5.855-2.438zM15.75 9a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" clipRule="evenodd" />
+                          </svg>
+                        )}
+                      </div>
                       <div>
                         <div className="text-sm font-semibold text-gray-900">
                           {student.lastname}, {student.firstname}
@@ -3012,7 +3920,7 @@ export function DashboardView({
                         Total Hours
                       </div>
                       <div className="text-sm font-bold text-gray-900 mt-1">
-                        {displayTotal > 0 ? formatDuration(displayTotal) : (
+                        {displayTotal > 0 ? formatHours(displayTotal) : (
                           <span className="text-gray-300">-</span>
                         )}
                       </div>

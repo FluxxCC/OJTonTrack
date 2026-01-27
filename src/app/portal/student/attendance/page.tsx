@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AttendanceView, StudentHeader, StudentBottomNav } from "../ui";
 
-type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" };
+type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; validated_by?: string | null };
 type ServerAttendanceEntry = { id?: number; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null };
 
 export default function StudentAttendancePage() {
@@ -31,6 +31,7 @@ export default function StudentAttendancePage() {
               timestamp: e.ts,
               photoDataUrl: e.photourl,
               status,
+              validated_by: e.validated_by
             };
           }) as AttendanceEntry[];
           setAttendance(mapped);

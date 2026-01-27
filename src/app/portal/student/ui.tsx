@@ -1,12 +1,25 @@
 "use client";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { AttendanceDetailsModal } from "@/components/AttendanceDetailsModal";
 import { supabase } from "@/lib/supabaseClient";
+import { buildSchedule, calculateSessionDuration, checkSessionFlags, ShiftSchedule, formatHours, formatDisplayTime, normalizeTimeString, timeStringToMinutes, calculateShiftDurations } from "@/lib/attendance";
+import Cropper from "react-easy-crop";
+import getCroppedImg from "@/lib/cropImage";
+import { Move, ZoomIn, ZoomOut, X } from "lucide-react";
 
-export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; approvedAt?: number };
+
+export type AttendanceEntry = { 
+  id?: number; 
+  type: "in" | "out"; 
+  timestamp: number; 
+  photoDataUrl: string; 
+  status?: "Pending" | "Approved" | "Rejected"; 
+  approvedAt?: number;
+  validated_by?: string | null;
+};
 export type ReportEntry = { id?: number; title: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string; isViewedByInstructor?: boolean; week?: number; };
 type ServerAttendanceEntry = { 
   type: "in" | "out"; 
@@ -46,36 +59,6 @@ const toBase64 = (file: File) => new Promise((resolve, reject) => {
   reader.onerror = error => reject(error);
 });
 
-function normalizeTimeString(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const parts = raw.split(":");
-  if (parts.length < 2) return null;
-  const h = parts[0]?.padStart(2, "0");
-  const m = parts[1]?.padStart(2, "0");
-  if (!h || !m) return null;
-  return `${h}:${m}`;
-}
-
-function timeStringToMinutes(raw: string | null | undefined): number {
-  const t = normalizeTimeString(raw);
-  if (!t) return 0;
-  const [h, m] = t.split(":").map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
-
-function formatDisplayTime(raw: string | null | undefined): string {
-  const t = normalizeTimeString(raw);
-  if (!t) return "";
-  const [hStr, mStr] = t.split(":");
-  let h = Number(hStr || 0);
-  const m = Number(mStr || 0);
-  const suffix = h >= 12 ? "PM" : "AM";
-  if (h === 0) h = 12;
-  else if (h > 12) h -= 12;
-  const mm = String(m).padStart(2, "0");
-  return `${h}:${mm} ${suffix}`;
-}
-
 export type User = {
   id: number;
   idnumber: string;
@@ -92,6 +75,7 @@ export type User = {
   email_verified?: boolean;
   target_hours?: number;
   supervisor_name?: string;
+  avatar_url?: string;
 };
 
 export function StudentHeader() {
@@ -185,7 +169,7 @@ export function StudentBottomNav() {
   );
 }
 
-function SubmittedReportsModal({ reports, onClose }: { reports: ReportEntry[]; onClose: () => void }) {
+function SubmittedReportsModal({ reports, onClose, onViewReport }: { reports: ReportEntry[]; onClose: () => void; onViewReport?: (report: ReportEntry) => void }) {
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
@@ -200,24 +184,46 @@ function SubmittedReportsModal({ reports, onClose }: { reports: ReportEntry[]; o
             <div className="text-center text-gray-500 py-8">No reports submitted yet.</div>
           ) : (
             reports.slice().sort((a, b) => b.submittedAt - a.submittedAt).map((report, idx) => (
-              <div key={idx} className="bg-gray-50 rounded-xl p-4 border border-gray-100 transition-colors hover:bg-gray-100">
+              <button 
+                key={idx} 
+                onClick={() => onViewReport?.(report)}
+                disabled={!onViewReport}
+                className={`w-full text-left bg-gray-50 rounded-xl p-4 border border-gray-100 transition-colors ${onViewReport ? "hover:bg-gray-100 cursor-pointer" : "cursor-default"}`}
+              >
                 <div className="flex items-center justify-between mb-2">
                    <div className="font-bold text-gray-900">{report.title}</div>
                    <div className="text-xs text-gray-500">{new Date(report.submittedAt).toLocaleDateString()}</div>
                 </div>
                 {report.body && <p className="text-sm text-gray-600 line-clamp-2 mb-2">{report.body}</p>}
-                <div className="flex items-center gap-2 mt-2">
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${report.isViewedByInstructor || report.instructorComment ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"}`}>
-                        {report.isViewedByInstructor || report.instructorComment ? "Reviewed" : "Pending Review"}
-                    </span>
-                    {report.fileName && (
-                        <span className="text-[10px] font-bold bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full flex items-center gap-1">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16l4-4h8a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"/></svg>
-                            File
+                <div className="flex flex-col gap-2 mt-2">
+                    <div className="flex items-center gap-2">
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${report.isViewedByInstructor || report.instructorComment ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"}`}>
+                            {report.isViewedByInstructor || report.instructorComment ? "Reviewed" : "Pending Review"}
                         </span>
+                        {report.fileName && (
+                            <span className="text-[10px] font-bold bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16l4-4h8a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"/></svg>
+                                File
+                            </span>
+                        )}
+                        {report.instructorComment && (
+                            <span className="text-[10px] font-bold bg-red-50 text-red-600 px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse" title="Instructor Comment">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                                Comment
+                            </span>
+                        )}
+                    </div>
+                    {report.instructorComment && (
+                         <div className="bg-red-50/50 border border-red-100 rounded-lg p-3 text-xs text-gray-700">
+                             <div className="font-bold text-red-700 mb-1 flex items-center gap-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                                Instructor Comment
+                             </div>
+                             {report.instructorComment}
+                         </div>
                     )}
                 </div>
-              </div>
+              </button>
             ))
           )}
         </div>
@@ -230,6 +236,8 @@ function SubmittedReportsModal({ reports, onClose }: { reports: ReportEntry[]; o
     </div>
   );
 }
+
+import * as XLSX from "xlsx-js-style";
 
 export function DashboardView({
   attendance,
@@ -245,6 +253,7 @@ export function DashboardView({
   locationText,
   recentRows,
   nextDeadline,
+  now,
 }: { 
   attendance: AttendanceEntry[]; 
   reports: ReportEntry[]; 
@@ -267,6 +276,7 @@ export function DashboardView({
     status: "Pending" | "Approved";
   }[];
   nextDeadline?: { week: number; date: string; status: "submitted" | "pending" };
+  now?: number;
 }): React.ReactElement {
   const [selectedAttendanceEntry, setSelectedAttendanceEntry] = useState<AttendanceEntry | null>(null);
   const [showAllReportsModal, setShowAllReportsModal] = useState(false);
@@ -293,19 +303,33 @@ export function DashboardView({
   const isCheckedIn = useMemo(() => {
     const sorted = attendance.slice().sort((a,b) => a.timestamp - b.timestamp);
     const last = sorted[sorted.length - 1];
-    return last?.type === "in";
-  }, [attendance]);
+    if (!last || last.type === "out") return false;
+
+    // Check if the last IN entry is from today
+    // We use the passed 'now' prop or fallback to client Date
+    const currentNow = now || Date.now();
+    const logDate = new Date(last.timestamp).toDateString();
+    const todayDate = new Date(currentNow).toDateString();
+    
+    // Only return true if the IN entry is from TODAY
+    // If it's from yesterday, we return false so the button shows "Time In".
+    // The "Time In" handler will then take care of auto-closing the stale entry.
+    return logDate === todayDate;
+  }, [attendance, now]);
 
   const recentLogs = useMemo(() => {
     const logs = attendance.slice().sort((a, b) => b.timestamp - a.timestamp).slice(0, 4);
     return logs.map(log => ({
       type: log.type,
       date: new Date(log.timestamp).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }),
-      time: new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      time: new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      validated_by: log.validated_by
     }));
   }, [attendance]);
 
   const isReportSubmitted = reports.length > 0;
+
+
 
   return (
     <div className="flex flex-col gap-6 animate-in fade-in duration-500">
@@ -366,7 +390,9 @@ export function DashboardView({
                <div className="space-y-4">
                   {recentLogs.length === 0 ? (
                       <div className="bg-gray-50 rounded-xl border border-gray-100 p-8 text-center text-gray-400 italic">No recent activity</div>
-                  ) : recentLogs.map((log, i) => (
+                  ) : recentLogs.map((log, i) => {
+                      const isAutoTimeOut = log.type === 'out' && (log.validated_by === 'SYSTEM_AUTO_CLOSE' || log.validated_by === 'AUTO TIME OUT');
+                      return (
                       <div key={i} className="bg-gray-50 rounded-2xl border border-gray-100 p-5 flex items-center justify-between hover:border-gray-200 transition-colors">
                          <div className="flex items-center gap-5">
                             <div className={`w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 ${log.type === 'in' ? 'bg-white text-green-600 border border-green-100 shadow-sm' : 'bg-white text-red-600 border border-red-100 shadow-sm'}`}>
@@ -379,13 +405,18 @@ export function DashboardView({
                                )}
                             </div>
                             <div className="flex flex-col">
-                               <div className="font-bold text-gray-900 text-base">{log.type === 'in' ? 'Time In' : 'Time Out'}</div>
+                               <div className={`font-bold text-base ${isAutoTimeOut ? 'text-red-600' : 'text-gray-900'}`}>
+                                 {log.type === 'in' ? 'Time In' : isAutoTimeOut ? 'AUTO TIME OUT' : 'Time Out'}
+                               </div>
                                <div className="text-xs font-medium text-gray-400 mt-0.5">{log.date}</div>
                             </div>
                          </div>
-                         <div className="font-bold text-gray-900 text-lg">{log.time}</div>
+                         {!isAutoTimeOut && (
+                           <div className="font-bold text-gray-900 text-lg">{log.time}</div>
+                         )}
                       </div>
-                  ))}
+                      );
+                  })}
                </div>
             </div>
          </div>
@@ -529,11 +560,34 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   const [lateInPmOutText, setLateInPmOutText] = useState<string>("");
   const [showEarlyOutModal, setShowEarlyOutModal] = useState(false);
   const [earlyOutShiftEndText, setEarlyOutShiftEndText] = useState<string>("");
+  const [showNoScheduleModal, setShowNoScheduleModal] = useState(false);
+  const [showCooldownModal, setShowCooldownModal] = useState(false);
   const [showHistoryMode, setShowHistoryMode] = useState(false);
   const [selectedImage, setSelectedImage] = useState<{ url: string; timestamp: number } | null>(null);
   const [cameraFeedback, setCameraFeedback] = useState<string>("");
   const [authorizedOvertime, setAuthorizedOvertime] = useState<{ start: number; end: number } | null>(null);
   const [allOvertimeShifts, setAllOvertimeShifts] = useState<{ effective_date: string; overtime_start: number; overtime_end: number }[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+
+  useEffect(() => {
+    const fetchUser = async () => {
+      try {
+        // Fetch specific user by ID to bypass pagination limits and ensure fresh data
+        const res = await fetch(`/api/users?idnumber=${encodeURIComponent(idnumber)}`, { cache: "no-store" });
+        const json = await res.json();
+        if (Array.isArray(json.users) && json.users.length > 0) {
+          const me = json.users[0];
+          // Ensure the fetched user is actually a student
+          if (String(me.role).toLowerCase() === "student") {
+            setUser(me);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch user profile:", e);
+      }
+    };
+    if (idnumber) fetchUser();
+  }, [idnumber]);
 
   useEffect(() => {
     const fetchOvertime = async () => {
@@ -642,7 +696,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   const schedule = useMemo(() => {
     try {
       const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
-      const saved = localStorage.getItem(key) || localStorage.getItem("schedule_default");
+      const saved = localStorage.getItem(key);
       if (!saved) return null;
       const parsed = JSON.parse(saved) as {
         amIn?: string;
@@ -681,27 +735,62 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     return parts.join(" • ");
   }, [dbSchedule, schedule]);
 
-  const refreshScheduleFromServer = async () => {
+  const refreshScheduleFromServer = useCallback(async () => {
     try {
+      // 1. Try fetching specific student schedule first
+      if (supabase && idnumber) {
+        const { data: studentSched, error: schedError } = await supabase
+          .from("student_shift_schedules")
+          .select("*")
+          .eq("student_id", idnumber)
+          .maybeSingle();
+
+        if (!schedError && studentSched) {
+            const next = {
+                amIn: normalizeTimeString(studentSched.am_in) || "",
+                amOut: normalizeTimeString(studentSched.am_out) || "",
+                pmIn: normalizeTimeString(studentSched.pm_in) || "",
+                pmOut: normalizeTimeString(studentSched.pm_out) || "",
+                otIn: normalizeTimeString(studentSched.ot_in) || undefined,
+                otOut: normalizeTimeString(studentSched.ot_out) || undefined,
+            };
+            setDbSchedule(next);
+            return next;
+        }
+      }
+
+      // 2. Fallback to Supervisor Default
       let rows: any[] | null = null;
       if (supabase) {
-        const { data, error } = await supabase
+        let query = supabase
           .from("shifts")
           .select("shift_name, official_start, official_end")
           .order("official_start", { ascending: true });
+
+        if (supervisorId) {
+          query = query.eq("supervisor_id", supervisorId);
+        }
+
+        const { data, error } = await query;
         if (!error && Array.isArray(data)) {
           rows = data.filter(r => r && (r.official_start || r.official_end));
         }
       }
       if (!rows) {
-        const res = await fetch("/api/shifts", { cache: "no-store" });
+        const res = await fetch(`/api/shifts${supervisorId ? `?supervisor_id=${encodeURIComponent(supervisorId)}` : ''}`, { cache: "no-store" });
         const json = await res.json();
         const data = json.shifts;
         if (Array.isArray(data)) {
           rows = data.filter((r: any) => r && (r.official_start || r.official_end));
         }
       }
-      if (!rows || rows.length === 0) return null;
+      if (!rows || rows.length === 0) {
+        setDbSchedule(null);
+        if (idnumber) {
+          localStorage.removeItem(`schedule_${idnumber}`);
+        }
+        return null;
+      }
       const sorted = rows
         .slice()
         .sort(
@@ -712,7 +801,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
       let amRow = sorted[0];
       let pmRow = sorted[1] || sorted[0];
       const findByName = (match: (name: string) => boolean) =>
-        rows!.find((r) => {
+        sorted.find((r) => {
           const n = String(r.shift_name || "").toLowerCase().trim();
           return match(n);
         });
@@ -750,7 +839,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     } catch {
       return null;
     }
-  };
+  }, [supervisorId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -759,17 +848,23 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         let rows: any[] | null = null;
 
         if (supabase) {
-          const { data, error } = await supabase
+          let query = supabase
             .from("shifts")
             .select("shift_name, official_start, official_end")
             .order("official_start", { ascending: true });
+
+          if (supervisorId) {
+            query = query.eq("supervisor_id", supervisorId);
+          }
+
+          const { data, error } = await query;
           if (!error && Array.isArray(data)) {
             rows = data.filter(r => r && (r.official_start || r.official_end));
           }
         }
 
         if (!rows) {
-          const res = await fetch("/api/shifts", { cache: "no-store" });
+          const res = await fetch(`/api/shifts${supervisorId ? `?supervisor_id=${encodeURIComponent(supervisorId)}` : ''}`, { cache: "no-store" });
           const json = await res.json();
           const data = json.shifts;
           if (Array.isArray(data)) {
@@ -833,7 +928,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [supervisorId]);
 
   useEffect(() => {
     if (!supabase) return;
@@ -853,12 +948,17 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         supabase.removeChannel(channel);
       } catch {}
     };
-  }, []);
+  }, [refreshScheduleFromServer]);
 
   const isCheckedIn = useMemo(() => {
     const sorted = attendance.slice().sort((a,b) => a.timestamp - b.timestamp);
     const last = sorted[sorted.length - 1];
-    return last?.type === "in";
+    if (!last || last.type === "out") return false;
+
+    // Check if the last IN entry is from today
+    const logDate = new Date(last.timestamp).toDateString();
+    const todayDate = new Date().toDateString();
+    return logDate === todayDate;
   }, [attendance]);
 
   useEffect(() => {
@@ -1149,6 +1249,20 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
   const addEntry = async (type: "in" | "out") => {
     if (!photo || submitting) return;
+
+    // 15-minute cooldown check
+    const COOLDOWN_MS = 15 * 60 * 1000;
+    const sortedEntries = attendance.slice().sort((a, b) => b.timestamp - a.timestamp);
+    const lastEntry = sortedEntries[0];
+
+    if (lastEntry) {
+      const diff = Date.now() - lastEntry.timestamp;
+      if (diff < COOLDOWN_MS) {
+        setShowCooldownModal(true);
+        return;
+      }
+    }
+
     setSubmitting(true);
     try {
       setCameraError(null);
@@ -1160,9 +1274,62 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         if (latest) {
           effectiveSchedule = latest;
         } else if (!effectiveSchedule) {
-          setCameraError("Your official schedule is not configured. Please contact your supervisor.");
+          setShowNoScheduleModal(true);
           setSubmitting(false);
           return;
+        }
+
+        // AUTO-CLOSE LOGIC: Check for stale open sessions (from previous days)
+        const sortedHistory = attendance
+          .filter(l => !l.photoDataUrl || !l.photoDataUrl.startsWith("OT_AUTH:"))
+          .sort((a, b) => a.timestamp - b.timestamp);
+        const lastLog = sortedHistory[sortedHistory.length - 1];
+
+        if (lastLog?.type === "in") {
+          const logDate = new Date(lastLog.timestamp);
+          const nowCheck = new Date();
+          // If the last IN was on a different day
+          if (logDate.toDateString() !== nowCheck.toDateString()) {
+            // Determine closure time (use PM Out from schedule if available, else 5:00 PM)
+            let closeTime = new Date(logDate);
+            if (effectiveSchedule.pmOut) {
+               const [h, m] = effectiveSchedule.pmOut.split(":").map(Number);
+               closeTime.setHours(h, m, 0, 0);
+            } else {
+               closeTime.setHours(17, 0, 0, 0); // Default to 5:00 PM
+            }
+
+            // Ensure closeTime is after logDate (Time In) to prevent sorting issues
+            // If Time In was late (after 5PM), close it 1 minute after Time In
+            if (closeTime.getTime() <= logDate.getTime()) {
+                closeTime = new Date(logDate.getTime() + 60000);
+            }
+
+            // Send Auto-Close Request
+            try {
+              await fetch("/api/attendance", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                  idnumber, 
+                  type: "out", 
+                  timestamp: closeTime.getTime(),
+                  validated_by: "SYSTEM_AUTO_CLOSE" // Bypass photo requirement
+                }),
+              });
+              
+              // Notify user
+              alert(`Your previous attendance from ${logDate.toLocaleDateString()} was automatically closed at ${closeTime.toLocaleTimeString()} because you forgot to time out.`);
+              
+              // We don't return here; we proceed to allow the NEW Time In to happen immediately.
+            } catch (err) {
+              console.error("Failed to auto-close previous session", err);
+              // Optionally warn user but try to proceed? 
+              // If we fail to close, the backend might still accept the new IN depending on logic, 
+              // but purely logically we should probably continue or warn.
+              // Let's continue to avoid blocking.
+            }
+          }
         }
       }
 
@@ -1189,7 +1356,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
         if (type === "in") {
           if (!amIn || !amOut || !pmIn || !pmOut) {
-            setCameraError("Your official schedule is not configured. Please contact your supervisor.");
+            setShowNoScheduleModal(true);
             setSubmitting(false);
             return;
           }
@@ -1327,11 +1494,22 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         const refresh = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}&limit=50`);
         const rjson = await refresh.json();
         if (refresh.ok && Array.isArray(rjson.entries)) {
-          const mapped = rjson.entries.map((e: ServerAttendanceEntry) => ({
-            type: e.type,
-            timestamp: e.ts,
-            photoDataUrl: e.photourl,
-          })) as AttendanceEntry[];
+          const mapped = rjson.entries.map((e: any) => {
+            const sStr = String(e.status || "").trim().toLowerCase();
+            const isRejected = sStr === "rejected";
+            const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
+            const status = isRejected ? "Rejected" : isApproved ? "Approved" : "Pending";
+            const approvedAtNum = e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined;
+            return {
+              id: e.id,
+              type: e.type,
+              timestamp: e.ts,
+              photoDataUrl: e.photourl,
+              status,
+              approvedAt: approvedAtNum,
+              validated_by: e.validated_by,
+            };
+          }) as AttendanceEntry[];
           onUpdate(mapped);
         }
       } catch {}
@@ -1422,13 +1600,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     await addEntry("out");
   };
 
-  const formatHours = (ms: number) => {
-    if (!ms) return "-";
-    const totalSeconds = Math.floor(ms / 1000);
-    const h = Math.floor(totalSeconds / 3600);
-    const m = Math.floor((totalSeconds % 3600) / 60);
-    return `${h}h ${m}m`;
-  };
+  // const formatHours = (ms: number) => ... imported from lib
 
   const formatTime = (ts: number) => {
     return new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
@@ -1457,19 +1629,36 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     return Array.from(grouped.values())
       .sort((a, b) => b.date.getTime() - a.date.getTime())
       .map(day => {
-        const sorted = day.logs.slice().sort((a, b) => a.timestamp - b.timestamp);
+        // Deduplicate logs to prevent double-counting
+        const uniqueMap = new Map<string, AttendanceEntry>();
+        day.logs.forEach(l => {
+            const key = l.id ? String(l.id) : `${l.timestamp}-${l.type}`;
+            if (!uniqueMap.has(key)) uniqueMap.set(key, l);
+        });
+
+        const sorted = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp);
 
         const baseDate = new Date(day.date);
         baseDate.setHours(0, 0, 0, 0);
 
-        const buildShift = (timeStr: string) => {
-          const [h, m] = timeStr.split(":").map(Number);
-          const d = new Date(baseDate.getTime());
-          d.setHours(h || 0, m || 0, 0, 0);
-          return d.getTime();
-        };
-
         const src = dbSchedule || schedule;
+
+        // Use centralized schedule builder
+        const dateKey = day.date.toLocaleDateString('en-CA');
+        const dynamicOt = allOvertimeShifts.find(s => s.effective_date === dateKey);
+        
+        const effectiveSchedule = buildSchedule(
+            baseDate,
+            {
+                amIn: src?.amIn || "08:00",
+                amOut: src?.amOut || "12:00",
+                pmIn: src?.pmIn || "13:00",
+                pmOut: src?.pmOut || "17:00",
+                otIn: src?.otIn,
+                otOut: src?.otOut
+            },
+            dynamicOt ? { start: Number(dynamicOt.overtime_start), end: Number(dynamicOt.overtime_end) } : undefined
+        );
 
         // Smart Pairing Logic
         const noonCutoff = new Date(baseDate).setHours(12, 30, 0, 0);
@@ -1494,13 +1683,8 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         // OT IN: strictly after PM IN (if exists), else just after OT Start
         let s5: AttendanceEntry | null = null;
         
-        // Check for dynamic overtime first, then static
-        const dateKeyOt = day.date.toLocaleDateString('en-CA');
-        const dynamicOtShift = allOvertimeShifts.find(s => s.effective_date === dateKeyOt);
-        
-        const otStartTs = dynamicOtShift 
-            ? dynamicOtShift.overtime_start 
-            : (src && src.otIn ? buildShift(src.otIn) : null);
+        const hasOtConfig = !!dynamicOt || !!src?.otIn;
+        const otStartTs = hasOtConfig ? effectiveSchedule.otStart : null;
 
         if (otStartTs !== null) {
             s5 = sorted.find(l => 
@@ -1511,6 +1695,26 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
             ) || null;
         }
         if (s5) markUsed(s5);
+
+        // Helper for virtual auto-out
+        const today = new Date();
+        today.setHours(0,0,0,0);
+        const isPastDate = baseDate < today;
+
+        const createVirtualOut = (inEntry: AttendanceEntry, shift: 'am' | 'pm' | 'ot'): AttendanceEntry => {
+             const outTs = shift === 'am' ? effectiveSchedule.amOut : (shift === 'pm' ? effectiveSchedule.pmOut : effectiveSchedule.otEnd);
+             // Ensure outTs > inEntry.timestamp
+             const finalOutTs = outTs > inEntry.timestamp ? outTs : inEntry.timestamp + 60000;
+             
+             return {
+                  id: inEntry.id ? -inEntry.id : -Math.floor(Math.random() * 1000000), // Negative ID for virtual
+                  type: 'out',
+                  timestamp: finalOutTs,
+                  photoDataUrl: '',
+                  status: 'Pending',
+                  validated_by: 'AUTO TIME OUT'
+             };
+        };
 
         // 2. Identify End Points (OUTs) based on Pairs
         
@@ -1533,6 +1737,8 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                 if (!s3 && candidate.timestamp > noonCutoff) {
                     crossShiftOut = candidate; // Keep track for calculation logic if needed
                 }
+            } else if (isPastDate) {
+                s2 = createVirtualOut(s1, 'am');
             }
         }
 
@@ -1542,7 +1748,11 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
             const searchEnd = s5 ? s5.timestamp : (new Date(baseDate).setHours(23, 59, 59, 999));
             const candidates = sorted.filter(l => l.type === "out" && l.timestamp > s3.timestamp && l.timestamp < searchEnd && isAvailable(l));
             s4 = candidates.pop() || null;
-            if (s4) markUsed(s4);
+            if (s4) {
+                markUsed(s4);
+            } else if (isPastDate) {
+                s4 = createVirtualOut(s3, 'pm');
+            }
         }
 
         // s6 (OT OUT): Last OUT after s5
@@ -1550,7 +1760,11 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         if (s5) {
             const candidates = sorted.filter(l => l.type === "out" && l.timestamp > s5.timestamp && isAvailable(l));
             s6 = candidates.pop() || null;
-            if (s6) markUsed(s6);
+            if (s6) {
+                markUsed(s6);
+            } else if (isPastDate) {
+                s6 = createVirtualOut(s5, 'ot');
+            }
         }
 
         const hasSchedule =
@@ -1561,26 +1775,9 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
           typeof src.pmOut === "string";
 
         let total = 0;
+        const dailyFlags = new Set<string>();
 
         if (hasSchedule && src) {
-          const amInStr = typeof src.amIn === "string" ? src.amIn : "";
-          const amOutStr = typeof src.amOut === "string" ? src.amOut : "";
-          const pmInStr = typeof src.pmIn === "string" ? src.pmIn : "";
-          const pmOutStr = typeof src.pmOut === "string" ? src.pmOut : "";
-
-          // Check for dynamic overtime
-          const dateKey = day.date.toLocaleDateString('en-CA');
-          const dynamicOt = allOvertimeShifts.find(s => s.effective_date === dateKey);
-
-        // Create local schedule object for calculation
-        const localSchedule = {
-            amIn: buildShift(amInStr),
-            amOut: buildShift(amOutStr),
-            pmIn: buildShift(pmInStr),
-            pmOut: buildShift(pmOutStr),
-            otStart: dynamicOt ? dynamicOt.overtime_start : (src.otIn ? buildShift(src.otIn) : null),
-            otEnd: dynamicOt ? dynamicOt.overtime_end : (src.otOut ? buildShift(src.otOut) : null),
-        };
 
         // --- Session Grouping ---
         type Session = { in: AttendanceEntry; out: AttendanceEntry | null };
@@ -1606,58 +1803,249 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
             sessions.push({ in: currentIn, out: null });
         }
 
-        // Calculate Hours using overlap logic
+        // Calculate Hours using centralized logic
         total = 0;
         
-        const calculateOverlap = (start: number, end: number, limitStart: number, limitEnd: number) => {
-           if (!limitStart || !limitEnd || limitStart >= limitEnd) return 0;
-           const s = Math.max(start, limitStart);
-           const e = Math.min(end, limitEnd);
-           if (s >= e) return 0;
-           const sFl = Math.floor(s / 60000) * 60000;
-           const eFl = Math.floor(e / 60000) * 60000;
-           return Math.max(0, eFl - sFl);
-        };
-
         sessions.forEach(session => {
             if (!session.out) return;
 
-            const am = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.amIn, localSchedule.amOut);
-            let pm = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.pmIn, localSchedule.pmOut);
+            const { am, pm, ot } = calculateShiftDurations(session.in.timestamp, session.out.timestamp, effectiveSchedule);
             
-            // If a single session spans across Morning and Afternoon (e.g. AM IN -> PM OUT),
-            // it means the student failed to clock out for lunch and clock in for PM.
-            // In this case, we only credit the Morning hours and invalidating the PM hours.
-            if (am > 0 && pm > 0) {
-                pm = 0;
-            }
+            const f = checkSessionFlags(session.in.timestamp, session.out.timestamp, effectiveSchedule);
+            f.forEach(flag => dailyFlags.add(flag));
 
-            let ot = 0;
-            if (localSchedule.otStart && localSchedule.otEnd) {
-                ot = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.otStart, localSchedule.otEnd);
-            }
             total += am + pm + ot;
         });
         
-        // Final round to ensure minute precision
-        total = Math.round(total / 60000) * 60000;
+        // Final round to ensure minute precision - REDUNDANT with centralized logic
+        // total = Math.floor(total / 60000) * 60000;
 
         } else {
-          const pairs: [AttendanceEntry | null, AttendanceEntry | null][] = [
-            [s1, s2],
-            [s3, s4],
-            [s5, s6],
-          ];
-          pairs.forEach(([a, b]) => {
-            if (a && b && b.timestamp > a.timestamp) {
-              total += b.timestamp - a.timestamp;
+            // Fallback: Use centralized logic with defaults if schedule is missing
+             // --- Session Grouping ---
+            type Session = { in: AttendanceEntry; out: AttendanceEntry | null };
+            const sessions: Session[] = [];
+            let currentIn: AttendanceEntry | null = null;
+            
+            sorted.forEach(log => {
+                if (log.status === "Rejected") return;
+
+                if (log.type === "in") {
+                    if (currentIn) {
+                        sessions.push({ in: currentIn, out: null });
+                    }
+                    currentIn = log;
+                } else if (log.type === "out") {
+                    if (currentIn) {
+                        sessions.push({ in: currentIn, out: log });
+                        currentIn = null;
+                    }
+                }
+            });
+            if (currentIn) {
+                sessions.push({ in: currentIn, out: null });
             }
-          });
+
+            total = 0;
+
+            sessions.forEach(session => {
+                if (!session.out) return;
+                // Use effectiveSchedule which has defaults
+                const { am, pm, ot } = calculateShiftDurations(session.in.timestamp, session.out.timestamp, effectiveSchedule);
+                
+                const f = checkSessionFlags(session.in.timestamp, session.out.timestamp, effectiveSchedule);
+                f.forEach(flag => dailyFlags.add(flag));
+
+                total += am + pm + ot;
+            });
+             // total = Math.floor(total / 60000) * 60000;
         }
 
-        return { date: day.date, s1, s2, s3, s4, s5, s6, total };
+        return { date: day.date, s1, s2, s3, s4, s5, s6, total, flags: Array.from(dailyFlags) };
       });
   }, [filteredAttendance, dbSchedule, schedule, allOvertimeShifts]);
+
+  const handleDownloadExcel = () => {
+    if (processedDays.length === 0) return;
+
+    let overallTotal = 0;
+    let overallValidated = 0;
+
+    processedDays.forEach(day => {
+        overallTotal += day.total;
+        
+        const sched = dbSchedule || schedule;
+        if (sched) {
+             const isAmValidated = (day.s1?.status === 'Approved' || day.s2?.status === 'Approved');
+             const isPmValidated = (day.s3?.status === 'Approved' || day.s4?.status === 'Approved');
+             const isOtValidated = (day.s5?.status === 'Approved' || day.s6?.status === 'Approved');
+             
+             // Build ShiftSchedule object
+             const dateObj = new Date(day.date);
+             const dateKey = dateObj.toLocaleDateString('en-CA');
+             const dynamicOt = allOvertimeShifts.find(s => s.effective_date === dateKey);
+             
+             const scheduleObj = buildSchedule(
+                dateObj,
+                {
+                    amIn: sched.amIn || "08:00",
+                    amOut: sched.amOut || "12:00",
+                    pmIn: sched.pmIn || "13:00",
+                    pmOut: sched.pmOut || "17:00",
+                    otIn: sched.otIn,
+                    otOut: sched.otOut
+                },
+                dynamicOt ? { start: Number(dynamicOt.overtime_start), end: Number(dynamicOt.overtime_end) } : undefined
+             );
+
+             if (isAmValidated) {
+                 const d = calculateShiftDurations(day.s1?.timestamp || 0, day.s2?.timestamp || 0, scheduleObj);
+                 overallValidated += d.am + d.pm + d.ot;
+             }
+             if (isPmValidated) {
+                 const d = calculateShiftDurations(day.s3?.timestamp || 0, day.s4?.timestamp || 0, scheduleObj);
+                 overallValidated += d.am + d.pm + d.ot;
+             }
+             if (isOtValidated) {
+                 const d = calculateShiftDurations(day.s5?.timestamp || 0, day.s6?.timestamp || 0, scheduleObj);
+                 overallValidated += d.am + d.pm + d.ot;
+             }
+        }
+    });
+
+    // 1. Define Headers
+    const headerRows = [
+      [`NAME: ${user?.lastname || ""}, ${user?.firstname || ""}`, "", "", `COURSE: ${user?.course || ""}-${user?.section || ""}`, "", "", "", "", "", ""],
+      ["", "", "", "", "", "", "", "", "", ""],
+      [`TOTAL HOURS: ${formatHours(overallTotal)}`, "", `TOTAL VALIDATED HOURS: ${formatHours(overallValidated)}`, "", "", "", "", "", "", ""],
+      ["", "", "", "", "", "", "", "", "", ""],
+      ["DATE", "MORNING", "", "STATUS", "AFTERNOON", "", "OVERTIME", "", "STATUS", "TOTAL HOURS"], 
+      ["", "TIME IN", "TIME OUT", "", "TIME IN", "TIME OUT", "TIME IN", "TIME OUT", "", ""] 
+    ];
+
+    // 2. Map Data
+    const dataRows = processedDays.map(day => {
+      const fmt = (slot: typeof day.s1) => slot ? formatTime(slot.timestamp) : "-";
+      const fmtOut = (slot: typeof day.s1) => {
+        if (!slot) return "-";
+        if (slot.validated_by === "SYSTEM_AUTO_CLOSE" || slot.validated_by === "AUTO TIME OUT") {
+            return "AUTO TIME OUT";
+        }
+        return formatTime(slot.timestamp);
+      };
+      
+      const getStatus = (inSlot?: AttendanceEntry | null, outSlot?: AttendanceEntry | null) => {
+          const s1 = inSlot?.status?.toLowerCase();
+          const s2 = outSlot?.status?.toLowerCase();
+          const v1 = inSlot?.validated_by;
+          const v2 = outSlot?.validated_by;
+
+          // If any part is rejected -> unvalidated
+          if (s1 === "rejected" || s2 === "rejected") {
+            return "unvalidated";
+          }
+
+          // If any part is approved/validated or has validator -> validated
+          if (s1 === "approved" || s1 === "validated" || 
+              s2 === "approved" || s2 === "validated" ||
+              v1 || v2) {
+            return "validated";
+          }
+
+          // If slots exist -> pending
+          if (inSlot || outSlot) {
+            return "pending";
+          }
+
+          return "-";
+      };
+
+      const amStatus = getStatus(day.s1, day.s2);
+      let pmStatus = "-";
+      if (day.s3 || day.s4) {
+          pmStatus = getStatus(day.s3, day.s4);
+      } else if (day.s5 || day.s6) {
+          pmStatus = getStatus(day.s5, day.s6);
+      }
+
+      return [
+        day.date.toLocaleDateString(), // DATE
+        fmt(day.s1),                   // MORNING IN
+        fmtOut(day.s2),                // MORNING OUT
+        amStatus,                      // STATUS
+        fmt(day.s3),                   // AFTERNOON IN
+        fmtOut(day.s4),                // AFTERNOON OUT
+        fmt(day.s5),                   // OVERTIME IN
+        fmtOut(day.s6),                // OVERTIME OUT
+        pmStatus,                      // STATUS
+        formatHours(day.total)         // TOTAL HOURS
+      ];
+    });
+
+    // 3. Combine
+    const wsData = [...headerRows, ...dataRows];
+
+    // 4. Create Worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(wsData);
+
+    // Apply styles
+    const headerStyle = {
+      font: { bold: true },
+      alignment: { horizontal: "center", vertical: "center" }
+    };
+    const boldLeftStyle = {
+      font: { bold: true },
+      alignment: { horizontal: "left", vertical: "center" }
+    };
+
+    const boldCells = ["A1", "D1", "A3", "C3"];
+    boldCells.forEach(ref => {
+      if (worksheet[ref]) worksheet[ref].s = boldLeftStyle;
+    });
+
+    const range = XLSX.utils.decode_range(worksheet['!ref'] || "A1:J100");
+    for (let R = 4; R <= 5; ++R) { 
+      for (let C = range.s.c; C <= range.e.c; ++C) {
+        const cell = worksheet[XLSX.utils.encode_cell({ r: R, c: C })];
+        if (cell) cell.s = headerStyle;
+      }
+    }
+
+    // 5. Define Merges
+    worksheet['!merges'] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 2 } }, // NAME
+      { s: { r: 0, c: 3 }, e: { r: 0, c: 9 } }, // COURSE
+      { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, // TOTAL HOURS
+      { s: { r: 2, c: 2 }, e: { r: 2, c: 5 } }, // TOTAL VALIDATED
+
+      { s: { r: 4, c: 0 }, e: { r: 5, c: 0 } }, // DATE
+      { s: { r: 4, c: 1 }, e: { r: 4, c: 2 } }, // MORNING
+      { s: { r: 4, c: 3 }, e: { r: 5, c: 3 } }, // STATUS
+      { s: { r: 4, c: 4 }, e: { r: 4, c: 5 } }, // AFTERNOON
+      { s: { r: 4, c: 6 }, e: { r: 4, c: 7 } }, // OVERTIME
+      { s: { r: 4, c: 8 }, e: { r: 5, c: 8 } }, // STATUS
+      { s: { r: 4, c: 9 }, e: { r: 5, c: 9 } }, // TOTAL HOURS
+    ];
+
+    // 6. Set Column Widths
+    worksheet['!cols'] = [
+      { wch: 15 }, // Date
+      { wch: 12 }, // Morning In
+      { wch: 18 }, // Morning Out
+      { wch: 12 }, // Status
+      { wch: 12 }, // Afternoon In
+      { wch: 18 }, // Afternoon Out
+      { wch: 12 }, // Overtime In
+      { wch: 18 }, // Overtime Out
+      { wch: 12 }, // Status
+      { wch: 15 }  // Total
+    ];
+
+    // 7. Create Workbook and Download
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Attendance");
+    XLSX.writeFile(workbook, `Attendance_${user?.firstname || "Report"}_${user?.lastname || ""}.xlsx`);
+  };
 
   return (
     <div className="w-full space-y-6">
@@ -1692,6 +2080,23 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
             </p>
             <button
               onClick={() => setShowBreakModal(false)}
+              className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showNoScheduleModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-2">Cannot Time In</h2>
+            <p className="text-gray-700 mb-4">
+              Official Time is not set by the supervisor. You cannot time in.
+            </p>
+            <button
+              onClick={() => setShowNoScheduleModal(false)}
               className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
             >
               OK
@@ -1756,12 +2161,22 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                   Full attendance records for {studentName || idnumber}.
                 </p>
               </div>
-              <button
-                onClick={() => setShowHistoryMode(false)}
-                className="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-100 transition-colors"
-              >
-                Back to Recent View
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleDownloadExcel}
+                  disabled={processedDays.length === 0}
+                  className="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-green-700 hover:bg-green-50 hover:border-green-200 transition-colors gap-2"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 15v4c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+                  Export Attendance
+                </button>
+                <button
+                  onClick={() => setShowHistoryMode(false)}
+                  className="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-100 transition-colors"
+                >
+                  Back to Recent View
+                </button>
+              </div>
             </div>
 
             <div className="p-6 sm:p-8">
@@ -1852,34 +2267,56 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                               <td className="px-4 py-3 font-medium text-gray-900 whitespace-nowrap border-r border-gray-100">
                                 {day.date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}
                               </td>
-                              {[day.s1, day.s2, day.s3, day.s4, day.s5, day.s6].map((slot, idx) => (
-                                <td key={idx} className="px-1.5 py-2 border-r border-gray-100 text-center align-top min-w-[100px]">
+                              {[day.s1, day.s2, day.s3, day.s4, day.s5, day.s6].map((slot, idx) => {
+                                const pairOut = (idx === 0 || idx === 1) ? day.s2 : (idx === 2 || idx === 3) ? day.s4 : day.s6;
+                                const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
+
+                                return (
+                                <td key={idx} className={`px-1.5 py-2 border-r border-gray-100 text-center min-w-[100px] ${isSessionAutoTimeOut && slot?.type === 'out' ? 'align-middle' : 'align-top'}`}>
                                   {slot ? (
-                                    <div className="flex flex-col items-center gap-1">
-                                      <span className="text-[11px] font-medium text-gray-800">
-                                        {formatTime(slot.timestamp)}
-                                      </span>
-                                      {slot.photoDataUrl && (
-                                        <>
-                                          <div
-                                            className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
-                                            onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
-                                          >
-                                            <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
-                                          </div>
+                                    <div className={`flex flex-col items-center gap-1 ${isSessionAutoTimeOut && slot.type === 'out' ? 'justify-center h-full' : ''}`}>
+                                          {isSessionAutoTimeOut && slot.type === 'out' ? (
+                                            <span className="text-[10px] font-bold text-red-500 py-1 text-center w-full block">AUTO TIME OUT</span>
+                                          ) : (
+                                            <span className="text-[11px] font-medium text-gray-800">
+                                              {formatTime(slot.timestamp)}
+                                            </span>
+                                          )}
+                                          {!(isSessionAutoTimeOut && slot.type === 'out') && (
+                                            slot.photoDataUrl ? (
+                                              <div
+                                                className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
+                                                onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                              >
+                                                <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                              </div>
+                                            ) : (
+                                              <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-50 flex flex-col items-center justify-center text-gray-400">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                <span className="text-[9px] mt-1">System</span>
+                                              </div>
+                                            )
+                                          )}
                                           <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
                                             {formatStatusLabel(slot)}
                                           </span>
-                                        </>
-                                      )}
                                     </div>
                                   ) : (
                                     <span className="text-gray-300 block py-4">-</span>
                                   )}
                                 </td>
-                              ))}
+                                );
+                              })}
                               <td className="px-6 py-4 text-right font-bold text-gray-900">
-                                {formatHours(day.total)}
+                                <div className="flex flex-col items-end gap-1">
+                                  <span>{formatHours(day.total)}</span>
+                                  {day.flags && day.flags.includes("MISSED_LUNCH_PUNCH") && (
+                                    <div className="flex items-center gap-1 text-amber-600" title="Missed Lunch Punch: Session spans across lunch break">
+                                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                                      <span className="text-[10px] font-medium uppercase">Lunch Policy</span>
+                                    </div>
+                                  )}
+                                </div>
                               </td>
                             </tr>
                           ))}
@@ -1896,94 +2333,136 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                             <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
                               <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Morning</div>
                               <div className="grid grid-cols-2 gap-3">
-                                {[day.s1, day.s2].map((slot, idx) => (
+                                {[day.s1, day.s2].map((slot, idx) => {
+                                  const pairOut = day.s2;
+                                  const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
+
+                                  return (
                                   <div key={idx} className="flex flex-col items-center gap-1">
                                     {slot ? (
                                       <>
-                                        <span className="text-[11px] font-medium text-gray-800">
-                                          {formatTime(slot.timestamp)}
-                                        </span>
-                                        {slot.photoDataUrl && (
-                                          <>
-                                            <div
-                                              className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
-                                              onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
-                                            >
-                                              <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
-                                            </div>
+                                          {isSessionAutoTimeOut && slot.type === 'out' ? (
+                                            <span className="text-[10px] font-bold text-red-500 py-1 text-center w-full block">AUTO TIME OUT</span>
+                                          ) : (
+                                            <span className="text-[11px] font-medium text-gray-800">
+                                              {formatTime(slot.timestamp)}
+                                            </span>
+                                          )}
+                                          {!(isSessionAutoTimeOut && slot.type === 'out') && (
+                                            slot.photoDataUrl ? (
+                                              <div
+                                                className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
+                                                onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                              >
+                                                <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                              </div>
+                                            ) : (
+                                              <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-50 flex flex-col items-center justify-center text-gray-400">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                <span className="text-[9px] mt-1">System</span>
+                                              </div>
+                                            )
+                                          )}
                                             <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
                                               {formatStatusLabel(slot)}
                                             </span>
-                                          </>
-                                        )}
                                       </>
                                     ) : (
                                       <span className="text-gray-300">-</span>
                                     )}
                                   </div>
-                                ))}
+                                  );
+                                })}
                               </div>
                             </div>
                             <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
                               <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Afternoon</div>
                               <div className="grid grid-cols-2 gap-3">
-                                {[day.s3, day.s4].map((slot, idx) => (
+                                {[day.s3, day.s4].map((slot, idx) => {
+                                  const pairOut = day.s4;
+                                  const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
+
+                                  return (
                                   <div key={idx} className="flex flex-col items-center gap-1">
                                     {slot ? (
                                       <>
-                                        <span className="text-[11px] font-medium text-gray-800">
-                                          {formatTime(slot.timestamp)}
-                                        </span>
-                                        {slot.photoDataUrl && (
-                                          <>
-                                            <div
-                                              className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
-                                              onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
-                                            >
-                                              <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
-                                            </div>
+                                          {isSessionAutoTimeOut && slot.type === 'out' ? (
+                                            <span className="text-[10px] font-bold text-red-500 py-1 text-center w-full block">AUTO TIME OUT</span>
+                                          ) : (
+                                            <span className="text-[11px] font-medium text-gray-800">
+                                              {formatTime(slot.timestamp)}
+                                            </span>
+                                          )}
+                                          {!(isSessionAutoTimeOut && slot.type === 'out') && (
+                                            slot.photoDataUrl ? (
+                                              <div
+                                                className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
+                                                onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                              >
+                                                <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                              </div>
+                                            ) : (
+                                              <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-50 flex flex-col items-center justify-center text-gray-400">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                <span className="text-[9px] mt-1">System</span>
+                                              </div>
+                                            )
+                                          )}
                                             <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
                                               {formatStatusLabel(slot)}
                                             </span>
-                                          </>
-                                        )}
                                       </>
                                     ) : (
                                       <span className="text-gray-300">-</span>
                                     )}
                                   </div>
-                                ))}
+                                  );
+                                })}
                               </div>
                             </div>
                             <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
                               <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Overtime</div>
                               <div className="grid grid-cols-2 gap-3">
-                                {[day.s5, day.s6].map((slot, idx) => (
+                                {[day.s5, day.s6].map((slot, idx) => {
+                                  const pairOut = day.s6;
+                                  const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
+
+                                  return (
                                   <div key={idx} className="flex flex-col items-center gap-1">
                                     {slot ? (
                                       <>
-                                        <span className="text-[11px] font-medium text-gray-800">
-                                          {formatTime(slot.timestamp)}
-                                        </span>
-                                        {slot.photoDataUrl && (
-                                          <>
-                                            <div
-                                              className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
-                                              onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
-                                            >
-                                              <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
-                                            </div>
+                                          {isSessionAutoTimeOut && slot.type === 'out' ? (
+                                            <span className="text-[10px] font-bold text-red-500 py-1 text-center w-full block">AUTO TIME OUT</span>
+                                          ) : (
+                                            <span className="text-[11px] font-medium text-gray-800">
+                                              {formatTime(slot.timestamp)}
+                                            </span>
+                                          )}
+                                          {!(isSessionAutoTimeOut && slot.type === 'out') && (
+                                            slot.photoDataUrl ? (
+                                              <div
+                                                className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
+                                                onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                              >
+                                                <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                              </div>
+                                            ) : (
+                                              <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-50 flex flex-col items-center justify-center text-gray-400">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                <span className="text-[9px] mt-1">System</span>
+                                              </div>
+                                            )
+                                          )}
                                             <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
                                               {formatStatusLabel(slot)}
                                             </span>
-                                          </>
-                                        )}
                                       </>
                                     ) : (
                                       <span className="text-gray-300">-</span>
                                     )}
                                   </div>
-                                ))}
+                                  );
+                                })}
                               </div>
                             </div>
                             <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
@@ -1991,6 +2470,12 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                               <div className="text-sm font-bold text-gray-900 mt-1 text-right">
                                 {formatHours(day.total)}
                               </div>
+                              {day.flags && day.flags.includes("MISSED_LUNCH_PUNCH") && (
+                                <div className="mt-2 flex items-center justify-end gap-1 text-amber-600">
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                                  <span className="text-[10px] font-medium uppercase">Lunch Policy Violation</span>
+                                </div>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -2055,7 +2540,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                     return null;
                 })()}
 
-                {officialScheduleText && (
+                {officialScheduleText ? (
                   <div className="w-full max-w-md mb-4">
                     <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-center">
                       <div className="text-[11px] font-semibold text-gray-600 uppercase tracking-wide">
@@ -2066,6 +2551,17 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                       </div>
                       <div className="mt-1 text-[11px] text-gray-500">
                         You can time in 30 minutes before your official time in.
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="w-full max-w-md mb-4">
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-center">
+                      <div className="text-[11px] font-semibold text-amber-600 uppercase tracking-wide">
+                        Official Schedule
+                      </div>
+                      <div className="mt-1 text-sm font-bold text-amber-900">
+                        Official Time is not set by the supervisor
                       </div>
                     </div>
                   </div>
@@ -2211,23 +2707,34 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                         onClick={() => setSelectedAttendanceEntry(entry)}
                         className="w-full flex items-center gap-3 p-3 rounded-xl bg-white border border-gray-100 hover:border-orange-200 hover:shadow-md transition-all group text-left"
                       >
-                        <div className="h-9 w-9 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 border border-gray-100 relative">
-                          {entry.photoDataUrl && (
-                            <img src={entry.photoDataUrl} alt="Log" className="h-full w-full object-cover" />
+                          {entry.photoDataUrl ? (
+                            <div className="h-9 w-9 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 border border-gray-100 relative flex items-center justify-center">
+                              <img src={entry.photoDataUrl} alt="Log" className="h-full w-full object-cover" />
+                            </div>
+                          ) : (entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? (
+                            <div className="h-9 w-9 flex-shrink-0 flex items-center justify-center">
+                            </div>
+                          ) : (
+                            <div className="h-9 w-9 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 border border-gray-100 relative flex items-center justify-center"></div>
                           )}
-                        </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between">
-                            <span className="text-[11px] font-semibold uppercase text-gray-700">
-                              {entry.type === "in" ? "Time In" : "Time Out"}
+                            <span className={`text-[11px] font-semibold uppercase ${(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? "text-red-600" : "text-gray-700"}`}>
+                              {(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? "AUTO TIME OUT" : (entry.type === "in" ? "Time In" : "Time Out")}
                             </span>
+                            {!(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") && (
                             <span className={`text-[10px] font-medium ${getStatusColorClass(entry)}`}>
                               {formatStatusLabel(entry)}
                             </span>
+                            )}
                           </div>
+                          {!(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? (
                           <div className="text-xs font-medium text-gray-900 mt-0.5">
                             {new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                           </div>
+                          ) : (
+                            <div className="text-xs font-medium text-gray-400 mt-0.5">--:--</div>
+                          )}
                           <div className="text-[10px] text-gray-400">
                             {new Date(entry.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                           </div>
@@ -2299,6 +2806,27 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
           onClose={() => setSelectedAttendanceEntry(null)}
         />
       )}
+
+      {/* Cooldown Modal */}
+      {showCooldownModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 text-center animate-in zoom-in-95 duration-200">
+            <div className="w-12 h-12 bg-orange-100 rounded-full flex items-center justify-center mx-auto mb-4 text-orange-600">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </div>
+            <h2 className="text-xl font-bold text-gray-900 mb-2">Please Wait</h2>
+            <p className="text-gray-600 mb-6">
+              You can only time in/out after 15mins.
+            </p>
+            <button
+              onClick={() => setShowCooldownModal(false)}
+              className="w-full px-4 py-2.5 bg-gray-900 text-white rounded-xl font-bold hover:bg-black transition-colors"
+            >
+              Okay, I understand
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2343,6 +2871,19 @@ function ReportDetailsModal({ report, onClose }: { report: ReportEntry; onClose:
               </span>
            </div>
 
+           {/* Instructor Feedback */}
+           {report.instructorComment && (
+              <div className="mt-6 animate-in slide-in-from-top-2">
+                 <div className="bg-red-50 rounded-xl p-5 border border-red-100 text-gray-800 shadow-sm relative">
+                    <div className="flex items-center gap-2 mb-2 text-red-700">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                        <h3 className="font-bold">Instructor Feedback</h3>
+                    </div>
+                    {report.instructorComment}
+                 </div>
+              </div>
+           )}
+
            {/* Attachment */}
            {report.fileName && (
               <div className="p-4 rounded-xl border border-gray-200 bg-gray-50 flex items-center justify-between group hover:border-[#F97316] hover:bg-orange-50/10 transition-all">
@@ -2368,22 +2909,6 @@ function ReportDetailsModal({ report, onClose }: { report: ReportEntry; onClose:
                 {report.body || "No text content."}
               </div>
            </div>
-
-           {/* Instructor Feedback */}
-           {report.instructorComment && (
-              <div className="pt-6 border-t border-gray-100 animate-in slide-in-from-bottom-2">
-                 <div className="flex items-center gap-2 mb-4">
-                    <div className="h-8 w-8 rounded-full bg-red-50 text-red-600 flex items-center justify-center border border-red-100">
-                       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-                    </div>
-                    <h3 className="text-lg font-bold text-gray-900">Instructor Feedback</h3>
-                 </div>
-                 <div className="bg-red-50/50 rounded-xl p-5 border border-red-100 text-gray-800 shadow-sm relative">
-                    <div className="absolute top-0 left-6 -mt-2 h-4 w-4 bg-red-50 border-t border-l border-red-100 transform rotate-45"></div>
-                    {report.instructorComment}
-                 </div>
-              </div>
-           )}
         </div>
         
         <div className="p-4 border-t border-gray-100 bg-gray-50/50 flex justify-end">
@@ -2417,6 +2942,7 @@ export function ReportsView({
   const [showAllReportsModal, setShowAllReportsModal] = useState(false);
   const [selectedWeek, setSelectedWeek] = useState<number | null>(null);
   const [viewingReport, setViewingReport] = useState<ReportEntry | null>(null);
+  const [draftToDelete, setDraftToDelete] = useState<ReportEntry | null>(null);
   
   // Editor State
   const [title, setTitle] = useState("");
@@ -2482,8 +3008,14 @@ export function ReportsView({
       const now = new Date();
       const isFuture = now < startDate;
       
-      let status: "Submitted" | "Pending" | "Overdue" | "Locked" | "Future" = "Pending";
-      if (isSubmitted) status = "Submitted";
+      let status: "Submitted" | "Pending" | "Overdue" | "Locked" | "Future" | "Under Review" | "Reviewed" = "Pending";
+      if (isSubmitted) {
+          if (report && (report.isViewedByInstructor || report.instructorComment)) {
+              status = "Reviewed";
+          } else {
+              status = "Under Review";
+          }
+      }
       else if (isLocked) status = "Locked";
       else if (isFuture) status = "Future";
       else if (now > deadlineDate) status = "Overdue";
@@ -2500,7 +3032,7 @@ export function ReportsView({
 
     // If the last slot is Submitted, append a synthetic "Next Week" slot so the user has a place to land
     const lastSlot = result[result.length - 1];
-    if (lastSlot && lastSlot.status === "Submitted") {
+    if (lastSlot && (lastSlot.status === "Reviewed" || lastSlot.status === "Under Review")) {
         const nextWeek = lastSlot.week + 1;
         
         // Calculate dates for next week
@@ -2521,7 +3053,7 @@ export function ReportsView({
            start: nextStart,
            end: nextEnd,
            report,
-           status: isSubmitted ? "Submitted" : "Future",
+           status: isSubmitted ? (report && (report.isViewedByInstructor || report.instructorComment) ? "Reviewed" : "Under Review") : "Future",
            isLocked: false // Always unlocked if previous is submitted
         });
     }
@@ -2604,6 +3136,8 @@ export function ReportsView({
     setSelectedWeek(d.week || null);
   };
 
+  const prevSelectedWeek = useRef<number | null>(null);
+
   // Auto-load content (Draft) whenever selectedWeek changes
   // NOTE: We intentionally DO NOT load submitted reports into the editor anymore.
   // The editor is strictly for drafting/submitting. Submitted reports are viewed in Modals.
@@ -2613,27 +3147,27 @@ export function ReportsView({
     const slot = slots.find(s => s.week === selectedWeek);
     if (!slot) return;
 
+    const weekChanged = selectedWeek !== prevSelectedWeek.current;
+    prevSelectedWeek.current = selectedWeek;
+
     // If it's a submitted slot, we don't want to show it in the editor.
     // The auto-select logic should have redirected us away, but if we are here, clear the form.
     if (slot.report) {
        clearForm();
     } else {
-       // Check for draft
-       const draft = drafts.find(d => d.week === selectedWeek);
-       if (draft) {
-          setTitle(draft.title || "");
-          setBody(draft.body || "");
-          setFile(null);
-          setExistingFile(draft.fileName ? {name: draft.fileName, type: draft.fileType || ""} : null);
-          setDraftId(draft.id || null);
-          setDraftSavedAt(draft.submittedAt);
-          setError(null);
-       } else {
-          // New blank report
-          clearForm();
+       if (weekChanged) {
+          // If we switched weeks, check if we are already viewing a valid draft for this week (e.g. via loadDraft)
+          // If not, clear the form to start fresh. This allows creating multiple drafts for the same week.
+          // We NO LONGER auto-load the first draft found, to avoid "locking" the week to a specific draft.
+          const currentDraft = drafts.find(d => d.id === draftId);
+          const isViewingValidDraft = currentDraft && currentDraft.week === selectedWeek;
+          
+          if (!isViewingValidDraft) {
+             clearForm();
+          }
        }
     }
-  }, [selectedWeek, drafts, slots]);
+  }, [selectedWeek, drafts, slots, draftId]);
 
 
   const saveDraft = async () => {
@@ -2671,9 +3205,8 @@ export function ReportsView({
       }
       onDraftUpdate(newDrafts);
       setError(null);
-      // Don't clear form on save draft, just update ID
-      setDraftId(savedReport.id);
-      setDraftSavedAt(Date.now());
+      // Clear form after saving to allow creating new drafts immediately
+      clearForm();
     } catch (e) {
       setError("Failed to save draft.");
     } finally {
@@ -2732,6 +3265,34 @@ export function ReportsView({
     }
   };
 
+  const deleteDraft = (draft: ReportEntry, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!draft.id) return;
+    setDraftToDelete(draft);
+  };
+
+  const confirmDeleteDraft = async () => {
+    if (!draftToDelete?.id) return;
+    
+    try {
+      const res = await fetch(`/api/reports?id=${draftToDelete.id}`, { method: "DELETE" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Failed to delete draft");
+
+      const newDrafts = drafts.filter(d => d.id !== draftToDelete.id);
+      onDraftUpdate(newDrafts);
+      
+      // If we are currently editing this draft, clear the form
+      if (draftId === draftToDelete.id) {
+        clearForm();
+      }
+      setDraftToDelete(null);
+    } catch (e) {
+      console.error("Failed to delete draft:", e);
+      setError("Failed to delete draft");
+    }
+  };
+
   const currentSlot = useMemo(() => slots.find(s => s.week === selectedWeek), [slots, selectedWeek]);
   
   // FALLBACK: If no slot is selected, simulate a "Next Week" slot so the editor is ALWAYS visible.
@@ -2754,7 +3315,7 @@ export function ReportsView({
             <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
                <div className="flex items-center gap-3">
                  <div className={`h-2.5 w-2.5 rounded-full ${
-                    activeSlot.status === "Submitted" ? "bg-green-500" :
+                    (activeSlot.status === "Reviewed" || activeSlot.status === "Under Review") ? "bg-green-500" :
                     activeSlot.status === "Overdue" ? "bg-red-500" :
                     activeSlot.status === "Pending" ? "bg-[#F97316]" : "bg-gray-400"
                  }`}></div>
@@ -2781,10 +3342,13 @@ export function ReportsView({
                   /* EDIT / VIEW-IN-EDITOR MODE */
                   <div className="space-y-6 flex-1 flex flex-col">
                      {activeSlot.report && (
-                        <div className="bg-green-50 border border-green-200 rounded-xl p-4 flex items-center gap-3 text-green-800">
+                        <div className={`border rounded-xl p-4 flex items-center gap-3 ${
+                           activeSlot.status === "Reviewed" ? "bg-green-50 border-green-200 text-green-800" :
+                           "bg-orange-50 border-orange-200 text-orange-800"
+                        }`}>
                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
                            <div className="text-sm font-medium">
-                              Report Submitted. <button onClick={() => setViewingReport(activeSlot.report!)} className="underline font-bold hover:text-green-900">View Details</button>
+                              {activeSlot.status === "Reviewed" ? "Report Reviewed." : "Report Under Review."} <button onClick={() => setViewingReport(activeSlot.report!)} className={`underline font-bold ${activeSlot.status === "Reviewed" ? "hover:text-green-900" : "hover:text-orange-900"}`}>View Details</button>
                            </div>
                         </div>
                      )}
@@ -2914,17 +3478,25 @@ export function ReportsView({
                 ) : (
                   <div className="space-y-3">
                     {drafts.map(draft => (
-                       <button 
+                       <div 
                          key={draft.id} 
                          onClick={() => loadDraft(draft)}
-                         className="w-full text-left p-3 rounded-xl border border-gray-100 hover:border-orange-200 hover:bg-orange-50 transition-all group"
+                         className="w-full text-left p-3 rounded-xl border border-gray-100 hover:border-orange-200 hover:bg-orange-50 transition-all group cursor-pointer relative"
                        >
-                         <div className="flex justify-between items-start mb-1">
+                         <div className="flex justify-between items-start mb-1 pr-6">
                             <span className="text-xs font-bold text-[#F97316]">Week {draft.week}</span>
                             <span className="text-[10px] text-gray-400">{new Date(draft.submittedAt).toLocaleDateString()}</span>
                          </div>
-                         <p className="text-sm font-bold text-gray-900 truncate">{draft.title || "Untitled Report"}</p>
-                       </button>
+                         <p className="text-sm font-bold text-gray-900 truncate pr-6">{draft.title || "Untitled Report"}</p>
+                         
+                         <button 
+                           onClick={(e) => deleteDraft(draft, e)}
+                           className="absolute top-2 right-2 p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
+                           title="Delete Draft"
+                         >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                         </button>
+                       </div>
                     ))}
                   </div>
                 )}
@@ -2952,7 +3524,7 @@ export function ReportsView({
                      <button
                        key={slot.week}
                        onClick={() => {
-                        if (slot.status === "Submitted" && slot.report) {
+                        if ((slot.status === "Reviewed" || slot.status === "Under Review") && slot.report) {
                           setViewingReport(slot.report);
                         } else {
                           setSelectedWeek(slot.week);
@@ -2968,12 +3540,18 @@ export function ReportsView({
                           <div className="flex items-center gap-2">
                              <span className={`text-xs font-bold uppercase ${selectedWeek === slot.week ? "text-[#F97316]" : "text-gray-500"}`}>Week {slot.week}</span>
                              {slot.report?.instructorComment && (
-                                <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse"></span>
+                                <div className="flex items-center gap-1 text-red-600 animate-pulse" title="Instructor Comment">
+                                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
+                                   </svg>
+                                </div>
                              )}
                           </div>
                           
-                          {slot.status === "Submitted" ? (
-                             <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-bold uppercase tracking-wide">Submitted</span>
+                          {slot.status === "Reviewed" ? (
+                             <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-bold uppercase tracking-wide">Reviewed</span>
+                          ) : slot.status === "Under Review" ? (
+                             <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-[10px] font-bold uppercase tracking-wide">Under Review</span>
                           ) : slot.status === "Overdue" ? (
                              <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-wide">Overdue</span>
                           ) : slot.status === "Pending" ? (
@@ -2992,10 +3570,11 @@ export function ReportsView({
                        </div>
                        
                        <div className={`text-xs font-bold flex items-center gap-1 ${
-                          slot.status === "Submitted" ? "text-green-600" : 
+                          (slot.status === "Reviewed") ? "text-green-600" : 
+                          slot.status === "Under Review" ? "text-orange-600" :
                           slot.isLocked ? "text-gray-400" : "text-[#F97316]"
                        }`}>
-                          {slot.status === "Submitted" ? (
+                          {(slot.status === "Reviewed" || slot.status === "Under Review") ? (
                              <>
                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                                View Report
@@ -3005,13 +3584,9 @@ export function ReportsView({
                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
                                Locked
                              </>
-                          ) : (
-                             <>
-                               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                               Submit Report
-                             </>
-                          )}
+                          ) : null}
                        </div>
+
                      </button>
                   ))
                 )}
@@ -3029,8 +3604,37 @@ export function ReportsView({
       {showAllReportsModal && (
         <SubmittedReportsModal 
           reports={reports} 
-          onClose={() => setShowAllReportsModal(false)} 
+          onClose={() => setShowAllReportsModal(false)}
+          onViewReport={(report) => {
+            setShowAllReportsModal(false);
+            setViewingReport(report);
+          }}
         />
+      )}
+
+      {draftToDelete && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 animate-in zoom-in-95 duration-200">
+            <h2 className="text-xl font-bold text-gray-900 mb-2">Delete Draft?</h2>
+            <p className="text-gray-700 mb-6">
+              Are you sure you want to delete this draft? This action cannot be undone.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setDraftToDelete(null)}
+                className="flex-1 px-4 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-semibold bg-white hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDeleteDraft}
+                className="flex-1 px-4 py-2.5 bg-red-600 text-white rounded-xl font-bold hover:bg-red-700 transition-colors"
+              >
+                Delete Draft
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -3042,12 +3646,119 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
   const [currentPassword, setCurrentPassword] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Cropper State
+  const [showCropModal, setShowCropModal] = useState(false);
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [croppedAreaPixels, setCroppedAreaPixels] = useState<any>(null);
+
+  const onCropComplete = useCallback((croppedArea: any, croppedAreaPixels: any) => {
+    setCroppedAreaPixels(croppedAreaPixels);
+  }, []);
 
   const fullname = student ? `${student.firstname || ""} ${student.middlename ? student.middlename + " " : ""}${student.lastname || ""}`.trim() : "";
   
   // Use supervisor's company/location
   const company = supervisor?.company || "N/A";
   const location = supervisor?.location || "N/A";
+
+  const handleAvatarDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!student?.idnumber) return;
+    if (!confirm("Are you sure you want to remove your profile picture?")) return;
+
+    setIsDeleting(true);
+    try {
+        const res = await fetch(`/api/profile/avatar?idnumber=${student.idnumber}`, {
+            method: "DELETE",
+        });
+        
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || "Failed to remove avatar");
+        
+        if (onUpdate) onUpdate();
+        setMessage("Profile picture removed successfully.");
+    } catch (e) {
+        console.error(e);
+        setMessage(e instanceof Error ? e.message : "Failed to remove avatar");
+    } finally {
+        setIsDeleting(false);
+    }
+  };
+
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !student?.idnumber) return;
+    
+    // Validate file type
+    if (!file.type.startsWith("image/")) {
+        setMessage("Please select an image file.");
+        return;
+    }
+    
+    // Validate file size (e.g., 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+        setMessage("Image size must be less than 5MB.");
+        return;
+    }
+
+    try {
+        const fileData = await toBase64(file) as string;
+        setAvatarPreview(fileData);
+        setZoom(1);
+        setCrop({ x: 0, y: 0 });
+        setShowCropModal(true);
+        // Clear input so same file can be selected again if cancelled
+        if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (e) {
+        console.error("Error reading file:", e);
+        setMessage("Failed to read file.");
+    }
+  };
+
+  const handleCropConfirm = async () => {
+    if (!avatarPreview || !student?.idnumber) return;
+
+    setIsUploading(true);
+    try {
+        let finalImageBase64 = avatarPreview;
+        if (croppedAreaPixels) {
+            try {
+                const cropped = await getCroppedImg(avatarPreview, croppedAreaPixels);
+                if (cropped) finalImageBase64 = cropped;
+            } catch (e) {
+                console.error("Cropping failed:", e);
+            }
+        }
+
+        const res = await fetch("/api/profile/avatar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                idnumber: student.idnumber,
+                fileData: finalImageBase64
+            })
+        });
+        
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || "Failed to upload avatar");
+        
+        if (onUpdate) onUpdate();
+        setMessage("Profile picture updated successfully.");
+        setShowCropModal(false);
+        setAvatarPreview(null);
+    } catch (e) {
+        console.error(e);
+        setMessage(e instanceof Error ? e.message : "Failed to upload avatar");
+    } finally {
+        setIsUploading(false);
+    }
+  };
 
   const changePassword = async () => {
     setMessage(null);
@@ -3090,8 +3801,55 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
           </div>
           <div className="px-8 pb-8 relative">
             <div className="flex flex-col sm:flex-row items-center sm:items-end gap-6 -mt-16 mb-6">
-              <div className="h-32 w-32 rounded-2xl border-4 border-white bg-white shadow-md flex items-center justify-center text-4xl font-bold text-gray-800 shrink-0">
-                {(fullname?.[0] || student?.firstname?.[0] || student?.lastname?.[0] || "?").toUpperCase()}
+              <div 
+                className="relative group h-32 w-32 rounded-2xl border-4 border-white bg-white shadow-md flex items-center justify-center text-4xl font-bold text-gray-800 shrink-0 overflow-hidden cursor-pointer"
+                onClick={() => !isUploading && fileInputRef.current?.click()}
+              >
+                {student?.avatar_url ? (
+                  <img src={student.avatar_url} alt="Profile" className="w-full h-full object-cover" />
+                ) : (
+                  (fullname?.[0] || student?.firstname?.[0] || student?.lastname?.[0] || "?").toUpperCase()
+                )}
+                
+                <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity z-10">
+                    {isUploading ? (
+                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-white"></div>
+                    ) : (
+                        <span className="text-white text-xs font-medium">Change</span>
+                    )}
+                </div>
+                
+                {/* Action Buttons */}
+                <div className="absolute bottom-2 right-2 flex gap-2 z-20">
+                    {student?.avatar_url && (
+                        <button 
+                            onClick={handleAvatarDelete}
+                            disabled={isDeleting || isUploading}
+                            className="h-8 w-8 bg-red-500 text-white rounded-full shadow-lg border-2 border-white flex items-center justify-center transition-transform hover:scale-110"
+                            title="Remove photo"
+                        >
+                             {isDeleting ? (
+                                <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div>
+                             ) : (
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                             )}
+                        </button>
+                    )}
+                    <div className="h-8 w-8 bg-[#F97316] text-white rounded-full shadow-lg border-2 border-white flex items-center justify-center transition-transform group-hover:scale-110">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path>
+                        </svg>
+                    </div>
+                </div>
+
+                <input 
+                    type="file" 
+                    ref={fileInputRef} 
+                    hidden 
+                    accept="image/*" 
+                    onChange={handleAvatarUpload}
+                    disabled={isUploading}
+                />
               </div>
               <div className="text-center sm:text-left mb-2">
                  <h1 className="text-2xl font-bold text-gray-900">{fullname || "Unknown User"}</h1>
@@ -3243,6 +4001,97 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
           </div>
         </div>
       </div>
+
+      {showCropModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-4 border-b border-gray-100 flex items-center justify-between">
+              <h3 className="font-bold text-gray-900">Adjust Photo</h3>
+              <button 
+                onClick={() => {
+                  setShowCropModal(false);
+                  setAvatarPreview(null);
+                }}
+                className="p-1 rounded-full hover:bg-gray-100 text-gray-500 transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="relative h-64 w-full bg-gray-900 overflow-hidden">
+              {avatarPreview && (
+                <Cropper
+                  image={avatarPreview}
+                  crop={crop}
+                  zoom={zoom}
+                  aspect={1}
+                  onCropChange={setCrop}
+                  onCropComplete={onCropComplete}
+                  onZoomChange={setZoom}
+                  cropShape="round"
+                  showGrid={false}
+                  style={{
+                    containerStyle: { background: '#111827' },
+                    cropAreaStyle: { border: '2px solid rgba(255, 255, 255, 0.5)' }
+                  }}
+                />
+              )}
+              
+              <div className="absolute bottom-4 left-0 right-0 flex justify-center pointer-events-none">
+                <div className="bg-black/50 backdrop-blur-md text-white text-xs font-medium px-3 py-1.5 rounded-full flex items-center gap-2">
+                  <Move size={12} />
+                  <span>Drag to Reposition</span>
+                </div>
+              </div>
+            </div>
+            
+            <div className="p-6 space-y-6">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-xs font-medium text-gray-500">
+                  <span className="flex items-center gap-1.5"><ZoomOut size={14}/> Zoom Out</span>
+                  <span className="flex items-center gap-1.5">Zoom In <ZoomIn size={14}/></span>
+                </div>
+                <input
+                  type="range"
+                  value={zoom}
+                  min={1}
+                  max={3}
+                  step={0.1}
+                  aria-labelledby="Zoom"
+                  onChange={(e) => setZoom(Number(e.target.value))}
+                  className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-orange-600 hover:accent-orange-700 transition-all"
+                />
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => {
+                    setShowCropModal(false);
+                    setAvatarPreview(null);
+                  }}
+                  className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-600 font-semibold text-sm hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleCropConfirm}
+                  disabled={isUploading}
+                  className="flex-1 py-2.5 rounded-xl bg-orange-600 text-white font-semibold text-sm hover:bg-orange-700 transition-colors shadow-lg shadow-orange-600/20 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  {isUploading ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    "Save Photo"
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,8 @@
 "use client";
-import React, { useState, useMemo } from "react";
-import { Search } from "lucide-react";
+import React, { useState, useMemo, useEffect } from "react";
+import { Search, Users, Clock } from "lucide-react";
+import { supabase } from "@/lib/supabaseClient";
+import { calculateSessionDuration, buildSchedule, formatHours } from "@/lib/attendance";
 
 export type RoleType = "student" | "instructor" | "supervisor" | "approval" | "assign";
 
@@ -76,7 +78,8 @@ function ConfirmationModal({
   noteLabel,
   noteRequired,
   noteValue,
-  onNoteChange
+  onNoteChange,
+  isLoading
 }: { 
   message: string; 
   onConfirm: () => void; 
@@ -88,6 +91,7 @@ function ConfirmationModal({
   noteRequired?: boolean;
   noteValue?: string;
   onNoteChange?: (value: string) => void;
+  isLoading?: boolean;
 }) {
   const styles = {
     warning: {
@@ -113,17 +117,26 @@ function ConfirmationModal({
   const currentStyle = styles[variant] || styles.warning;
 
   const showNoteField = Boolean(noteLabel);
-  const canConfirm = !noteRequired || (noteValue && noteValue.trim().length > 0);
+  const canConfirm = (!noteRequired || (noteValue && noteValue.trim().length > 0)) && !isLoading;
 
   return (
-    <Modal onClose={onCancel}>
+    <Modal onClose={isLoading ? () => {} : onCancel}>
       <div className="flex flex-col items-center justify-center p-8 text-center">
         <div className={`w-20 h-20 ${currentStyle.bg} ${currentStyle.text} rounded-full flex items-center justify-center mb-6 ring-8 ${currentStyle.ring}`}>
-          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+          {isLoading ? (
+            <svg className="animate-spin h-10 w-10" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+          )}
         </div>
-        <h3 className="text-2xl font-bold text-gray-900 mb-2">{title}</h3>
-        <p className="text-gray-500 mb-6 max-w-sm mx-auto leading-relaxed">{message}</p>
-        {showNoteField && (
+        <h3 className="text-2xl font-bold text-gray-900 mb-2">{isLoading ? "Processing..." : title}</h3>
+        <p className="text-gray-500 mb-6 max-w-sm mx-auto leading-relaxed">
+          {isLoading ? "Please wait while we update the database and send notification emails. This may take a few seconds." : message}
+        </p>
+        {showNoteField && !isLoading && (
           <div className="w-full max-w-md mx-auto mb-6 text-left">
             <label className="block text-sm font-semibold text-gray-700 mb-1">
               {noteLabel}
@@ -134,13 +147,15 @@ function ConfirmationModal({
               onChange={e => onNoteChange && onNoteChange(e.target.value)}
               className="w-full min-h-[90px] rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all resize-none"
               placeholder={noteRequired ? "Required. Explain the reason for rejection..." : "Optional note..."}
+              disabled={isLoading}
             />
           </div>
         )}
         <div className="flex gap-4">
           <button
             onClick={onCancel}
-            className="min-w-[120px] py-3 px-6 bg-white border border-gray-200 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-all"
+            disabled={isLoading}
+            className="min-w-[120px] py-3 px-6 bg-white border border-gray-200 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Cancel
           </button>
@@ -149,7 +164,15 @@ function ConfirmationModal({
             disabled={!canConfirm}
             className={`min-w-[120px] py-3 px-6 text-white font-bold rounded-xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg ${currentStyle.btn} ${!canConfirm ? "opacity-60 cursor-not-allowed hover:scale-100" : ""}`}
           >
-            {confirmLabel}
+            {isLoading ? (
+               <span className="flex items-center gap-2">
+                 <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                 </svg>
+                 Processing
+               </span>
+            ) : confirmLabel}
           </button>
         </div>
       </div>
@@ -261,8 +284,11 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
               reason: `Coordinator ${action}`,
               rejectionNote: action === "reject" ? note || "" : undefined,
             }),
-          }).then(res => {
-            if (!res.ok) throw new Error(`Failed to ${action} ${id}`);
+          }).then(async res => {
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.error || `Failed to ${action} ${id}`);
+            }
             return res;
           })
         )
@@ -270,8 +296,8 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
 
       onRefresh();
       setSelectedIds(new Set());
-    } catch (e) {
-      alert(`Failed to ${action} one or more students`);
+    } catch (e: any) {
+      alert(e.message || `Failed to ${action} one or more students`);
     } finally {
       setActionLoading(null);
       setIsBulkApproving(false);
@@ -611,6 +637,7 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
               setConfirmAction(null);
               setRejectionNote("");
             }}
+            isLoading={actionLoading !== null || isBulkApproving}
           />
         )}
       </div>
@@ -969,19 +996,6 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
         {role === "supervisor" && (
           <>
             <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Course & Section</span>
-              <MultiSelect
-                options={combinedCourseSections}
-                value={form.sectionIds}
-                onChange={(sectionIds) => {
-                  const selectedSections = combinedCourseSections.filter(opt => sectionIds.includes(opt.id));
-                  const courseIds = Array.from(new Set(selectedSections.map(opt => opt.courseId)));
-                  setForm({ ...form, sectionIds, courseIds });
-                }}
-                placeholder="Select course & section"
-              />
-            </label>
-            <label className="grid gap-1.5">
               <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Company</span>
               <input
                 value={form.company}
@@ -1086,20 +1100,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
                   </div>
                   <div className="space-y-2 max-h-[50vh] overflow-y-auto">
                     {users
-                      .filter(u => {
-                        if (String(u.role).toLowerCase() !== "supervisor") return false;
-                        const studentCourseId = form.courseIds[0];
-                        const studentSectionId = form.sectionIds[0];
-                        if (!studentCourseId || !studentSectionId) return false;
-                        const hasCourseId = u.courseIds && u.courseIds.includes(studentCourseId);
-                        const hasSectionId = u.sectionIds && u.sectionIds.includes(studentSectionId);
-                        if (hasCourseId && hasSectionId) return true;
-                        const courseObj = availableCourses.find(c => c.id === studentCourseId);
-                        const sectionObj = availableSections.find(s => s.id === studentSectionId);
-                        const hasCourseName = courseObj && u.course && u.course.includes(courseObj.name);
-                        const hasSectionName = sectionObj && u.section && u.section.includes(sectionObj.name);
-                        return hasCourseName && hasSectionName;
-                      })
+                      .filter(u => String(u.role).toLowerCase() === "supervisor")
                       .filter(u => {
                         const s = supervisorSearch.trim().toLowerCase();
                         if (!s) return true;
@@ -1478,27 +1479,6 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
                 placeholder="Location"
               />
             </label>
-            <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Course & Section</span>
-              <MultiSelect
-                options={combinedCourseSections}
-                value={form.sectionIds}
-                onChange={(sectionIds) => {
-                  const selectedSections = combinedCourseSections.filter(opt => sectionIds.includes(opt.id));
-                  const courseIds = Array.from(new Set(selectedSections.map(opt => opt.courseId)));
-                  const courseNames = courseIds
-                    .map(id => availableCourses.find(c => c.id === id)?.name)
-                    .filter(Boolean) as string[];
-                  const sectionNames = selectedSections
-                    .map(opt => availableSections.find(s => s.id === opt.id)?.name)
-                    .filter(Boolean) as string[];
-                  const courseStr = courseNames.join(", ");
-                  const sectionStr = sectionNames.join(", ");
-                  setForm({ ...form, sectionIds, courseIds, course: courseStr, section: sectionStr });
-                }}
-                placeholder="Select course & section"
-              />
-            </label>
           </>
         )}
       </div>
@@ -1633,6 +1613,92 @@ export function ViewUserDetails({ user, users, onClose }: { user: User; users: U
     if (!user.supervisorid) return null;
     return users.find(u => u.role === "supervisor" && u.idnumber === user.supervisorid) || null;
   }, [users, user.supervisorid]);
+
+  const [attendanceStats, setAttendanceStats] = useState<{total: number, validated: number} | null>(null);
+
+  useEffect(() => {
+    if (user.role !== 'student') return;
+
+    const fetchStats = async () => {
+      if (!supabase) return;
+      const [{ data: logs }, { data: otShifts }, { data: shiftsData }] = await Promise.all([
+        supabase.from('attendance').select('*').eq('idnumber', user.idnumber),
+        supabase.from('overtime_shifts').select('*').eq('student_id', user.idnumber),
+        supabase.from('shifts').select('*')
+      ]);
+
+      if (!logs) return;
+
+      // Default config
+      let config = {
+          amIn: "08:00", amOut: "12:00",
+          pmIn: "13:00", pmOut: "17:00",
+          otIn: "17:00", otOut: "18:00"
+      };
+
+      if (shiftsData) {
+          const am = shiftsData.find((s: any) => s.shift_name === 'Morning Shift');
+          const pm = shiftsData.find((s: any) => s.shift_name === 'Afternoon Shift');
+          const ot = shiftsData.find((s: any) => s.shift_name === 'Overtime Shift');
+          
+          if (am) { config.amIn = am.official_start?.slice(0, 5) || "08:00"; config.amOut = am.official_end?.slice(0, 5) || "12:00"; }
+          if (pm) { config.pmIn = pm.official_start?.slice(0, 5) || "13:00"; config.pmOut = pm.official_end?.slice(0, 5) || "17:00"; }
+          if (ot) { config.otIn = ot.official_start?.slice(0, 5) || "17:00"; config.otOut = ot.official_end?.slice(0, 5) || "18:00"; }
+      }
+
+      const grouped = new Map<string, any[]>();
+      logs.forEach(log => {
+        const d = new Date(log.timestamp);
+        const key = d.toDateString();
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key)!.push(log);
+      });
+
+      let total = 0;
+      let validated = 0;
+
+      grouped.forEach((dayLogs) => {
+        const dayDate = new Date(dayLogs[0].timestamp);
+        const dateStr = dayDate.getFullYear() + "-" + 
+                       String(dayDate.getMonth() + 1).padStart(2, '0') + "-" + 
+                       String(dayDate.getDate()).padStart(2, '0');
+        
+        const dynamicOt = otShifts?.find((s: any) => s.effective_date === dateStr); // Note: effective_date in DB is usually YYYY-MM-DD
+        
+        const schedule = buildSchedule(dayDate, config, dynamicOt ? { start: Number(dynamicOt.overtime_start), end: Number(dynamicOt.overtime_end) } : undefined);
+
+        const sessions: {in: any, out: any}[] = [];
+        let currentIn: any = null;
+        dayLogs.sort((a, b) => a.timestamp - b.timestamp).forEach(log => {
+            if (log.type === 'in') currentIn = log;
+            else if (log.type === 'out' && currentIn) {
+                sessions.push({in: currentIn, out: log});
+                currentIn = null;
+            }
+        });
+
+        sessions.forEach(s => {
+            const am = calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'am', schedule);
+            const pm = calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'pm', schedule);
+            const ot = calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'ot', schedule);
+            
+            const sessionTotal = am + pm + ot;
+            total += sessionTotal;
+
+            const isVal = (s.in.status === 'Approved' || s.in.status === 'Validated' || s.in.validated_by) &&
+                          (s.out.status === 'Approved' || s.out.status === 'Validated' || s.out.validated_by);
+            
+            if (isVal) validated += sessionTotal;
+        });
+      });
+
+      setAttendanceStats({ total, validated });
+    };
+
+    fetchStats();
+  }, [user]);
+
+
   
   return (
     <div className="p-6 sm:p-8">
@@ -1658,6 +1724,7 @@ export function ViewUserDetails({ user, users, onClose }: { user: User; users: U
             <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Full Name</p>
             <p className="text-base font-semibold text-gray-900">{user.firstname} {user.middlename ? user.middlename + " " : ""}{user.lastname}</p>
           </div>
+
           {user.role === "student" && (
             <>
               <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
@@ -1734,12 +1801,12 @@ export function AssignSupervisorView({
   const [supervisorSearch, setSupervisorSearch] = useState("");
   const [studentCourseFilter, setStudentCourseFilter] = useState("");
   const [studentSectionFilter, setStudentSectionFilter] = useState("");
-  const [supervisorCourseFilter, setSupervisorCourseFilter] = useState("");
-  const [supervisorSectionFilter, setSupervisorSectionFilter] = useState("");
+
   const [selectedStudentIds, setSelectedStudentIds] = useState<Set<number>>(new Set());
   const [selectedSupervisorId, setSelectedSupervisorId] = useState("");
   const [assignLoading, setAssignLoading] = useState(false);
   const [assignMessage, setAssignMessage] = useState<string | null>(null);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
 
   const unsupervisedStudents = useMemo(
     () =>
@@ -1785,35 +1852,7 @@ export function AssignSupervisorView({
     [unsupervisedStudents, studentCourseFilter]
   );
 
-  const supervisorCourses = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          supervisors
-            .flatMap((u) => String(u.course || "").split(",").map((s) => s.trim()))
-            .filter(Boolean)
-        )
-      ).sort(),
-    [supervisors]
-  );
 
-  const supervisorSections = useMemo(() => {
-    const subset = supervisorCourseFilter
-      ? supervisors.filter((u) =>
-          String(u.course || "")
-            .split(",")
-            .map((s) => s.trim())
-            .includes(supervisorCourseFilter)
-        )
-      : supervisors;
-    return Array.from(
-      new Set(
-        subset
-          .flatMap((u) => String(u.section || "").split(",").map((s) => s.trim()))
-          .filter(Boolean)
-      )
-    ).sort();
-  }, [supervisors, supervisorCourseFilter]);
 
   const filteredStudents = useMemo(() => {
     const term = studentSearch.trim().toLowerCase();
@@ -1837,18 +1876,6 @@ export function AssignSupervisorView({
   const filteredSupervisors = useMemo(() => {
     const term = supervisorSearch.trim().toLowerCase();
     return supervisors.filter((u) => {
-      if (supervisorCourseFilter) {
-        const courses = String(u.course || "")
-          .split(",")
-          .map((s) => s.trim());
-        if (!courses.includes(supervisorCourseFilter)) return false;
-      }
-      if (supervisorSectionFilter) {
-        const sections = String(u.section || "")
-          .split(",")
-          .map((s) => s.trim());
-        if (!sections.includes(supervisorSectionFilter)) return false;
-      }
       if (!term) return true;
       const name = `${u.firstname || ""} ${u.lastname || ""}`.toLowerCase();
       const company = (u.company || "").toLowerCase();
@@ -1861,7 +1888,7 @@ export function AssignSupervisorView({
         location.includes(term)
       );
     });
-  }, [supervisors, supervisorSearch, supervisorCourseFilter, supervisorSectionFilter]);
+  }, [supervisors, supervisorSearch]);
 
   const toggleStudent = (id: number) => {
     setSelectedStudentIds((prev) => {
@@ -1882,26 +1909,7 @@ export function AssignSupervisorView({
     });
   };
 
-  const handleAssign = async () => {
-    if (selectedStudentIds.size === 0 || !selectedSupervisorId) {
-      setAssignMessage("Select at least one student and a supervisor.");
-      return;
-    }
-    const supervisor = supervisors.find(
-      (u) => u.idnumber === selectedSupervisorId
-    );
-    const count = selectedStudentIds.size;
-    const supervisorLabel =
-      (supervisor &&
-        (`${supervisor.firstname || ""} ${supervisor.lastname || ""}`.trim() ||
-          supervisor.name ||
-          supervisor.idnumber)) ||
-      selectedSupervisorId;
-    const confirmed = window.confirm(
-      `Assign ${supervisorLabel} to ${count} student${count > 1 ? "s" : ""}?`
-    );
-    if (!confirmed) return;
-
+  const executeAssign = async () => {
     try {
       setAssignLoading(true);
       setAssignMessage(null);
@@ -1931,6 +1939,7 @@ export function AssignSupervisorView({
             e instanceof Error ? e.message : "Failed to assign supervisor";
           setAssignMessage(msg);
           setAssignLoading(false);
+          setShowConfirmModal(false);
           return;
         }
       }
@@ -1939,10 +1948,20 @@ export function AssignSupervisorView({
       setSelectedSupervisorId("");
       setStudentSearch("");
       setSupervisorSearch("");
+      setShowConfirmModal(false);
       if (onRefresh) onRefresh();
     } finally {
       setAssignLoading(false);
     }
+  };
+
+  const handleAssign = () => {
+    if (selectedStudentIds.size === 0 || !selectedSupervisorId) {
+      setAssignMessage("Select at least one student and a supervisor.");
+      return;
+    }
+    setAssignMessage(null);
+    setShowConfirmModal(true);
   };
 
   const assignDisabled =
@@ -1959,13 +1978,13 @@ export function AssignSupervisorView({
         </h2>
       </div>
 
-      <div className="flex-1 p-4 bg-gray-50/30 max-h-[calc(100vh-180px)] overflow-y-auto">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col min-h-[460px]">
+      <div className="flex-1 p-4 bg-gray-50/30 overflow-hidden min-h-0">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full">
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[calc(100vh-130px)]">
             <div className="p-4 border-b border-gray-100 flex items-center justify-between gap-2">
               <div>
                 <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                  Students Without Supervisor
+                  STUDENTS WITHOUT SUPERVISOR
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">
                   {unsupervisedStudents.length} total student
@@ -2023,7 +2042,7 @@ export function AssignSupervisorView({
                 </select>
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto mt-2 space-y-2">
+            <div className="flex-1 overflow-y-auto mt-2 space-y-2 pr-2">
               {filteredStudents.length === 0 ? (
                 <div className="p-6 text-center text-sm text-gray-500 bg-gray-50 rounded-xl border border-dashed border-gray-200">
                   No students without supervisor match your filters.
@@ -2088,12 +2107,11 @@ export function AssignSupervisorView({
               )}
             </div>
           </div>
-
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col min-h-[460px]">
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[calc(100vh-130px)]">
             <div className="p-4 border-b border-gray-100 flex items-center justify-between gap-2">
               <div>
                 <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                  Choose Supervisor
+                  CHOOSE SUPERVISOR
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">
                   {supervisors.length} supervisor
@@ -2105,31 +2123,7 @@ export function AssignSupervisorView({
                 {selectedStudentIds.size === 1 ? "" : "s"}
               </div>
             </div>
-            <div className="sticky top-0 z-10 bg-white px-4 py-2 border-b border-gray-100 flex flex-wrap sm:flex-nowrap justify-end gap-2">
-              <button
-                onClick={() => {
-                  setSelectedStudentIds(new Set());
-                  setSelectedSupervisorId("");
-                  setStudentSearch("");
-                  setSupervisorSearch("");
-                  setAssignMessage(null);
-                  setStudentCourseFilter("");
-                  setStudentSectionFilter("");
-                  setSupervisorCourseFilter("");
-                  setSupervisorSectionFilter("");
-                }}
-                className="px-3.5 py-1.5 rounded-2xl border border-gray-300 bg-white text-xs sm:text-sm font-semibold text-gray-700 hover:bg-gray-100 transition-colors"
-              >
-                Clear Selection
-              </button>
-              <button
-                onClick={handleAssign}
-                disabled={assignDisabled}
-                className="px-4 py-1.5 rounded-2xl bg-[#F97316] text-white text-xs sm:text-sm font-bold hover:bg-[#EA580C] transition-colors shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {assignLoading ? "Assigning..." : "Assign Supervisor"}
-              </button>
-            </div>
+            
             <div className="p-4 border-b border-gray-100">
               <div className="relative">
                 <Search
@@ -2139,41 +2133,21 @@ export function AssignSupervisorView({
                 <input
                   value={supervisorSearch}
                   onChange={(e) => setSupervisorSearch(e.target.value)}
-                  placeholder="Search by name, ID, company or location..."
+                  placeholder="Search by name, ID, company..."
                   className="w-full pl-10 pr-3 py-2.5 bg-white border border-gray-300 rounded-xl text-sm placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
                 />
               </div>
-              <div className="mt-3 flex flex-wrap sm:flex-nowrap gap-2">
-                <select
-                  value={supervisorCourseFilter}
-                  onChange={(e) => {
-                    setSupervisorCourseFilter(e.target.value);
-                    setSupervisorSectionFilter("");
-                  }}
-                  className="flex-1 min-w-0 px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs sm:text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+              <div className="mt-3">
+                <button
+                  onClick={handleAssign}
+                  disabled={assignDisabled}
+                  className="w-full flex items-center justify-center px-6 py-2.5 rounded-xl bg-[#F97316] text-white text-sm font-bold hover:bg-[#EA580C] transition-colors shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                 >
-                  <option value="">All Courses</option>
-                  {supervisorCourses.map((course) => (
-                    <option key={course} value={course}>
-                      {course}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={supervisorSectionFilter}
-                  onChange={(e) => setSupervisorSectionFilter(e.target.value)}
-                  className="flex-1 min-w-0 px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs sm:text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
-                >
-                  <option value="">All Sections</option>
-                  {supervisorSections.map((section) => (
-                    <option key={section} value={section}>
-                      {section}
-                    </option>
-                  ))}
-                </select>
+                  Assign Supervisor
+                </button>
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto mt-2 space-y-2">
+            <div className="flex-1 overflow-y-auto mt-2 space-y-2 pr-2">
               {filteredSupervisors.length === 0 ? (
                 <div className="p-6 text-center text-sm text-gray-500 bg-gray-50 rounded-xl border border-dashed border-gray-200">
                   No supervisors match your search.
@@ -2189,12 +2163,35 @@ export function AssignSupervisorView({
                           selectedSupervisorId === u.idnumber ? "" : u.idnumber
                         )
                       }
-                      className={`w-full flex items-center justify-between p-3 rounded-xl border bg-white text-left transition-all ${
+                      className={`w-full flex items-center gap-3 p-3 rounded-xl border bg-white text-left transition-all ${
                         isActive
                           ? "border-[#F97316] bg-orange-50/60 shadow-sm"
                           : "border-gray-200 hover:border-orange-200 hover:bg-orange-50/40"
                       }`}
                     >
+                      <div
+                        className={`h-5 w-5 rounded-md border flex items-center justify-center flex-shrink-0 ${
+                          isActive
+                            ? "border-[#F97316] bg-[#F97316]"
+                            : "border-gray-300 bg-white"
+                        }`}
+                      >
+                        {isActive && (
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="white"
+                            strokeWidth="3"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <polyline points="20 6 9 17 4 12"></polyline>
+                          </svg>
+                        )}
+                      </div>
                       <div className="flex items-center gap-3 min-w-0">
                         <div className="h-9 w-9 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center text-xs font-bold">
                           {(u.firstname?.[0] || u.idnumber[0]).toUpperCase()}
@@ -2211,11 +2208,6 @@ export function AssignSupervisorView({
                           </p>
                         </div>
                       </div>
-                      {isActive && (
-                        <div className="h-6 w-6 rounded-full bg-[#F97316] text-white flex items-center justify-center text-xs font-bold">
-                          ✓
-                        </div>
-                      )}
                     </button>
                   );
                 })
@@ -2223,6 +2215,30 @@ export function AssignSupervisorView({
             </div>
           </div>
         </div>
+
+        {showConfirmModal && (
+          <ConfirmationModal
+            title="Confirm Assignment"
+            message={`Assign ${(() => {
+              const s = supervisors.find(
+                (u) => u.idnumber === selectedSupervisorId
+              );
+              return (
+                (s &&
+                  (`${s.firstname || ""} ${s.lastname || ""}`.trim() ||
+                    s.name ||
+                    s.idnumber)) ||
+                selectedSupervisorId
+              );
+            })()} to ${selectedStudentIds.size} student${
+              selectedStudentIds.size > 1 ? "s" : ""
+            }?`}
+            confirmLabel="Assign"
+            onConfirm={executeAssign}
+            onCancel={() => setShowConfirmModal(false)}
+            isLoading={assignLoading}
+          />
+        )}
 
         {assignMessage && (
           <div className="mt-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-3">
@@ -2262,7 +2278,21 @@ export function UsersView({
   const [search, setSearch] = useState("");
   const [courseFilter, setCourseFilter] = useState("");
   const [sectionFilter, setSectionFilter] = useState("");
+  const [showAssignedStudentsModal, setShowAssignedStudentsModal] = useState(false);
+  const [assignedStudents, setAssignedStudents] = useState<User[]>([]);
+  const [assignedSearch, setAssignedSearch] = useState("");
+  const [assignedCourseFilter, setAssignedCourseFilter] = useState("");
+  const [assignedSectionFilter, setAssignedSectionFilter] = useState("");
   const title = role.charAt(0).toUpperCase() + role.slice(1) + "s";
+
+  const viewAssignedStudents = (supervisorId: string) => {
+    const assigned = users.filter(u => u.supervisorid === supervisorId && u.role === "student");
+    setAssignedStudents(assigned);
+    setAssignedSearch("");
+    setAssignedCourseFilter("");
+    setAssignedSectionFilter("");
+    setShowAssignedStudentsModal(true);
+  };
 
   const { activeUsers, pendingUsers, availableCourses: courses, availableSections: sections } = useMemo(() => {
     const s = search.toLowerCase();
@@ -2343,7 +2373,7 @@ export function UsersView({
           />
         </div>
         
-        {(role === "student" || role === "instructor" || courses.length > 0 || sections.length > 0) && (
+        {role !== "supervisor" && (role === "student" || role === "instructor" || courses.length > 0 || sections.length > 0) && (
           <div className="flex gap-2">
             <select
               value={courseFilter}
@@ -2460,7 +2490,7 @@ export function UsersView({
                         </h3>
                         <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm text-gray-500">
                           <span className="font-medium text-gray-600 bg-gray-100 px-2 py-0.5 rounded-md">{user.idnumber}</span>
-                          {user.course && (
+                          {user.course && user.role !== 'supervisor' && (
                             <span className="truncate">
                               • {user.role === 'instructor' 
                                   ? formatCourseSection(user.course, user.section) 
@@ -2493,6 +2523,15 @@ export function UsersView({
                       </div>
                     </div>
                     <div className="flex items-center gap-1 opacity-100 sm:opacity-0 group-hover:opacity-100 transition-all duration-200">
+                      {user.role === "supervisor" && (
+                        <button
+                          onClick={() => viewAssignedStudents(user.idnumber)}
+                          className="p-2.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-colors"
+                          title="View Assigned Students"
+                        >
+                          <Users size={20} />
+                        </button>
+                      )}
                       <button 
                         onClick={() => onView(user)}
                         className="p-2.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-colors"
@@ -2522,6 +2561,114 @@ export function UsersView({
           </div>
         </div>
       </div>
+      
+      {showAssignedStudentsModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col animate-in fade-in zoom-in duration-200">
+            <div className="p-6 border-b border-gray-100">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Assigned Students</h3>
+                  <p className="text-sm text-gray-500">
+                    {assignedStudents.length} student{assignedStudents.length !== 1 ? 's' : ''} assigned
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowAssignedStudentsModal(false)}
+                  className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+              </div>
+              
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600" size={18} />
+                <input
+                  type="text"
+                  placeholder="Search students..."
+                  value={assignedSearch}
+                  onChange={(e) => setAssignedSearch(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all text-base text-gray-700"
+                />
+              </div>
+
+              <div className="flex gap-2 mt-3">
+                <select
+                  value={assignedCourseFilter}
+                  onChange={(e) => setAssignedCourseFilter(e.target.value)}
+                  className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-base text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 flex-1"
+                >
+                  <option value="">All Courses</option>
+                  {Array.from(new Set(assignedStudents.map(u => u.course).filter(Boolean))).sort().map(course => (
+                    <option key={course as string} value={course as string}>{course as string}</option>
+                  ))}
+                </select>
+                <select
+                  value={assignedSectionFilter}
+                  onChange={(e) => setAssignedSectionFilter(e.target.value)}
+                  className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-base text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 flex-1"
+                >
+                  <option value="">All Sections</option>
+                  {Array.from(new Set(assignedStudents.map(u => u.section).filter(Boolean))).sort().map(section => (
+                    <option key={section as string} value={section as string}>{section as string}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            
+            <div className="overflow-y-auto p-6">
+              {assignedStudents.filter(s => 
+                (assignedCourseFilter === "" || s.course === assignedCourseFilter) &&
+                (assignedSectionFilter === "" || s.section === assignedSectionFilter) &&
+                (s.firstname?.toLowerCase().includes(assignedSearch.toLowerCase()) ||
+                s.lastname?.toLowerCase().includes(assignedSearch.toLowerCase()) ||
+                s.idnumber?.toLowerCase().includes(assignedSearch.toLowerCase()))
+              ).length === 0 ? (
+                <div className="text-center py-12 text-gray-400">
+                  <Users className="w-12 h-12 mx-auto mb-3 opacity-20" />
+                  <p>No students found.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {assignedStudents
+                    .filter(s => 
+                      (assignedCourseFilter === "" || s.course === assignedCourseFilter) &&
+                      (assignedSectionFilter === "" || s.section === assignedSectionFilter) &&
+                      (s.firstname?.toLowerCase().includes(assignedSearch.toLowerCase()) ||
+                      s.lastname?.toLowerCase().includes(assignedSearch.toLowerCase()) ||
+                      s.idnumber?.toLowerCase().includes(assignedSearch.toLowerCase()))
+                    )
+                    .map((student) => (
+                    <div key={student.id} className="flex items-center gap-4 p-4 rounded-xl border border-gray-100 bg-gray-50/50">
+                      <div className="h-10 w-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-sm">
+                        {(student.firstname?.[0] || student.idnumber[0]).toUpperCase()}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-semibold text-gray-900 truncate">
+                          {student.firstname} {student.lastname}
+                        </h4>
+                        <div className="flex items-center gap-2 text-sm text-gray-700">
+                          <span className="bg-white border border-gray-300 px-1.5 py-0.5 rounded">{student.idnumber}</span>
+                          <span className="truncate">{student.course} - {student.section}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            
+            <div className="p-4 border-t border-gray-100 bg-gray-50 rounded-b-2xl flex justify-end">
+              <button
+                onClick={() => setShowAssignedStudentsModal(false)}
+                className="px-4 py-2 bg-white border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 font-medium text-sm transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

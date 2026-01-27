@@ -51,8 +51,8 @@ export async function POST(req: Request) {
     }
 
     const courseKey = course === "All Courses" ? "ALL" : course;
-    // If section is "All Sections" or empty/null, store as empty string in DB
-    const sectionKey = (!section || section === "All Sections") ? "" : section;
+    // If section is "All Sections" or empty/null or "ALL" (frontend generic), store as empty string in DB
+    const sectionKey = (!section || section === "All Sections" || section === "ALL") ? "" : section;
 
     // Check if exists
     const { data: existing } = await admin

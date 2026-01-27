@@ -47,11 +47,13 @@ export default function StudentReportsPage() {
     (async () => {
       try {
         // Fetch User to know course/section
-        const uRes = await fetch("/api/users", { cache: "no-store" });
+        const uRes = await fetch(`/api/users?idnumber=${encodeURIComponent(idnumber)}`, { cache: "no-store" });
         const uJson = await uRes.json();
-        if (Array.isArray(uJson.users)) {
-             const me = uJson.users.find((u: any) => String(u.idnumber) === String(idnumber) && String(u.role).toLowerCase() === "student");
-             if (me) setStudent(me);
+        if (Array.isArray(uJson.users) && uJson.users.length > 0) {
+             const me = uJson.users[0];
+             if (String(me.role).toLowerCase() === "student") {
+               setStudent(me);
+             }
         }
         await fetchReports();
         await fetchDeadlines();

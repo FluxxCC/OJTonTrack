@@ -3,26 +3,61 @@ import { getSupabaseAdmin } from "@/lib/supabaseClient";
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(req: Request) {
   const admin = getSupabaseAdmin();
   if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
 
-  // Fetch users with related course/section data
-  // We use the table names for the joins. 
-  // user_courses -> courses
-  // user_sections -> sections
-  const { data, error } = await admin
+  const { searchParams } = new URL(req.url);
+  const page = parseInt(searchParams.get('page') || '1');
+  const limit = parseInt(searchParams.get('limit') || '10');
+  const offset = (page - 1) * limit;
+
+  const role = searchParams.get('role');
+  const search = searchParams.get('search');
+  const supervisorId = searchParams.get('supervisor_id');
+  const course = searchParams.get('course');
+  const section = searchParams.get('section');
+  const idnumber = searchParams.get('idnumber');
+
+  let query = admin
     .from("users")
     .select(`
-      id, idnumber, role, name, firstname, middlename, lastname, course, section, company, location, supervisorid, email, email_verified, signup_status,
+      id, idnumber, role, name, firstname, middlename, lastname, course, section, company, location, supervisorid, email, email_verified, signup_status, avatar_url,
       user_courses (
         courses (id, name)
       ),
       user_sections (
         sections (id, name)
       )
-    `)
-    .order("id", { ascending: true });
+    `, { count: 'exact' });
+
+  if (role) {
+    query = query.eq('role', role);
+  }
+
+  if (supervisorId) {
+    query = query.eq('supervisorid', supervisorId);
+  }
+
+  if (course) {
+    query = query.eq('course', course);
+  }
+
+  if (section) {
+    query = query.eq('section', section);
+  }
+
+  if (idnumber) {
+    query = query.eq('idnumber', idnumber);
+  }
+
+  if (search) {
+    query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%,idnumber.ilike.%${search}%`);
+  }
+
+  const { data, error, count } = await query
+    .order("id", { ascending: true })
+    .range(offset, offset + limit - 1);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
@@ -102,11 +137,18 @@ export async function GET() {
       supervisorid: u.supervisorid,
       email: u.email,
       email_verified: u.email_verified,
-      signup_status: u.signup_status
+      signup_status: u.signup_status,
+      avatar_url: u.avatar_url
     };
   });
 
-  return NextResponse.json({ users });
+  return NextResponse.json({ 
+    users,
+    total: count || 0,
+    page,
+    limit,
+    totalPages: count ? Math.ceil(count / limit) : 0
+  });
 }
 
 export async function POST(req: Request) {

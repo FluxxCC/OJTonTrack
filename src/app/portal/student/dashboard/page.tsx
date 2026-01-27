@@ -3,22 +3,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { DashboardView, StudentHeader, StudentBottomNav } from "../ui";
 import type { ReportEntry } from "../ui";
-function normalizeTimeString(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const parts = String(raw).split(":");
-  if (parts.length < 2) return null;
-  const h = parts[0]?.padStart(2, "0");
-  const m = parts[1]?.padStart(2, "0");
-  if (!h || !m) return null;
-  return `${h}:${m}`;
-}
 
-function timeStringToMinutes(raw: string | null | undefined): number {
-  const t = normalizeTimeString(raw);
-  if (!t) return 0;
-  const [h, m] = t.split(":").map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
+import { calculateSessionDuration, determineShift, ShiftSchedule, normalizeTimeString, timeStringToMinutes, formatHours, buildSchedule, calculateShiftDurations } from "@/lib/attendance";
 
 type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number };
 type ReportEntryLegacy = { text: string; fileName?: string; fileType?: string; submittedAt: number; timestamp?: number };
@@ -164,14 +150,7 @@ export default function StudentDashboardPage() {
     })();
   }, [idnumber]);
 
-  const formatHours = (ms: number) => {
-    if (!ms) return "0h 0m 0s";
-    const totalSeconds = Math.floor(ms / 1000);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    return `${hours}h ${minutes}m ${seconds}s`;
-  };
+
 
 
 
@@ -179,12 +158,23 @@ export default function StudentDashboardPage() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("/api/shifts", { cache: "no-store" });
+        // Wait for student profile to be loaded to get supervisor ID
+        if (!student && idnumber) {
+           // If student data isn't loaded yet, we can't determine supervisor_id
+           // The effect will re-run when student state updates
+           return;
+        }
+
+        const res = await fetch(`/api/shifts${student?.supervisorid ? `?supervisor_id=${encodeURIComponent(student.supervisorid)}` : ''}`, { cache: "no-store" });
         const json = await res.json();
         const rows = Array.isArray(json.shifts)
           ? json.shifts.filter((r: ShiftRaw) => r && (r.official_start || r.official_end))
           : [];
-        if (!rows.length) return;
+        
+        if (!rows.length) {
+          if (!cancelled) setSchedule(null);
+          return;
+        }
 
         const sorted = rows
           .slice()
@@ -198,7 +188,7 @@ export default function StudentDashboardPage() {
         let pmRow = sorted[1] || sorted[0];
 
         const findByName = (match: (name: string) => boolean) =>
-          rows.find((r: ShiftRaw) => {
+          sorted.find((r: ShiftRaw) => {
             const n = String(r.shift_name || "").toLowerCase().trim();
             return match(n);
           });
@@ -207,31 +197,24 @@ export default function StudentDashboardPage() {
         const pmCandidate = findByName((n) => n.includes("pm") || n.includes("afternoon"));
         const otCandidate = findByName((n) => n === "overtime shift" || n === "overtime");
 
-        if (amCandidate && pmCandidate) {
-          amRow = amCandidate;
-          pmRow = pmCandidate;
-        }
-
         let finalOtRow = otCandidate;
-        if (finalOtRow && (finalOtRow === amRow || finalOtRow === pmRow)) {
+        if (finalOtRow && (finalOtRow === amCandidate || finalOtRow === pmCandidate)) {
           finalOtRow = undefined;
         }
 
-        const amInNorm = normalizeTimeString(amRow.official_start || "");
-        const amOutNorm = normalizeTimeString(amRow.official_end || "");
-        const pmInNorm = normalizeTimeString(pmRow.official_start || "");
-        const pmOutNorm = normalizeTimeString(pmRow.official_end || "");
-        const otInNorm = normalizeTimeString(finalOtRow?.official_start || "");
-        const otOutNorm = normalizeTimeString(finalOtRow?.official_end || "");
-        
-        // Relaxed validation: allow partial schedules (e.g. only AM or only PM)
-        if (!amInNorm && !amOutNorm && !pmInNorm && !pmOutNorm) return;
+        // Use defaults if not found or empty
+        const amInNorm = normalizeTimeString(amCandidate?.official_start) || "";
+        const amOutNorm = normalizeTimeString(amCandidate?.official_end) || "";
+        const pmInNorm = normalizeTimeString(pmCandidate?.official_start) || "";
+        const pmOutNorm = normalizeTimeString(pmCandidate?.official_end) || "";
+        const otInNorm = normalizeTimeString(finalOtRow?.official_start);
+        const otOutNorm = normalizeTimeString(finalOtRow?.official_end);
 
         const next = {
-          amIn: amInNorm || "",
-          amOut: amOutNorm || "",
-          pmIn: pmInNorm || "",
-          pmOut: pmOutNorm || "",
+          amIn: amInNorm,
+          amOut: amOutNorm,
+          pmIn: pmInNorm,
+          pmOut: pmOutNorm,
           otIn: otInNorm || undefined,
           otOut: otOutNorm || undefined,
         };
@@ -244,7 +227,7 @@ export default function StudentDashboardPage() {
     return () => {
       cancelled = true;
     };
-  }, [idnumber]);
+  }, [idnumber, student]);
 
   const aggregateHours = useMemo(() => {
     const seen = new Set<string>();
@@ -316,34 +299,16 @@ export default function StudentDashboardPage() {
       const baseDate = new Date(day.date);
       baseDate.setHours(0, 0, 0, 0);
 
-      const buildShift = (timeStr: string | undefined) => {
-        if (!timeStr) return null;
-        const [h, m] = timeStr.split(":").map(Number);
-        const d = new Date(baseDate.getTime());
-        d.setHours(h || 0, m || 0, 0, 0);
-        return d.getTime();
-      };
-
-      const amInMs = buildShift(effectiveSchedule.amIn);
-      const amOutMs = buildShift(effectiveSchedule.amOut);
-      const pmInMs = buildShift(effectiveSchedule.pmIn);
-      const pmOutMs = buildShift(effectiveSchedule.pmOut);
-
       // Check for dynamic overtime shift
       const dateKey = day.date.toLocaleDateString('en-CA');
       const dynamicOt = overtimeShifts.find(s => s.effective_date === dateKey);
       
-      const otInMs = dynamicOt ? dynamicOt.overtime_start : buildShift(effectiveSchedule.otIn);
-      const otOutMs = dynamicOt ? dynamicOt.overtime_end : buildShift(effectiveSchedule.otOut);
-
-      const localSchedule = {
-        amIn: amInMs || 0,
-        amOut: amOutMs || 0,
-        pmIn: pmInMs || 0,
-        pmOut: pmOutMs || 0,
-        otStart: otInMs || 0,
-        otEnd: otOutMs || 0,
-      };
+      // Use centralized buildSchedule
+      const dailySchedule = buildSchedule(
+        day.date,
+        effectiveSchedule,
+        dynamicOt ? { start: dynamicOt.overtime_start, end: dynamicOt.overtime_end } : undefined
+      );
 
       type Session = { in: AttendanceEntry; out: AttendanceEntry | null };
       const sessions: Session[] = [];
@@ -371,40 +336,11 @@ export default function StudentDashboardPage() {
       let dayTotalMs = 0;
       let dayValidatedMs = 0;
 
-      const calculateOverlap = (start: number, end: number, limitStart: number, limitEnd: number) => {
-          if (!limitStart || !limitEnd || limitStart >= limitEnd) return 0;
-          // Clamp to window
-          const s = Math.max(start, limitStart);
-          const e = Math.min(end, limitEnd);
-          if (s >= e) return 0;
-          
-          // Floor to minutes as per policy
-          const sFl = Math.floor(s / 60000) * 60000;
-          const eFl = Math.floor(e / 60000) * 60000;
-          return Math.max(0, eFl - sFl);
-      };
-
       sessions.forEach(session => {
           if (!session.out) return;
 
-          let am = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.amIn, localSchedule.amOut);
-          let pm = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.pmIn, localSchedule.pmOut);
-          const ot = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.otStart, localSchedule.otEnd);
+          const { am, pm, ot } = calculateShiftDurations(session.in.timestamp, session.out.timestamp, dailySchedule);
           
-          // Fallback: If session strictly encloses the AM window but overlap returned 0 (e.g. due to minor boundary mismatch), force full AM credit.
-          if (am === 0 && localSchedule.amIn && localSchedule.amOut) {
-             if (session.in.timestamp <= localSchedule.amIn && session.out.timestamp >= localSchedule.amOut) {
-                am = localSchedule.amOut - localSchedule.amIn;
-             }
-          }
-
-          // If a single session spans across Morning and Afternoon (e.g. AM IN -> PM OUT),
-          // it means the student failed to clock out for lunch and clock in for PM.
-          // In this case, we only credit the Morning hours and invalidating the PM hours.
-          if (am > 0 && pm > 0) {
-            pm = 0;
-          }
-
           const sessionDuration = am + pm + ot;
           dayTotalMs += sessionDuration;
 

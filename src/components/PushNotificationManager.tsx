@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 
 export default function PushNotificationManager() {
   const isSubscribing = useRef(false);
+  const lastSubscribedId = useRef<string | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("Notification" in window)) return;
@@ -20,12 +21,10 @@ export default function PushNotificationManager() {
     }
 
     // 2. Poll for login status (idnumber in localStorage)
-    // Since we don't use Supabase Auth for sessions, we check localStorage
     const interval = setInterval(() => {
       if (Notification.permission === "granted") {
         checkAndSubscribe();
       } else if (Notification.permission === "default" && localStorage.getItem("idnumber")) {
-         // If user logged in but permission is still default, ask again
          Notification.requestPermission().then(perm => {
              if (perm === "granted") checkAndSubscribe();
          });
@@ -40,76 +39,46 @@ export default function PushNotificationManager() {
     if (!("serviceWorker" in navigator)) return;
 
     const idnumber = localStorage.getItem("idnumber");
-    // If not logged in, we can't associate subscription, so skip
-    if (!idnumber) return;
+    if (!idnumber) {
+        lastSubscribedId.current = null;
+        return;
+    }
 
-    // Check if already marked as subscribed in this session to avoid spamming API
-    // We can use a session storage flag or just rely on getSubscription
+    // If we already subscribed for this user in this session, skip
+    if (lastSubscribedId.current === idnumber) return;
+
     try {
       isSubscribing.current = true;
       const reg = await navigator.serviceWorker.ready;
       
-      // Check existing subscription
       const existingSub = await reg.pushManager.getSubscription();
       
       const res = await fetch("/api/push/public-key");
-      if (!res.ok) {
-        let errorPayload: unknown = null;
-        try {
-          errorPayload = await res.json();
-        } catch {
-        }
-        const message =
-          errorPayload &&
-          typeof errorPayload === "object" &&
-          "error" in errorPayload &&
-          typeof (errorPayload as { error: unknown }).error === "string"
-            ? (errorPayload as { error: string }).error
-            : null;
-        if (message === "VAPID keys not configured") {
-          console.warn(
-            "Push notifications are disabled because VAPID keys are not configured on the server."
-          );
-          return;
-        }
-        console.error("Failed to fetch public key:", message || res.statusText);
-        return;
-      }
+      if (!res.ok) return; // Silent fail
+
       const { publicKey } = await res.json();
-      if (!publicKey) {
-        console.warn("Push notifications are disabled because no public key is available.");
-        return;
-      }
+      if (!publicKey) return;
 
       let sub = existingSub;
       
       if (!sub) {
-        // Subscribe
         const convertedKey = urlBase64ToUint8Array(publicKey);
         sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: convertedKey
         });
-      } else {
-        // Verify if the existing subscription uses the same key (optional, but good practice)
-        // For now, just assume it's valid and re-send to backend to ensure it's linked to current user
       }
 
       if (sub) {
-        // Send to backend to link with user
         await fetch("/api/push/subscribe", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ idnumber, subscription: sub })
         });
+        lastSubscribedId.current = idnumber;
       }
-    } catch (e: unknown) {
-      const error = e as Error;
-      if (error.name === "AbortError" || error.message.includes("push service not available")) {
-        console.warn("Push notifications are not supported or available in this environment.");
-        return;
-      }
-      console.error("Push subscription error:", error);
+    } catch (e) {
+      console.error("Push subscription error:", e);
     } finally {
       isSubscribing.current = false;
     }

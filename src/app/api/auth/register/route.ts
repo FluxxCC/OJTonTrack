@@ -16,32 +16,68 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
-    // Check if user exists
-    const { data: existing } = await admin
-      .from("users")
-      .select("id")
-      .or(`idnumber.eq.${idnumber},email.eq.${email}`)
-      .single();
-
-    if (existing) {
-      return NextResponse.json({ error: "User with this ID number or Email already exists" }, { status: 409 });
-    }
-
-    // Get course and section names for the legacy text columns (optional but good for consistency)
+    // Get course and section names first (needed for both new insert and reuse update)
     const { data: courseData } = await admin.from("courses").select("name").eq("id", courseId).single();
     const { data: sectionData } = await admin.from("sections").select("name").eq("id", sectionId).single();
 
     const courseName = courseData?.name || "";
     const sectionName = sectionData?.name || "";
 
-    // Insert user
+    // Check if user exists
+    const { data: existing } = await admin
+      .from("users")
+      .select("id, signup_status")
+      .or(`idnumber.eq.${idnumber},email.eq.${email}`)
+      .single();
+
+    if (existing) {
+      // Logic for existing users
+      if (existing.signup_status === 'APPROVED') {
+        return NextResponse.json({ error: "Account already exists and is approved." }, { status: 409 });
+      } else if (existing.signup_status === 'PENDING') {
+        return NextResponse.json({ error: "Account application is still under review." }, { status: 409 });
+      } else if (existing.signup_status === 'REJECTED') {
+        // Reuse rejected account
+        const { error: updateError } = await admin.from("users").update({
+          signup_status: 'PENDING',
+          // rejection_reason: null, // Column removed/not in schema
+          // rejected_at: null,      // Column removed/not in schema
+          password: password,
+          firstname: firstname,
+          lastname: lastname,
+          course: courseName,
+          section: sectionName,
+          updated_at: new Date().toISOString()
+        }).eq('id', existing.id);
+
+        if (updateError) {
+          return NextResponse.json({ error: updateError.message }, { status: 500 });
+        }
+
+        // Reset relations
+        await admin.from("user_courses").delete().eq('user_id', existing.id);
+        await admin.from("user_sections").delete().eq('user_id', existing.id);
+
+        if (courseId) {
+          await admin.from("user_courses").insert({ user_id: existing.id, course_id: courseId });
+        }
+        if (sectionId) {
+          await admin.from("user_sections").insert({ user_id: existing.id, section_id: sectionId });
+        }
+
+        return NextResponse.json({ success: true, message: "Application resubmitted successfully.", user: { id: existing.id, idnumber } });
+      } else {
+        // Default fall-through for unknown status (treat as exists)
+        return NextResponse.json({ error: "User with this ID number or Email already exists" }, { status: 409 });
+      }
+    }
+
+    // Insert new user
     // forcing role='student' and signup_status='PENDING'
     const { data: user, error } = await admin.from("users").insert({
       idnumber,
       email,
-      password, // In a real app, hash this! But based on api/users, it seems plain text or pre-hashed? 
-                // Wait, api/users takes password as is. I'll assume the system handles it or it's plain text for this prototype.
-                // Checking login route, it compares directly.
+      password, 
       role: 'student',
       firstname,
       lastname,

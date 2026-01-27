@@ -20,6 +20,18 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     if (body?.[f] !== undefined) updates[f] = body[f];
   }
 
+  // Handle specific logic for REJECTED status
+  // Note: rejection_reason and rejected_at columns might not exist in the schema yet,
+  // so we rely on audit logs and emails for tracking rejection details.
+  /*
+  if (updates.signup_status === 'REJECTED') {
+    if (body.rejectionNote) {
+      updates.rejection_reason = body.rejectionNote;
+    }
+    updates.rejected_at = new Date().toISOString();
+  }
+  */
+
   if (Object.keys(updates).length > 0) {
     const { error } = await admin.from("users").update(updates).eq("id", id);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -108,14 +120,15 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
             <p><a href="${appUrl}">Login here</a></p>
             <p>Approved by: ${actorName}</p>
           `;
-          await sendTransactionalEmail({
+          // Non-blocking email sending
+          sendTransactionalEmail({
             to: email,
             subject: "Your OJTonTrack Account Has Been Approved",
             html,
             emailType: "APPLICATION_APPROVED",
             userId: userId ?? null,
             triggeredBy: String(body.actorId),
-          });
+          }).catch(err => console.error("Failed to send approval email:", err));
         }
 
         if (prevStatus !== newStatus && newStatus === "REJECTED") {
@@ -141,14 +154,14 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
             <p><strong>Next steps:</strong> ${nextAction}</p>
           `;
 
-          await sendTransactionalEmail({
+          sendTransactionalEmail({
             to: email,
             subject: "Your OJTonTrack Application Requires Action",
             html,
             emailType: "APPLICATION_REJECTED",
             userId: userId ?? null,
             triggeredBy: String(body.actorId),
-          });
+          }).catch(err => console.error("Failed to send rejection email:", err));
         }
 
         if (body.password && typeof body.password === "string" && body.password.trim()) {
@@ -159,14 +172,14 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
             <p>If you suspect any unauthorized access, contact your coordinator or the system administrator immediately.</p>
           `;
 
-          await sendTransactionalEmail({
+          sendTransactionalEmail({
             to: email,
             subject: "Your OJTonTrack Password Has Been Changed",
             html,
             emailType: "PASSWORD_CHANGED",
             userId: userId ?? null,
             triggeredBy: String(body.actorId),
-          });
+          }).catch(err => console.error("Failed to send password change email:", err));
         }
       }
     } catch (e) {

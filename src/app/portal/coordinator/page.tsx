@@ -26,6 +26,7 @@ import {
   Section,
   AssignSupervisorView
 } from "./ui";
+import { supabase } from "@/lib/supabaseClient";
 
 export default function CoordinatorPage() {
   const router = useRouter();
@@ -87,7 +88,7 @@ export default function CoordinatorPage() {
   const fetchUsers = async () => {
     try {
       setLoading(true);
-      const res = await fetch("/api/users");
+      const res = await fetch("/api/users?limit=2000");
       const data = await res.json();
       if (data.users) setUsers(data.users);
     } catch (error) {
@@ -158,6 +159,36 @@ export default function CoordinatorPage() {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleVisibilityChange);
+    };
+  }, []);
+
+  // Real-time listener for instructor approval status
+  useEffect(() => {
+    if (!supabase) return;
+
+    const channel = supabase
+      .channel('instructor_approval_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'instructor_approval_status'
+        },
+        (payload) => {
+          if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+             const { idnumber, allowed } = payload.new as { idnumber: string, allowed: boolean };
+             setInstructorApprovalStatuses(prev => ({
+               ...prev,
+               [idnumber]: allowed
+             }));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase?.removeChannel(channel);
     };
   }, []);
 

@@ -36,74 +36,6 @@ const DashboardView = dynamic(() => import('./ui').then(mod => mod.DashboardView
 function SupervisorContent() {
   const router = useRouter();
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
-  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
-
-  useEffect(() => {
-    if (typeof window !== 'undefined' && 'Notification' in window) {
-      setNotificationPermission(Notification.permission);
-    }
-  }, []);
-
-  const requestNotificationPermission = async () => {
-    if (!('Notification' in window)) return;
-    const permission = await Notification.requestPermission();
-    setNotificationPermission(permission);
-    if (permission === 'granted') {
-       try {
-         if ('serviceWorker' in navigator) {
-           const reg = await navigator.serviceWorker.ready;
-           const res = await fetch('/api/push/public-key');
-           const { publicKey } = await res.json();
-           const existing = await reg.pushManager.getSubscription();
-           const sub = existing || await reg.pushManager.subscribe({
-             userVisibleOnly: true,
-             applicationServerKey: (() => {
-               const padding = '='.repeat((4 - (publicKey.length % 4)) % 4);
-               const base64Safe = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
-               const rawData = atob(base64Safe);
-               const outputArray = new Uint8Array(rawData.length);
-               for (let i = 0; i < rawData.length; ++i) {
-                 outputArray[i] = rawData.charCodeAt(i);
-               }
-               return outputArray;
-             })()
-           });
-           let idnum = myIdnumber;
-           if (!idnum) {
-             try { idnum = localStorage.getItem("idnumber") || ""; } catch {}
-           }
-           if (!idnum) {
-             reg.showNotification("Notifications Enabled", {
-               body: "Sign in detected. Please reload to finalize subscription.",
-               icon: '/icons-192.png'
-             });
-           } else {
-             await fetch('/api/push/subscribe', {
-               method: 'POST',
-               headers: { 'Content-Type': 'application/json' },
-               body: JSON.stringify({ idnumber: idnum, subscription: sub })
-             });
-             reg.showNotification("Notifications Enabled", {
-               body: "You will now receive updates across devices.",
-               icon: '/icons-192.png'
-             });
-           }
-         } else {
-           new Notification("Notifications Enabled", {
-             body: "You will now receive updates across devices.",
-             icon: '/icons-192.png'
-           });
-         }
-       } catch {}
-    }
-  };
-
-  useEffect(() => {
-    // Auto-request permission on mount
-    if ('Notification' in window && Notification.permission === 'default') {
-      requestNotificationPermission();
-    }
-  }, []);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -170,44 +102,6 @@ function SupervisorContent() {
       if (stored) setMyIdnumber(stored.trim());
     } catch {}
   }, []);
-  
-  useEffect(() => {
-    const ensurePushSubscription = async () => {
-      if (!('serviceWorker' in navigator)) return;
-      try {
-        const reg = await navigator.serviceWorker.ready;
-        const res = await fetch('/api/push/public-key');
-        const { publicKey } = await res.json();
-        const existing = await reg.pushManager.getSubscription();
-        const sub = existing || await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: (() => {
-            const padding = '='.repeat((4 - (publicKey.length % 4)) % 4);
-            const base64Safe = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
-            const rawData = atob(base64Safe);
-            const outputArray = new Uint8Array(rawData.length);
-            for (let i = 0; i < rawData.length; ++i) {
-              outputArray[i] = rawData.charCodeAt(i);
-            }
-            return outputArray;
-          })()
-        });
-        let idnum = myIdnumber;
-        if (!idnum) {
-          try { idnum = localStorage.getItem("idnumber") || ""; } catch {}
-        }
-        if (!idnum) return;
-        await fetch('/api/push/subscribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ idnumber: idnum, subscription: sub })
-        });
-      } catch {}
-    };
-    if (notificationPermission === 'granted') {
-      ensurePushSubscription();
-    }
-  }, [notificationPermission, myIdnumber]);
 
   useEffect(() => {
     let cancelled = false;
@@ -333,33 +227,6 @@ function SupervisorContent() {
                   body: JSON.stringify({ idnumber: myIdnumber, message, origin: window.location.origin })
                 }).catch(() => {});
              } catch {}
-
-             // 2. Browser Notification Logic
-             if (Notification.permission === 'granted') {
-                 if ('serviceWorker' in navigator) {
-                    try {
-                      const reg = await navigator.serviceWorker.ready;
-                      reg.showNotification(`Attendance Update`, {
-                         body: message,
-                         icon: '/icons-192.png',
-                         tag: 'attendance-update',
-                         data: { url: '/portal/supervisor?tab=dashboard' }
-                      });
-                    } catch (e: any) { 
-                      if (e.name !== 'AbortError') console.error(e); 
-                    }
-                 } else {
-                    try {
-                      // @ts-ignore
-                      new Notification(`Attendance Update`, {
-                         body: message,
-                         icon: '/icons-192.png'
-                      });
-                    } catch (e: any) { 
-                      if (e.name !== 'AbortError') console.error(e); 
-                    }
-                 }
-             }
 
              if (String(row!.status).trim() === 'Pending') {
                setPendingApprovalsCount(c => c + 1);
@@ -494,20 +361,22 @@ function SupervisorContent() {
   const fetchSupervisorData = async () => {
       if (!myIdnumber) return;
       try {
-        const res = await fetch("/api/users", { cache: "no-store" });
-        const json = await res.json();
-        if (Array.isArray(json.users)) {
-          // Get Me
-          const myself = (json.users as User[]).find(u => String(u.idnumber) === String(myIdnumber));
-          setMe(myself || null);
-          if (myself) {
-            setSupervisorInfo({ company: myself.company, location: myself.location });
-          }
+        // Fetch Me
+        const resMe = await fetch(`/api/users?idnumber=${encodeURIComponent(myIdnumber)}`, { cache: "no-store" });
+        const jsonMe = await resMe.json();
+        if (jsonMe.users && jsonMe.users.length > 0) {
+           const myself = jsonMe.users[0];
+           setMe(myself);
+           setSupervisorInfo({ company: myself.company, location: myself.location });
+        }
 
-          // Get Assigned Students
-          const assigned = json.users.filter((u: User) => String(u.role).toLowerCase() === "student" && String(u.supervisorid || "").trim() === String(myIdnumber).trim());
-          console.log(`[Supervisor] Loaded ${assigned.length} students for supervisor ${myIdnumber}`);
-          setStudents(assigned);
+        // Fetch Assigned Students
+        const resStudents = await fetch(`/api/users?supervisor_id=${encodeURIComponent(myIdnumber)}&role=student&limit=10000`, { cache: "no-store" });
+        const jsonStudents = await resStudents.json();
+        
+        if (Array.isArray(jsonStudents.users)) {
+          console.log(`[Supervisor] Loaded ${jsonStudents.users.length} students for supervisor ${myIdnumber}`);
+          setStudents(jsonStudents.users);
         }
       } catch (e) { console.error(e); }
   };
@@ -718,7 +587,7 @@ function SupervisorContent() {
                 }}
               />
             )}
-            {activeTab === 'schedule' && <SetOfficialTimeView students={students} />}
+            {activeTab === 'schedule' && <SetOfficialTimeView students={students} myIdnumber={myIdnumber} />}
             {activeTab === 'profile' && <ProfileView user={me} />}
           </div>
         </main>

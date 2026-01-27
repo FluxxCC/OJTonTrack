@@ -25,24 +25,10 @@ import {
   ReportEntry,
   User
 } from "./ui";
+import { calculateSessionDuration, determineShift, ShiftSchedule, buildSchedule, normalizeTimeString, timeStringToMinutes, formatHours, calculateShiftDurations } from "@/lib/attendance";
 import Link from "next/link";
 
-function normalizeTimeString(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const parts = String(raw).split(":");
-  if (parts.length < 2) return null;
-  const h = parts[0]?.padStart(2, "0");
-  const m = parts[1]?.padStart(2, "0");
-  if (!h || !m) return null;
-  return `${h}:${m}`;
-}
 
-function timeStringToMinutes(raw: string | null | undefined): number {
-  const t = normalizeTimeString(raw);
-  if (!t) return 0;
-  const [h, m] = t.split(":").map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
 
 type ServerAttendanceEntry = { 
   id: number;
@@ -114,84 +100,16 @@ function StudentPage() {
   const [reports, setReports] = useState<ReportEntry[]>([]);
   const [drafts, setDrafts] = useState<ReportEntry[]>([]);
   const [targetHours, setTargetHours] = useState<number>(486);
+  const [schedule, setSchedule] = useState<StoredSchedule | null>(null);
+  const [dbSchedule, setDbSchedule] = useState<any>(null);
+  const [studentSchedule, setStudentSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
+  const [dateOverrides, setDateOverrides] = useState<Record<string, any>>({});
   const [courseDeadlines, setCourseDeadlines] = useState<Record<string, Record<number, string>>>({});
-  const [dbSchedule, setDbSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
-  const [schedule, setSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   
   // PWA Install
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
-  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
-
-  useEffect(() => {
-    if (typeof window !== 'undefined' && 'Notification' in window) {
-      setNotificationPermission(Notification.permission);
-    }
-  }, []);
-
-  const requestNotificationPermission = async () => {
-    if (!('Notification' in window)) return;
-    const permission = await Notification.requestPermission();
-    setNotificationPermission(permission);
-    if (permission === 'granted') {
-       try {
-         if ('serviceWorker' in navigator) {
-           const reg = await navigator.serviceWorker.ready;
-           const res = await fetch('/api/push/public-key');
-           const { publicKey } = await res.json();
-           const existing = await reg.pushManager.getSubscription();
-           const sub = existing || await reg.pushManager.subscribe({
-             userVisibleOnly: true,
-             applicationServerKey: (() => {
-               const padding = '='.repeat((4 - (publicKey.length % 4)) % 4);
-               const base64Safe = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
-               const rawData = atob(base64Safe);
-               const outputArray = new Uint8Array(rawData.length);
-               for (let i = 0; i < rawData.length; ++i) {
-                 outputArray[i] = rawData.charCodeAt(i);
-               }
-               return outputArray;
-             })()
-           });
-           
-           if (idnumber) {
-             await fetch('/api/push/subscribe', {
-               method: 'POST',
-               headers: { 'Content-Type': 'application/json' },
-               body: JSON.stringify({ idnumber, subscription: sub })
-             });
-             
-             if (!existing) {
-                try {
-                  reg.showNotification("Notifications Enabled", {
-                    body: "You will now receive updates even when the app is closed.",
-                    icon: '/icons-192.png'
-                  });
-                } catch {
-                  new Notification("Notifications Enabled", {
-                    body: "You will now receive updates even when the app is closed.",
-                    icon: '/icons-192.png'
-                  });
-                }
-             }
-           }
-         }
-       } catch (e: any) {
-         if (e.name === 'AbortError' || e.message?.includes('push service not available')) {
-            // Suppress specific AbortError from browser when push service is unavailable
-            return;
-         }
-         console.error("Push subscription failed", e);
-       }
-    }
-  };
-
-  useEffect(() => {
-    if (notificationPermission === 'granted' && idnumber) {
-      requestNotificationPermission();
-    }
-  }, [notificationPermission, idnumber]);
 
   useEffect(() => {
     const intervalId = setInterval(() => {
@@ -246,6 +164,7 @@ function StudentPage() {
             photoDataUrl: e.photourl,
             status,
             approvedAt: approvedAtNum,
+            validated_by: e.validated_by,
           };
         }) as AttendanceEntry[];
         setAttendance(mapped);
@@ -254,15 +173,24 @@ function StudentPage() {
 
     try {
       // Fetch User Info
-      const uRes = await fetch("/api/users", { cache: "no-store" });
+      const uRes = await fetch(`/api/users?idnumber=${encodeURIComponent(idnumber)}`, { cache: "no-store" });
       const uJson = await uRes.json();
-      if (Array.isArray(uJson.users)) {
-        const me = uJson.users.find((u: User) => String(u.idnumber) === String(idnumber) && String(u.role).toLowerCase() === "student");
-        if (me) {
+      if (Array.isArray(uJson.users) && uJson.users.length > 0) {
+        const me = uJson.users[0];
+        if (String(me.role).toLowerCase() === "student") {
           setStudent(me);
           if (me.supervisorid) {
-            const sup = uJson.users.find((u: User) => u.idnumber === me.supervisorid && u.role === "supervisor");
-            setSupervisor(sup || null);
+             // Fetch Supervisor
+             try {
+               const supRes = await fetch(`/api/users?idnumber=${encodeURIComponent(me.supervisorid)}`, { cache: "no-store" });
+               const supJson = await supRes.json();
+               if (Array.isArray(supJson.users) && supJson.users.length > 0) {
+                 const sup = supJson.users[0];
+                 if (String(sup.role).toLowerCase() === "supervisor") {
+                   setSupervisor(sup);
+                 }
+               }
+             } catch {}
           } else {
             setSupervisor(null);
           }
@@ -327,6 +255,52 @@ function StudentPage() {
     return () => clearInterval(iv);
   }, [idnumber]);
 
+  // Fetch Student Specific Schedule and Overrides
+  useEffect(() => {
+      const fetchExtraSchedules = async () => {
+          if (!idnumber || !supabase) return;
+          
+          // 1. Fetch Student Shift Schedule
+          const { data } = await supabase
+              .from('student_shift_schedules')
+              .select('*')
+              .eq('student_id', idnumber)
+              .single();
+          
+          if (data) {
+              setStudentSchedule({
+                  amIn: data.am_in,
+                  amOut: data.am_out,
+                  pmIn: data.pm_in,
+                  pmOut: data.pm_out,
+                  otIn: data.ot_in,
+                  otOut: data.ot_out
+              });
+          } else {
+              setStudentSchedule(null);
+          }
+
+          // 2. Fetch Date Overrides (if supervisor exists)
+          if (student?.supervisorid) {
+              try {
+                  const res = await fetch(`/api/shifts/overrides?supervisor_id=${encodeURIComponent(student.supervisorid)}`);
+                  const json = await res.json();
+                  const map: Record<string, any> = {};
+                  if (json.overrides) {
+                      json.overrides.forEach((o: any) => {
+                          map[o.date] = o;
+                      });
+                  }
+                  setDateOverrides(map);
+              } catch (e) {
+                  console.error("Failed to fetch overrides", e);
+              }
+          }
+      };
+      
+      fetchExtraSchedules();
+  }, [idnumber, student?.supervisorid]);
+
   // Realtime Subscription
   useEffect(() => {
     if (!idnumber || !supabase) return;
@@ -375,13 +349,30 @@ function StudentPage() {
     return () => window.removeEventListener("resize", update);
   }, []);
 
-  const formatHours = (ms: number) => {
-    if (!ms) return "0h 0m";
-    const totalSeconds = Math.floor(ms / 1000);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    return `${hours}h ${minutes}m`;
-  };
+
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!student?.supervisorid) return;
+        const res = await fetch(`/api/shifts/overrides?supervisor_id=${encodeURIComponent(student.supervisorid)}`);
+        const json = await res.json();
+        if (cancelled) return;
+        
+        const map: Record<string, any> = {};
+        if (json.overrides) {
+            json.overrides.forEach((o: any) => {
+                map[o.date] = o;
+            });
+        }
+        setDateOverrides(map);
+      } catch (e) {
+        console.error("Failed to fetch overrides", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [student?.supervisorid]);
 
   useEffect(() => {
     let cancelled = false;
@@ -391,7 +382,7 @@ function StudentPage() {
 
         if (typeof window !== "undefined") {
           const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
-          const saved = localStorage.getItem(key) || localStorage.getItem("schedule_default");
+          const saved = localStorage.getItem(key);
           if (saved) {
             const parsed = JSON.parse(saved) as StoredSchedule;
             fromLocal = parsed;
@@ -408,15 +399,28 @@ function StudentPage() {
             otOut: fromLocal.overtimeOut,
           };
           if (!cancelled) setSchedule(next);
-          return;
         }
 
-        const res = await fetch("/api/shifts", { cache: "no-store" });
+        // Wait for student profile to be loaded to get supervisor ID
+        if (!student && idnumber) {
+           // Small delay to allow student profile fetch
+           await new Promise(r => setTimeout(r, 1000));
+        }
+
+        const res = await fetch(`/api/shifts${student?.supervisorid ? `?supervisor_id=${encodeURIComponent(student.supervisorid)}` : ''}`, { cache: "no-store" });
         const json = await res.json();
         const rows = Array.isArray(json.shifts)
           ? json.shifts.filter((r: any) => r && (r.official_start || r.official_end))
           : [];
-        if (!rows.length) return;
+        if (!rows.length) {
+          setDbSchedule(null);
+          setSchedule(null);
+          if (typeof window !== "undefined") {
+            const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
+            localStorage.removeItem(key);
+          }
+          return;
+        }
 
         const sorted = rows
           .slice()
@@ -430,7 +434,7 @@ function StudentPage() {
         let pmRow = sorted[1] || sorted[0];
 
         const findByName = (match: (name: string) => boolean) =>
-          rows.find((r: any) => {
+          sorted.find((r: any) => {
             const n = String(r.shift_name || "").toLowerCase().trim();
             return match(n);
           });
@@ -488,11 +492,98 @@ function StudentPage() {
     return () => {
       cancelled = true;
     };
-  }, [idnumber]);
+  }, [idnumber, student]);
+
+  const processedAttendance = useMemo(() => {
+    const sorted = [...attendance].sort((a, b) => a.timestamp - b.timestamp);
+    const grouped = new Map<string, AttendanceEntry[]>();
+    sorted.forEach(entry => {
+      const d = new Date(entry.timestamp);
+      const key = d.toLocaleDateString();
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)!.push(entry);
+    });
+
+    const result: AttendanceEntry[] = [];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    grouped.forEach((dayEntries) => {
+        const dayDate = new Date(dayEntries[0].timestamp);
+        dayDate.setHours(0,0,0,0);
+        const isPastDate = dayDate < today;
+        const dateStr = dayDate.getFullYear() + "-" + String(dayDate.getMonth() + 1).padStart(2, '0') + "-" + String(dayDate.getDate()).padStart(2, '0');
+        
+        const baseConfig = studentSchedule || dbSchedule || schedule || {
+             amIn: "08:00", amOut: "12:00",
+             pmIn: "13:00", pmOut: "17:00",
+             otIn: "17:00", otOut: "18:00"
+        };
+
+        const override = dateOverrides[dateStr];
+        const effSchedule = override ? {
+             amIn: override.am?.start || baseConfig.amIn,
+             amOut: override.am?.end || baseConfig.amOut,
+             pmIn: override.pm?.start || baseConfig.pmIn,
+             pmOut: override.pm?.end || baseConfig.pmOut,
+             otIn: baseConfig.otIn,
+             otOut: baseConfig.otOut
+        } : baseConfig;
+        
+        let currentIn: AttendanceEntry | null = null;
+        
+        for (const entry of dayEntries) {
+            if (entry.status === "Rejected") continue;
+            if (entry.type === 'in') {
+                if (currentIn) {
+                    result.push(currentIn);
+                }
+                currentIn = entry;
+            } else {
+                if (currentIn) {
+                    result.push(currentIn);
+                    result.push(entry);
+                    currentIn = null;
+                } else {
+                    result.push(entry);
+                }
+            }
+        }
+
+        if (currentIn) {
+            result.push(currentIn);
+            if (isPastDate && effSchedule) {
+                 const scheduleObj = buildSchedule(dayDate, effSchedule);
+                 const shift = determineShift(currentIn.timestamp, scheduleObj);
+                 
+                 let outTs = 0;
+                 if (shift === 'am') outTs = scheduleObj.amOut;
+                 else if (shift === 'pm') outTs = scheduleObj.pmOut;
+                 else if (shift === 'ot') outTs = scheduleObj.otEnd;
+                 
+                 if (outTs) {
+                     if (outTs <= currentIn.timestamp) outTs = currentIn.timestamp + 60000;
+                     
+                     result.push({
+                         id: -(currentIn.id || Math.floor(Math.random() * 1000000)),
+                         type: 'out',
+                         timestamp: outTs,
+                         photoDataUrl: '',
+                         status: 'Pending',
+                         validated_by: 'AUTO TIME OUT',
+                         approvedAt: undefined
+                     } as AttendanceEntry);
+                 }
+            }
+        }
+    });
+    
+    return result.sort((a, b) => a.timestamp - b.timestamp);
+  }, [attendance, dbSchedule, schedule, now]);
 
   const hoursAgg = useMemo(() => {
     const grouped = new Map<string, { date: Date; logs: AttendanceEntry[] }>();
-    attendance.forEach(log => {
+    processedAttendance.forEach(log => {
       const d = new Date(log.timestamp);
       const key = d.toLocaleDateString();
       if (!grouped.has(key)) grouped.set(key, { date: d, logs: [] });
@@ -508,7 +599,22 @@ function StudentPage() {
     sortedDays.forEach((day, index) => {
       const dayLogs = day.logs.slice().sort((a, b) => a.timestamp - b.timestamp);
 
-      const effectiveSchedule = dbSchedule || schedule;
+      const dateStr = day.date.getFullYear() + "-" + String(day.date.getMonth() + 1).padStart(2, '0') + "-" + String(day.date.getDate()).padStart(2, '0');
+      const baseConfig = dbSchedule || schedule || {
+            amIn: "08:00", amOut: "12:00",
+            pmIn: "13:00", pmOut: "17:00",
+            otIn: "17:00", otOut: "18:00"
+      };
+      const override = dateOverrides[dateStr];
+      const effectiveSchedule = override ? {
+             amIn: override.am?.start || baseConfig.amIn,
+             amOut: override.am?.end || baseConfig.amOut,
+             pmIn: override.pm?.start || baseConfig.pmIn,
+             pmOut: override.pm?.end || baseConfig.pmOut,
+             otIn: baseConfig.otIn,
+             otOut: baseConfig.otOut
+      } : baseConfig;
+
       let dayTotalMs = 0;
       let dayValidatedMs = 0;
 
@@ -539,99 +645,51 @@ function StudentPage() {
         
       } else {
         const baseDate = new Date(day.date);
-        baseDate.setHours(0, 0, 0, 0);
-
-        const buildShift = (timeStr: string | undefined) => {
-          if (!timeStr) return null;
-          const [h, m] = timeStr.split(":").map(Number);
-          const d = new Date(baseDate.getTime());
-          d.setHours(h || 0, m || 0, 0, 0);
-          return d.getTime();
-        };
-
-        const amInMs = buildShift(effectiveSchedule.amIn);
-        const amOutMs = buildShift(effectiveSchedule.amOut);
-        const pmInMs = buildShift(effectiveSchedule.pmIn);
-        const pmOutMs = buildShift(effectiveSchedule.pmOut);
-        const otInMs = buildShift(effectiveSchedule.otIn);
-        const otOutMs = buildShift(effectiveSchedule.otOut);
-
-        const localSchedule = {
-            amIn: amInMs || 0,
-            amOut: amOutMs || 0,
-            pmIn: pmInMs || 0,
-            pmOut: pmOutMs || 0,
-            otStart: otInMs || 0,
-            otEnd: otOutMs || 0,
-        };
+        // Use centralized schedule builder
+        const schedule = buildSchedule(baseDate, effectiveSchedule);
 
         type Session = { in: AttendanceEntry; out: AttendanceEntry | null };
         const sessions: Session[] = [];
+        
         let currentIn: AttendanceEntry | null = null;
-
         dayLogs.forEach(log => {
-            if (log.status === "Rejected") return;
-
-            if (log.type === "in") {
-                if (currentIn) {
-                     sessions.push({ in: currentIn, out: null });
-                }
-                currentIn = log;
-            } else if (log.type === "out") {
-                if (currentIn) {
-                    sessions.push({ in: currentIn, out: log });
-                    currentIn = null;
-                }
-            }
+          if (log.type === 'in') {
+            currentIn = log;
+          } else if (log.type === 'out' && currentIn) {
+            sessions.push({ in: currentIn, out: log });
+            currentIn = null;
+          }
         });
-        if (currentIn) {
-            sessions.push({ in: currentIn, out: null });
-        }
 
-        const calculateOverlap = (start: number, end: number, limitStart: number, limitEnd: number) => {
-            if (!limitStart || !limitEnd || limitStart >= limitEnd) return 0;
-            const s = Math.max(start, limitStart);
-            const e = Math.min(end, limitEnd);
-            if (s >= e) return 0;
-            const sFl = Math.floor(s / 60000) * 60000;
-            const eFl = Math.floor(e / 60000) * 60000;
-            return Math.max(0, eFl - sFl);
-        };
-
+        // Calculate duration for each session using centralized logic
         sessions.forEach(session => {
-            if (!session.out) return;
+            const inTime = session.in.timestamp;
+            const outTime = session.out ? session.out.timestamp : 0;
+            if (!outTime) return;
 
-            let am = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.amIn, localSchedule.amOut);
-            let pm = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.pmIn, localSchedule.pmOut);
-            const ot = calculateOverlap(session.in.timestamp, session.out.timestamp, localSchedule.otStart, localSchedule.otEnd);
+            // AM Shift
+            dayTotalMs += calculateSessionDuration(inTime, outTime, 'am', schedule);
             
-            // Fallback: If session strictly encloses the AM window but overlap returned 0 (e.g. due to minor boundary mismatch), force full AM credit.
-            if (am === 0 && localSchedule.amIn && localSchedule.amOut) {
-                if (session.in.timestamp <= localSchedule.amIn && session.out.timestamp >= localSchedule.amOut) {
-                    am = localSchedule.amOut - localSchedule.amIn;
-                }
-            }
+            // PM Shift
+            dayTotalMs += calculateSessionDuration(inTime, outTime, 'pm', schedule);
+            
+            // OT Shift
+            dayTotalMs += calculateSessionDuration(inTime, outTime, 'ot', schedule);
 
-            // If a single session spans across Morning and Afternoon (e.g. AM IN -> PM OUT),
-            // it means the student failed to clock out for lunch and clock in for PM.
-            // In this case, we only credit the Morning hours and invalidating the PM hours.
-            if (am > 0 && pm > 0) {
-                pm = 0;
-            }
-
-            const sessionDuration = am + pm + ot;
-            dayTotalMs += sessionDuration;
-
-            const isInApproved = session.in.status === "Approved";
-            const isOutApproved = session.out.status === "Approved";
-            if (isInApproved && isOutApproved) {
-                dayValidatedMs += sessionDuration;
+            // Validated time (only if approved)
+            if (session.in.status === 'Approved' && session.out?.status === 'Approved') {
+                 // For validated time, we might want to use the same logic or just strict pair?
+                 // The user wants uniform logic.
+                 // But validated time usually means "official credited hours". 
+                 // If the logs are approved, they count. The clamping logic applies to the timestamps.
+                 // So we just re-calculate using the same function.
+                 dayValidatedMs += calculateSessionDuration(inTime, outTime, 'am', schedule);
+                 dayValidatedMs += calculateSessionDuration(inTime, outTime, 'pm', schedule);
+                 dayValidatedMs += calculateSessionDuration(inTime, outTime, 'ot', schedule);
             }
         });
 
-        // Uniform rounding for the day total
-        dayTotalMs = Math.round(dayTotalMs / 60000) * 60000;
-        dayValidatedMs = Math.round(dayValidatedMs / 60000) * 60000;
+
       }
 
       totalMsAll += dayTotalMs;
@@ -664,7 +722,7 @@ function StudentPage() {
       progress,
       recentRows,
     };
-  }, [attendance, targetHours, idnumber, schedule, dbSchedule, now]);
+  }, [attendance, targetHours, idnumber, schedule, dbSchedule, now, studentSchedule, dateOverrides]);
 
   const recentActivity = useMemo(() => {
     const att = attendance.map((e) => ({
@@ -897,6 +955,7 @@ function StudentPage() {
                   supervisorText={student?.supervisor_name || student?.supervisorid || "N/A"}
                   locationText={student?.location || "N/A"}
                   recentRows={hoursAgg.recentRows}
+                  now={now}
                 />
               )}
 
@@ -904,7 +963,7 @@ function StudentPage() {
                 <div className="space-y-6">
                   <LegacyAttendanceView
                     idnumber={idnumber}
-                    attendance={attendance}
+                    attendance={processedAttendance}
                     onUpdate={setAttendance}
                     supervisorId={student?.supervisorid}
                     studentName={

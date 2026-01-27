@@ -8,7 +8,8 @@ interface AttendanceEntry {
   photourl?: string;
   photoUrl?: string;
   status?: string;
-  validatedBy?: string;
+  validatedBy?: string | null;
+  validated_by?: string | null;
   validatedAt?: number;
 }
 
@@ -20,6 +21,7 @@ interface AttendanceDetailsModalProps {
 
 export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceDetailsModalProps) {
   const photoSrc = entry.photoDataUrl || entry.photourl || entry.photoUrl;
+  const isAutoTimeOut = entry.validated_by === 'SYSTEM_AUTO_CLOSE' || entry.validated_by === 'AUTO TIME OUT';
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
       <div className="relative w-full max-w-md md:max-w-lg max-h-[90vh] rounded-2xl bg-white shadow-2xl overflow-hidden flex flex-col animate-in fade-in zoom-in duration-200">
@@ -63,13 +65,17 @@ export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceD
 
             <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1">Status</label>
-              <div className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${
-                entry.status === 'Approved' ? 'bg-green-100 text-green-700' : 
-                entry.status === 'Rejected' ? 'bg-red-100 text-red-700' : 
-                'bg-yellow-100 text-yellow-700'
-              }`}>
-                {entry.status || "Pending"}
-              </div>
+              {(entry.validated_by === 'SYSTEM_AUTO_CLOSE' || entry.validated_by === 'AUTO TIME OUT') ? (
+                <span className="text-xs font-bold text-red-500">AUTO TIME OUT</span>
+              ) : (
+                <div className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                  entry.status === 'Approved' ? 'bg-green-100 text-green-700' : 
+                  entry.status === 'Rejected' ? 'bg-red-100 text-red-700' : 
+                  'bg-yellow-100 text-yellow-700'
+                }`}>
+                  {entry.status || "Pending"}
+                </div>
+              )}
             </div>
 
             <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
@@ -87,13 +93,22 @@ export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceD
             <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1">Time</label>
               <div className="font-semibold text-gray-900 text-xl font-mono">
-                {new Date(entry.timestamp).toLocaleTimeString(undefined, {
-                  hour: '2-digit',
-                  minute: '2-digit'
-                })}
+                {isAutoTimeOut ? (
+                  <span className="text-gray-400">--:--</span>
+                ) : (
+                  (() => {
+                    const d = new Date(entry.timestamp);
+                    const h = d.getHours();
+                    const m = d.getMinutes();
+                    const hh = h.toString().padStart(2, '0');
+                    const mm = m.toString().padStart(2, '0');
+                    return `${hh}:${mm}`;
+                  })()
+                )}
               </div>
             </div>
 
+            {(entry.validated_by === 'SYSTEM_AUTO_CLOSE' || entry.validated_by === 'AUTO TIME OUT') ? null : (
             <div
               className={`col-span-2 p-3 rounded-xl border flex items-center justify-between ${
                 entry.status === 'Approved'
@@ -129,12 +144,8 @@ export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceD
                     : 'Pending approval'}
                 </span>
               </div>
-              {entry.validatedAt && entry.status === 'Approved' && (
-                <span className="text-[11px] text-green-700">
-                  {new Date(entry.validatedAt).toLocaleString()}
-                </span>
-              )}
             </div>
+            )}
 
             {userName && (
                <div className="col-span-2 p-3 bg-gray-50 rounded-xl border border-gray-100">

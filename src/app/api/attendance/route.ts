@@ -38,7 +38,10 @@ export async function GET(req: Request) {
     const { data, error } = await query;
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-    const rows = (data || []).map((row: any) => ({ ...row }));
+    const rows = (data || []).map((row: any) => ({
+      ...row,
+      ts: Number(row.ts),
+    }));
 
     const byDay = new Map<string, any[]>();
     rows.forEach((row: any) => {
@@ -118,6 +121,7 @@ export async function POST(req: Request) {
     const photoDataUrl = String(body?.photoDataUrl || "");
     const manualTimestamp = body?.timestamp ? Number(body.timestamp) : null;
     const validatedBy = body?.validated_by ? String(body.validated_by).trim() : null;
+    const manualStatus = body?.status ? String(body.status).trim() : null;
 
     if (!idnumber || !["in", "out"].includes(type)) {
       return NextResponse.json({ error: "idnumber and type (in|out) are required" }, { status: 400 });
@@ -178,6 +182,15 @@ export async function POST(req: Request) {
     }
 
     const createdat = new Date().toISOString();
+    
+    let dbStatus = validatedBy ? "VALIDATED" : "RAW";
+    if (manualStatus) {
+        if (manualStatus === "Approved") dbStatus = "VALIDATED";
+        else if (manualStatus === "Rejected") dbStatus = "REJECTED";
+        else if (manualStatus === "Pending") dbStatus = "RAW";
+        else dbStatus = manualStatus;
+    }
+
     const payload = {
       idnumber,
       role: String(user.role || "student"),
@@ -186,7 +199,7 @@ export async function POST(req: Request) {
       ts,
       photourl,
       storage: photoDataUrl ? "cloudinary" : "manual",
-      status: validatedBy ? "VALIDATED" : "RAW",
+      status: dbStatus,
       validated_by: validatedBy,
       validated_at: validatedBy ? createdat : null,
       createdat,

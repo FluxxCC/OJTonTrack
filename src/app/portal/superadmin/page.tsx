@@ -255,8 +255,6 @@ export default function SuperAdminPage() {
 
              {activeTab === 'view-account' && (
                <UserManagementView
-                  users={users}
-                  loading={loading}
                   onDelete={deleteUser}
                   onEdit={saveEdit}
                   onAdd={addUser}
@@ -265,7 +263,7 @@ export default function SuperAdminPage() {
                 />
              )}
 
-             {activeTab === 'time-entry' && <TimeEntryView users={users} />}
+             {activeTab === 'time-entry' && <TimeEntryView />}
              
              {activeTab === 'system-logs' && <SystemLogsView />}
            </div>

@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { 
@@ -22,6 +22,7 @@ import {
   ShieldCheck
 } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
+import { calculateSessionDuration, determineShift, ShiftSchedule as LibShiftSchedule, buildSchedule, normalizeTimeString, timeStringToMinutes, formatHours, calculateShiftDurations } from "@/lib/attendance";
 
 // --- Types ---
 
@@ -57,22 +58,7 @@ type ShiftSchedule = {
   otOut?: string;
 };
 
-function normalizeTimeString(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const parts = raw.split(":");
-  if (parts.length < 2) return null;
-  const h = parts[0]?.padStart(2, "0");
-  const m = parts[1]?.padStart(2, "0");
-  if (!h || !m) return null;
-  return `${h}:${m}`;
-}
 
-function timeStringToMinutes(raw: string | null | undefined): number {
-  const t = normalizeTimeString(raw);
-  if (!t) return 0;
-  const [h, m] = t.split(":").map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
 
 type AdminAttendanceLog = {
   id: number;
@@ -81,6 +67,7 @@ type AdminAttendanceLog = {
   ts: number;
   photourl?: string | null;
   status?: string | null;
+  validated_by?: string | null;
 };
 
 function getLogStatus(entry?: { status?: string | null } | null): "Pending" | "Approved" | "Rejected" {
@@ -90,14 +77,16 @@ function getLogStatus(entry?: { status?: string | null } | null): "Pending" | "A
   return "Pending";
 }
 
-function formatLogStatusLabel(entry: { status?: string | null }): string {
+function formatLogStatusLabel(entry: { status?: string | null; validated_by?: string | null }): string {
+  if (entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") return "AUTO TIME OUT";
   const status = getLogStatus(entry);
   if (status === "Approved") return "Validated";
   if (status === "Rejected") return "Unvalidated";
   return "Pending";
 }
 
-function getLogStatusColorClass(entry?: { status?: string | null } | null): string {
+function getLogStatusColorClass(entry?: { status?: string | null; validated_by?: string | null } | null): string {
+  if (entry?.validated_by === "SYSTEM_AUTO_CLOSE" || entry?.validated_by === "AUTO TIME OUT") return "text-red-600";
   const status = getLogStatus(entry);
   if (status === "Approved") return "text-green-600";
   if (status === "Rejected") return "text-red-600";
@@ -314,56 +303,72 @@ export function EditTimeEntryModal({ entry, studentName, onClose, onSave }: { en
   );
 }
 
-export function TimeEntryView({ users }: { users: User[] }) {
-  const students = useMemo(() => users.filter(u => u.role === "student"), [users]);
+export function TimeEntryView() {
+  const [students, setStudents] = useState<User[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [limit] = useState(10);
+  const [totalPages, setTotalPages] = useState(0);
+
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedStudent, setSelectedStudent] = useState<User | null>(null);
   const [logs, setLogs] = useState<AdminAttendanceLog[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [logsLoading, setLogsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editingEntry, setEditingEntry] = useState<any>(null);
   const [schedule, setSchedule] = useState<ShiftSchedule | null>(null);
   const [courseFilter, setCourseFilter] = useState("");
   const [sectionFilter, setSectionFilter] = useState("");
+  const [availableCourses, setAvailableCourses] = useState<Course[]>([]);
+  const [availableSections, setAvailableSections] = useState<Section[]>([]);
 
-  const courseOptions = useMemo(() => {
-    const set = new Set<string>();
-    students.forEach((s) => {
-      if (s.course) set.add(s.course);
-    });
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [students]);
+  // Fetch metadata for filters
+  useEffect(() => {
+    fetch("/api/metadata")
+      .then(res => res.json())
+      .then(data => {
+        if (data.courses) setAvailableCourses(data.courses);
+        if (data.sections) setAvailableSections(data.sections);
+      })
+      .catch(console.error);
+  }, []);
 
-  const sectionOptions = useMemo(() => {
-    const set = new Set<string>();
-    students.forEach((s) => {
-      if (s.section) set.add(s.section);
-    });
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [students]);
+  const fetchStudents = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("page", String(page));
+      params.set("limit", String(limit));
+      params.set("role", "student");
+      if (searchQuery.trim()) params.set("search", searchQuery.trim());
+      if (courseFilter) params.set("course", courseFilter);
+      if (sectionFilter) params.set("section", sectionFilter);
 
-  const filteredStudents = useMemo(() => {
-    let result = students;
-    if (courseFilter) {
-      result = result.filter((s) => s.course === courseFilter);
+      const res = await fetch(`/api/users?${params.toString()}`);
+      const data = await res.json();
+      if (data.users) {
+        setStudents(data.users);
+        setTotal(data.total);
+        setTotalPages(data.totalPages);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
     }
-    if (sectionFilter) {
-      result = result.filter((s) => s.section === sectionFilter);
-    }
-    const q = searchQuery.toLowerCase().trim();
-    if (q) {
-      result = result.filter((s) => {
-        const name = s.name || [s.firstname, s.lastname].filter(Boolean).join(" ");
-        const courseSection = [s.course, s.section].filter(Boolean).join(" ");
-        return (
-          s.idnumber.toLowerCase().includes(q) ||
-          name.toLowerCase().includes(q) ||
-          courseSection.toLowerCase().includes(q)
-        );
-      });
-    }
-    return result;
-  }, [students, searchQuery, courseFilter, sectionFilter]);
+  }, [page, limit, searchQuery, courseFilter, sectionFilter]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchStudents();
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [fetchStudents]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, courseFilter, sectionFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -388,7 +393,7 @@ export function TimeEntryView({ users }: { users: User[] }) {
         let amRow = sorted[0];
         let pmRow = sorted[1] || sorted[0];
         const findByName = (match: (name: string) => boolean) =>
-          rows!.find((r) => {
+          sorted.find((r) => {
             const n = String(r.shift_name || "").toLowerCase().trim();
             return match(n);
           });
@@ -396,24 +401,20 @@ export function TimeEntryView({ users }: { users: User[] }) {
         const pmCandidate = findByName((n) => n.includes("pm") || n.includes("afternoon"));
         const otCandidate = findByName((n) => n === "overtime shift" || n === "overtime");
 
-        if (amCandidate && pmCandidate) {
-          amRow = amCandidate;
-          pmRow = pmCandidate;
-        }
-
         let finalOtRow = otCandidate;
-        if (finalOtRow && (finalOtRow === amRow || finalOtRow === pmRow)) {
+        if (finalOtRow && (finalOtRow === amCandidate || finalOtRow === pmCandidate)) {
           finalOtRow = undefined;
         }
 
-        const amInNorm = normalizeTimeString(amRow.official_start || "");
-        const amOutNorm = normalizeTimeString(amRow.official_end || "");
-        const pmInNorm = normalizeTimeString(pmRow.official_start || "");
-        const pmOutNorm = normalizeTimeString(pmRow.official_end || "");
-        const otInNorm = normalizeTimeString(finalOtRow?.official_start || "");
-        const otOutNorm = normalizeTimeString(finalOtRow?.official_end || "");
+        const amInNorm = normalizeTimeString(amCandidate?.official_start) || "09:00";
+        const amOutNorm = normalizeTimeString(amCandidate?.official_end) || "12:00";
+        const pmInNorm = normalizeTimeString(pmCandidate?.official_start) || "13:00";
+        const pmOutNorm = normalizeTimeString(pmCandidate?.official_end) || "17:00";
+        const otInNorm = undefined; // normalizeTimeString(finalOtRow?.official_start);
+        const otOutNorm = undefined; // normalizeTimeString(finalOtRow?.official_end);
 
-        if (!amInNorm || !amOutNorm || !pmInNorm || !pmOutNorm) return;
+        // Explicitly ignore global overtime shift from DB to prevent overcounting.
+        // Overtime must be authorized per student/day (dynamicOt).
 
         if (!cancelled) {
           setSchedule({
@@ -433,30 +434,38 @@ export function TimeEntryView({ users }: { users: User[] }) {
     };
   }, []);
 
-  const fetchStudentLogs = async (student: User) => {
+  const fetchStudentLogs = useCallback(async (student: User) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(student.idnumber)}&limit=200`);
+      console.log("Fetching logs for:", student.idnumber);
+      const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(student.idnumber.trim())}&limit=200`, {
+        cache: "no-store",
+        headers: { "Pragma": "no-cache" }
+      });
       const json = await res.json();
+      console.log("Logs response:", json);
       if (!res.ok) throw new Error(json.error || "Failed to fetch attendance");
       const entries = Array.isArray(json.entries) ? json.entries : [];
+      console.log("Entries count:", entries.length);
       setLogs(
         entries.map((e: any) => ({
           id: e.id,
           idnumber: e.idnumber,
           type: e.type,
-          ts: e.ts,
+          ts: Number(e.ts),
           photourl: e.photourl,
           status: e.status,
+          validated_by: e.validated_by,
         }))
       );
     } catch (e) {
+      console.error("Fetch logs error:", e);
       setError(e instanceof Error ? e.message : "Failed to fetch attendance");
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   const onSelectStudent = (student: User) => {
     setSelectedStudent(student);
@@ -469,13 +478,7 @@ export function TimeEntryView({ users }: { users: User[] }) {
     setError(null);
   };
 
-  const formatHours = (ms: number) => {
-    if (!ms) return "-";
-    const totalSeconds = Math.floor(ms / 1000);
-    const h = Math.floor(totalSeconds / 3600);
-    const m = Math.floor((totalSeconds % 3600) / 60);
-    return `${h}h ${m}m`;
-  };
+
 
   const formatTime = (ts: number) => {
     return new Date(ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
@@ -483,9 +486,10 @@ export function TimeEntryView({ users }: { users: User[] }) {
 
   const processedDays = useMemo(() => {
     if (!selectedStudent) return [];
+    console.log("Processing days for logs:", logs.length);
     const grouped = new Map<string, { date: Date; logs: AdminAttendanceLog[] }>();
     logs.forEach((log) => {
-      const d = new Date(log.ts);
+      const d = new Date(Number(log.ts));
       const key = d.toLocaleDateString();
       if (!grouped.has(key)) grouped.set(key, { date: d, logs: [] });
       grouped.get(key)!.logs.push(log);
@@ -494,109 +498,131 @@ export function TimeEntryView({ users }: { users: User[] }) {
     return Array.from(grouped.values())
       .sort((a, b) => b.date.getTime() - a.date.getTime())
       .map((day) => {
-        const sorted = day.logs.slice().sort((a, b) => a.ts - b.ts);
+        // Deduplicate logs to prevent double-counting
+        const uniqueMap = new Map<string, AdminAttendanceLog>();
+        day.logs.forEach(l => {
+            const key = l.id ? String(l.id) : `${l.ts}-${l.type}`;
+            if (!uniqueMap.has(key)) uniqueMap.set(key, l);
+        });
+        
+        const sorted = Array.from(uniqueMap.values()).sort((a, b) => a.ts - b.ts);
+        
         // Filter out OT Auth logs if present (though usually separate table)
-        const processingLogs = sorted.filter(l => !l.photourl?.startsWith("OT_AUTH:"));
+        const processingLogs = sorted.filter(l => !l.photourl?.startsWith("OT_AUTH:") && l.status !== "Rejected");
 
         const baseDate = new Date(day.date);
         baseDate.setHours(0, 0, 0, 0);
 
-        const buildShift = (timeStr: string) => {
-          const [h, m] = timeStr.split(":").map(Number);
-          const d = new Date(baseDate.getTime());
-          d.setHours(h || 0, m || 0, 0, 0);
-          return d.getTime();
-        };
-
         const src = schedule;
         
-        let localSchedule = {
-            amIn: buildShift("08:00"),
-            amOut: buildShift("12:00"),
-            pmIn: buildShift("13:00"),
-            pmOut: buildShift("17:00"),
-            otStart: buildShift("17:00"),
-            otEnd: buildShift("18:00"),
-        };
+        // Use centralized buildSchedule
+        let dailySchedule: LibShiftSchedule;
 
         if (src && typeof src.amIn === "string") {
-            localSchedule = {
-                amIn: buildShift(src.amIn),
-                amOut: buildShift(src.amOut),
-                pmIn: buildShift(src.pmIn),
-                pmOut: buildShift(src.pmOut),
-                otStart: src.otIn ? buildShift(src.otIn) : buildShift("17:00"),
-                otEnd: src.otOut ? buildShift(src.otOut) : buildShift("18:00"),
-            };
+            dailySchedule = buildSchedule(
+                day.date,
+                {
+                    amIn: src.amIn,
+                    amOut: src.amOut,
+                    pmIn: src.pmIn,
+                    pmOut: src.pmOut,
+                    otIn: src.otIn,
+                    otOut: src.otOut
+                }
+            );
+        } else {
+             // Fallback
+             dailySchedule = buildSchedule(
+                day.date,
+                {
+                    amIn: "09:00",
+                    amOut: "12:00",
+                    pmIn: "13:00",
+                    pmOut: "17:00",
+                    otIn: "",
+                    otOut: ""
+                }
+             );
         }
 
-        // --- New Session Logic (Consistent with Supervisor) ---
         type Session = { in: AdminAttendanceLog; out: AdminAttendanceLog | null; shift: 'am' | 'pm' | 'ot' };
         const sessions: Session[] = [];
         let currentIn: AdminAttendanceLog | null = null;
 
-        const determineShift = (ts: number): 'am' | 'pm' | 'ot' => {
-            if (ts < localSchedule.amOut) return 'am';
-            if (ts < localSchedule.pmOut) return 'pm';
-            return 'ot';
+        const today = new Date();
+        today.setHours(0,0,0,0);
+        const isPastDate = day.date < today;
+
+        const createVirtualOut = (inEntry: AdminAttendanceLog, shift: 'am' | 'pm' | 'ot'): AdminAttendanceLog => {
+            const outTs = shift === 'am' ? dailySchedule.amOut : (shift === 'pm' ? dailySchedule.pmOut : dailySchedule.otEnd);
+            // Ensure outTs > inEntry.ts
+            const finalOutTs = outTs > inEntry.ts ? outTs : inEntry.ts + 60000;
+            
+            return {
+                id: inEntry.id ? -inEntry.id : -Math.floor(Math.random() * 1000000),
+                idnumber: inEntry.idnumber,
+                type: 'out',
+                ts: finalOutTs,
+                photourl: '',
+                validated_by: 'AUTO TIME OUT',
+                status: 'Pending'
+            } as AdminAttendanceLog;
         };
 
         for (const log of processingLogs) {
-            if (log.status === "Rejected") continue;
-
             if (log.type === "in") {
                 if (currentIn) {
                     // Previous session incomplete
-                    sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.ts) });
+                    const shift = determineShift(currentIn.ts, dailySchedule);
+                    let outEntry: AdminAttendanceLog | null = null;
+                    if (isPastDate) {
+                        outEntry = createVirtualOut(currentIn, shift);
+                    }
+                    sessions.push({ in: currentIn, out: outEntry, shift });
                 }
                 currentIn = log;
             } else if (log.type === "out") {
                 if (currentIn) {
                     // Normal Session
-                    sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.ts) });
+                    sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.ts, dailySchedule) });
                     currentIn = null;
                 }
             }
         }
         if (currentIn) {
-            sessions.push({ in: currentIn, out: null, shift: determineShift(currentIn.ts) });
+            const shift = determineShift(currentIn.ts, dailySchedule);
+            let outEntry: AdminAttendanceLog | null = null;
+            if (isPastDate) {
+                outEntry = createVirtualOut(currentIn, shift);
+            }
+            sessions.push({ in: currentIn, out: outEntry, shift });
         }
 
         // Calculate Hours (Strict Shift Isolation)
-        const calculateHours = (requireApproved: boolean) => {
+        const calculateHours = (filterStatus?: 'Approved' | 'Pending' | 'Rejected') => {
             let total = 0;
             sessions.forEach(session => {
-                const isInValid = !requireApproved || session.in.status === "Approved";
-                const isOutValid = !session.out || !requireApproved || session.out?.status === "Approved";
-                if (!isInValid || !isOutValid) return;
-                
                 if (!session.out) return;
 
-                if (session.shift === 'am') {
-                    const amIn = Math.max(session.in.ts, localSchedule.amIn);
-                    const amOut = Math.min(session.out.ts, localSchedule.amOut);
-                    const amInFl = Math.floor(amIn / 60000) * 60000;
-                    const amOutFl = Math.floor(amOut / 60000) * 60000;
-                    total += Math.max(0, amOutFl - amInFl);
-                } else if (session.shift === 'pm') {
-                    const pmIn = Math.max(session.in.ts, localSchedule.pmIn);
-                    const pmOut = Math.min(session.out.ts, localSchedule.pmOut);
-                    const pmInFl = Math.floor(pmIn / 60000) * 60000;
-                    const pmOutFl = Math.floor(pmOut / 60000) * 60000;
-                    total += Math.max(0, pmOutFl - pmInFl);
-                } else if (session.shift === 'ot') {
-                    const otIn = Math.max(session.in.ts, localSchedule.otStart);
-                    const otOut = Math.min(session.out.ts, localSchedule.otEnd);
-                    const otInFl = Math.floor(otIn / 60000) * 60000;
-                    const otOutFl = Math.floor(otOut / 60000) * 60000;
-                    total += Math.max(0, otOutFl - otInFl);
-                }
+                const inStatus = getLogStatus(session.in);
+                const outStatus = getLogStatus(session.out);
+                const isApproved = inStatus === "Approved" && outStatus === "Approved";
+
+                if (filterStatus === "Approved" && !isApproved) return;
+                if (filterStatus === "Pending" && isApproved) return;
+                if (filterStatus === "Rejected") return; 
+
+                // Calculate duration against all shifts (Strict Shift Isolation)
+                const { am, pm, ot } = calculateShiftDurations(session.in.ts, session.out.ts, dailySchedule);
+
+                total += am + pm + ot;
             });
-            return Math.floor(total / 60000) * 60000;
+            return total;
         };
 
-        const total = calculateHours(false);
-        const validatedTotal = calculateHours(true);
+        const total = calculateHours();
+        const validatedTotal = calculateHours('Approved');
+        const pendingTotal = calculateHours('Pending');
 
         const mapSessionToSlots = (shiftSessions: Session[]) => {
             if (shiftSessions.length === 0) return { in: null, out: null };
@@ -615,7 +641,8 @@ export function TimeEntryView({ users }: { users: User[] }) {
             s3: pmSlots.in, s4: pmSlots.out, 
             s5: otSlots.in, s6: otSlots.out, 
             total, 
-            validatedTotal 
+            validatedTotal,
+            pendingTotal
         };
       });
   }, [logs, schedule, selectedStudent]);
@@ -629,6 +656,20 @@ export function TimeEntryView({ users }: { users: User[] }) {
     () => processedDays.reduce((sum, day) => sum + (day.validatedTotal || 0), 0),
     [processedDays]
   );
+
+  const totalPendingHoursMs = useMemo(
+    () => processedDays.reduce((sum, day) => sum + (day.pendingTotal || 0), 0),
+    [processedDays]
+  );
+
+  const statusCounts = useMemo(() => {
+    const counts = { Pending: 0, Approved: 0, Rejected: 0 };
+    logs.forEach(log => {
+        const status = getLogStatus(log);
+        counts[status]++;
+    });
+    return counts;
+  }, [logs]);
 
   if (!selectedStudent) {
     return (
@@ -661,9 +702,9 @@ export function TimeEntryView({ users }: { users: User[] }) {
                 className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none"
               >
                 <option value="">All courses</option>
-                {courseOptions.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
+                {availableCourses.map((c) => (
+                  <option key={c.id} value={c.name}>
+                    {c.name}
                   </option>
                 ))}
               </select>
@@ -673,16 +714,12 @@ export function TimeEntryView({ users }: { users: User[] }) {
                 className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none"
               >
                 <option value="">All sections</option>
-                {sectionOptions.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
+                {availableSections.map((s) => (
+                  <option key={s.id} value={s.name}>
+                    {s.name}
                   </option>
                 ))}
               </select>
-              <div className="text-xs text-gray-500 font-medium">
-                Showing {filteredStudents.length} student
-                {filteredStudents.length === 1 ? "" : "s"}
-              </div>
             </div>
           </div>
 
@@ -697,66 +734,110 @@ export function TimeEntryView({ users }: { users: User[] }) {
                     <th className="px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">
                       Course / Section
                     </th>
-                    <th className="px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">
-                      ID Number
+                    <th className="px-4 py-3 text-right text-xs font-bold text-gray-500 uppercase tracking-wider">
+                      Action
                     </th>
-                    <th className="px-4 py-3"></th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {filteredStudents.length === 0 ? (
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {loading ? (
+                     <tr><td colSpan={3} className="px-6 py-12 text-center text-gray-500">Loading students...</td></tr>
+                  ) : students.length === 0 ? (
                     <tr>
-                      <td
-                        colSpan={4}
-                        className="px-4 py-8 text-center text-sm text-gray-500"
-                      >
-                        No students found.
+                      <td colSpan={3} className="px-6 py-12 text-center text-gray-500">
+                        No students found matching your criteria.
                       </td>
                     </tr>
                   ) : (
-                    filteredStudents.map((student) => {
-                      const name =
-                        student.name ||
-                        [student.firstname, student.lastname].filter(Boolean).join(" ");
-                      const courseSection = [student.course, student.section]
-                        .filter(Boolean)
-                        .join(" • ");
-                      return (
-                        <tr
-                          key={student.id}
-                          className="hover:bg-gray-50 transition-colors cursor-pointer"
-                          onClick={() => onSelectStudent(student)}
-                        >
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            <div className="flex items-center gap-3">
-                              <div className="h-8 w-8 rounded-full bg-orange-50 text-[#F97316] flex items-center justify-center text-xs font-bold">
-                                {(name || student.idnumber || "?").charAt(0).toUpperCase()}
-                              </div>
-                              <div>
-                                <div className="text-sm font-semibold text-gray-900">
-                                  {name || student.idnumber}
-                                </div>
-                              </div>
+                    students.map((s) => (
+                      <tr
+                        key={s.id}
+                        className="hover:bg-orange-50/50 transition-colors cursor-pointer group"
+                        onClick={() => onSelectStudent(s)}
+                      >
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <div className="flex items-center">
+                            <div className="h-8 w-8 rounded-full bg-orange-100 flex items-center justify-center text-[#F97316] font-bold text-xs mr-3">
+                              {(s.name || s.firstname || s.idnumber).charAt(0).toUpperCase()}
                             </div>
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-gray-700">
-                            {courseSection || "—"}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-xs text-gray-500">
-                            {student.idnumber}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-right">
-                            <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#F97316]">
-                              View Attendance
-                              <ChevronRight size={14} />
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })
+                            <div>
+                              <div className="font-semibold text-gray-900 group-hover:text-[#F97316] transition-colors">
+                                {s.name || [s.firstname, s.lastname].filter(Boolean).join(" ") || "Unknown"}
+                              </div>
+                              <div className="text-xs text-gray-500">{s.idnumber}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <div className="text-gray-700">
+                             {[s.course, s.section].filter(Boolean).join(" - ") || <span className="text-gray-400 italic">--</span>}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-right">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onSelectStudent(s);
+                            }}
+                            className="text-[#F97316] hover:text-[#EA580C] font-semibold text-xs"
+                          >
+                            View Logs
+                          </button>
+                        </td>
+                      </tr>
+                    ))
                   )}
                 </tbody>
               </table>
+            </div>
+
+            <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 flex items-center justify-between sm:px-6">
+               <div className="flex-1 flex justify-between sm:hidden">
+                  <button
+                    onClick={() => setPage(p => Math.max(1, p - 1))}
+                    disabled={page === 1}
+                    className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                    disabled={page >= totalPages}
+                    className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    Next
+                  </button>
+               </div>
+               <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+                  <div>
+                     <p className="text-sm text-gray-700">
+                        Showing <span className="font-medium">{(page - 1) * limit + 1}</span> to <span className="font-medium">{Math.min(page * limit, total)}</span> of <span className="font-medium">{total}</span> results
+                     </p>
+                  </div>
+                  <div>
+                     <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+                        <button
+                          onClick={() => setPage(p => Math.max(1, p - 1))}
+                          disabled={page === 1}
+                          className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          <span className="sr-only">Previous</span>
+                          <ChevronLeft className="h-5 w-5" aria-hidden="true" />
+                        </button>
+                        <span className="relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700">
+                           Page {page} of {totalPages}
+                        </span>
+                        <button
+                          onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                          disabled={page >= totalPages}
+                          className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          <span className="sr-only">Next</span>
+                          <ChevronRight className="h-5 w-5" aria-hidden="true" />
+                        </button>
+                     </nav>
+                  </div>
+               </div>
             </div>
           </div>
         </div>
@@ -881,22 +962,57 @@ export function TimeEntryView({ users }: { users: User[] }) {
             </div>
           ) : (
             <>
-              <div className="mb-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="rounded-2xl border border-gray-100 bg-orange-50/70 p-4 flex flex-col">
-                  <div className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                    Total Hours
-                  </div>
-                  <div className="mt-1 text-lg font-bold text-gray-900">
-                    {formatHours(totalHoursMs)}
+              {/* Account Monitoring */}
+              <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3 border-b border-gray-100 bg-gray-50 mb-6 rounded-xl">
+                <div className="flex flex-col gap-1">
+                  <div className="text-sm font-semibold text-gray-800">Account Monitoring</div>
+                  <div className="flex flex-wrap gap-2 text-[11px]">
+                    <span className="px-3 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-700 font-medium">
+                      Pending: {statusCounts.Pending}
+                    </span>
+                    <span className="px-3 py-1 rounded-full border border-green-100 bg-green-50 text-green-700 font-medium">
+                      Validated: {statusCounts.Approved}
+                    </span>
+                    <span className="px-3 py-1 rounded-full border border-red-100 bg-red-50 text-red-700 font-medium">
+                      Unvalidated: {statusCounts.Rejected}
+                    </span>
                   </div>
                 </div>
-                <div className="rounded-2xl border border-gray-100 bg-emerald-50/70 p-4 flex flex-col">
-                  <div className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                    Total Validated Hours
-                  </div>
-                  <div className="mt-1 text-lg font-bold text-gray-900">
-                    {formatHours(totalValidatedHoursMs)}
-                  </div>
+              </div>
+
+              {/* Summary Cards */}
+              <div className="mb-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-blue-50 p-4 rounded-2xl border border-blue-100 flex items-center justify-between shadow-sm">
+                    <div>
+                        <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">Total Tracked</p>
+                        <p className="text-2xl font-bold text-blue-900">{formatHours(totalHoursMs)}</p>
+                        <p className="text-[11px] text-gray-600 mt-1">Pending + Validated</p>
+                    </div>
+                    <div className="p-2 bg-blue-100 rounded-xl">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-600"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    </div>
+                </div>
+
+                <div className="bg-orange-50 p-4 rounded-2xl border border-orange-100 flex items-center justify-between shadow-sm">
+                    <div>
+                        <p className="text-xs font-bold text-orange-600 uppercase tracking-wider mb-1">Pending Validation</p>
+                        <p className="text-2xl font-bold text-orange-900">{formatHours(totalPendingHoursMs)}</p>
+                        <p className="text-[11px] text-gray-600 mt-1">Requires Approval</p>
+                    </div>
+                    <div className="p-2 bg-orange-100 rounded-xl">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-orange-600"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+                    </div>
+                </div>
+
+                <div className="bg-green-50 p-4 rounded-2xl border border-green-100 flex items-center justify-between shadow-sm">
+                    <div>
+                        <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-1">Total Validated</p>
+                        <p className="text-2xl font-bold text-green-900">{formatHours(totalValidatedHoursMs)}</p>
+                        <p className="text-[11px] text-gray-600 mt-1">Approved Hours</p>
+                    </div>
+                    <div className="p-2 bg-green-100 rounded-xl">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-600"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m9 15 2 2 4-4"/></svg>
+                    </div>
                 </div>
               </div>
 
@@ -968,44 +1084,53 @@ export function TimeEntryView({ users }: { users: User[] }) {
                           })}
                         </td>
                         {[day.s1, day.s2, day.s3, day.s4, day.s5, day.s6].map(
-                          (slot: AdminAttendanceLog | null, idx: number) => (
-                            <td
-                              key={idx}
-                              className="px-1.5 py-2 border-r border-gray-100 text-center align-top min-w-[110px]"
-                            >
-                              {slot ? (
-                                <div className="flex flex-col items-center gap-1.5">
-                                  <span className="text-[11px] font-medium text-gray-800">
-                                    {formatTime(slot.ts)}
-                                  </span>
-                                  {slot.photourl && (
-                                    <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100">
-                                      <img
-                                        src={slot.photourl}
-                                        alt="Log"
-                                        className="w-full h-full object-cover"
-                                      />
-                                    </div>
-                                  )}
-                                  <span
-                                    className={`text-[10px] font-medium ${getLogStatusColorClass(
-                                      slot
-                                    )}`}
-                                  >
-                                    {formatLogStatusLabel(slot)}
-                                  </span>
-                                  <button
-                                    onClick={() => setEditingEntry(slot)}
-                                    className="mt-0.5 text-[10px] font-semibold text-[#F97316] hover:text-[#EA580C]"
-                                  >
-                                    Edit
-                                  </button>
-                                </div>
-                              ) : (
-                                <span className="text-gray-300 block py-4">-</span>
-                              )}
-                            </td>
-                          )
+                          (slot: AdminAttendanceLog | null, idx: number) => {
+                            const isAutoTimeOut = idx % 2 !== 0 && slot && (slot.validated_by === "SYSTEM_AUTO_CLOSE" || slot.validated_by === "AUTO TIME OUT");
+                            return (
+                              <td
+                                key={idx}
+                                className={`px-1.5 py-2 border-r border-gray-100 text-center min-w-[110px] ${isAutoTimeOut ? 'align-middle' : 'align-top'}`}
+                              >
+                                {slot ? (
+                                  <div className="flex flex-col items-center gap-1.5">
+                                    {isAutoTimeOut ? (
+                                      <span className="text-[10px] font-bold text-red-500 py-2">AUTO TIME OUT</span>
+                                    ) : (
+                                      <span className="text-[11px] font-medium text-gray-800">
+                                        {formatTime(slot.ts)}
+                                      </span>
+                                    )}
+                                    {slot.photourl && !isAutoTimeOut && (
+                                      <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100">
+                                        <img
+                                          src={slot.photourl}
+                                          alt="Log"
+                                          className="w-full h-full object-cover"
+                                        />
+                                      </div>
+                                    )}
+                                    {!isAutoTimeOut && (
+                                    <span
+                                      className={`text-[10px] font-medium ${getLogStatusColorClass(
+                                        slot
+                                      )}`}
+                                    >
+                                      {formatLogStatusLabel(slot)}
+                                    </span>
+                                    )}
+                                    <button
+                                      onClick={() => setEditingEntry(slot)}
+                                      className="mt-0.5 text-[10px] font-semibold text-[#F97316] hover:text-[#EA580C]"
+                                    >
+                                      Edit
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-300 block py-4">-</span>
+                                )}
+                              </td>
+                            );
+                          }
                         )}
                         <td className="px-6 py-4 text-right font-bold text-gray-900">
                           {formatHours(day.total)}
@@ -1045,44 +1170,53 @@ export function TimeEntryView({ users }: { users: User[] }) {
                           </div>
                           <div className="grid grid-cols-2 gap-3">
                             {group.slots.map(
-                              (slot: AdminAttendanceLog | null, slotIdx: number) => (
-                                <div
-                                  key={slotIdx}
-                                  className="flex flex-col items-center gap-1.5"
-                                >
-                                  {slot ? (
-                                    <>
-                                      <span className="text-[11px] font-medium text-gray-800">
-                                        {formatTime(slot.ts)}
-                                      </span>
-                                      {slot.photourl && (
-                                        <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100">
-                                          <img
-                                            src={slot.photourl}
-                                            alt="Log"
-                                            className="w-full h-full object-cover"
-                                          />
-                                        </div>
-                                      )}
-                                      <span
-                                        className={`text-[10px] font-medium ${getLogStatusColorClass(
-                                          slot
-                                        )}`}
-                                      >
-                                        {formatLogStatusLabel(slot)}
-                                      </span>
-                                      <button
-                                        onClick={() => setEditingEntry(slot)}
-                                        className="mt-0.5 text-[10px] font-semibold text-[#F97316] hover:text-[#EA580C]"
-                                      >
-                                        Edit
-                                      </button>
-                                    </>
-                                  ) : (
-                                    <span className="text-gray-300">-</span>
-                                  )}
-                                </div>
-                              )
+                              (slot: AdminAttendanceLog | null, slotIdx: number) => {
+                                const isAutoTimeOut = slotIdx === 1 && slot && (slot.validated_by === "SYSTEM_AUTO_CLOSE" || slot.validated_by === "AUTO TIME OUT");
+                                return (
+                                  <div
+                                    key={slotIdx}
+                                    className={`flex flex-col items-center gap-1.5 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}
+                                  >
+                                    {slot ? (
+                                      <>
+                                        {isAutoTimeOut ? (
+                                          <span className="text-[10px] font-bold text-red-500 py-2">AUTO TIME OUT</span>
+                                        ) : (
+                                          <span className="text-[11px] font-medium text-gray-800">
+                                            {formatTime(slot.ts)}
+                                          </span>
+                                        )}
+                                        {slot.photourl && !isAutoTimeOut && (
+                                          <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100">
+                                            <img
+                                              src={slot.photourl}
+                                              alt="Log"
+                                              className="w-full h-full object-cover"
+                                            />
+                                          </div>
+                                        )}
+                                        {!isAutoTimeOut && (
+                                        <span
+                                          className={`text-[10px] font-medium ${getLogStatusColorClass(
+                                            slot
+                                          )}`}
+                                        >
+                                          {formatLogStatusLabel(slot)}
+                                        </span>
+                                        )}
+                                        <button
+                                          onClick={() => setEditingEntry(slot)}
+                                          className="mt-0.5 text-[10px] font-semibold text-[#F97316] hover:text-[#EA580C]"
+                                        >
+                                          Edit
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <span className="text-gray-300">-</span>
+                                    )}
+                                  </div>
+                                );
+                              }
                             )}
                           </div>
                         </div>
@@ -1820,22 +1954,25 @@ export function EditUserForm({
 }
 
 export function UserManagementView({ 
-  users, 
-  loading, 
   onDelete, 
   onEdit, 
   onAdd, 
   availableCourses, 
   availableSections 
 }: { 
-  users: User[]; 
-  loading: boolean; 
   onDelete: (id: number) => Promise<void>; 
   onEdit: (id: number, updates: any) => Promise<void>; 
   onAdd: (data: any) => Promise<void>;
   availableCourses: Course[]; 
   availableSections: Section[];
 }) {
+  const [users, setUsers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [limit] = useState(10);
+  const [totalPages, setTotalPages] = useState(0);
+
   const [filter, setFilter] = useState<typeof roleTabs[number]>("student");
   const [query, setQuery] = useState("");
   const [courseFilter, setCourseFilter] = useState("");
@@ -1844,36 +1981,61 @@ export function UserManagementView({
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [deletingUser, setDeletingUser] = useState<User | null>(null);
 
-  const { filtered, courses, sections } = useMemo(() => {
-    // Base filter: exclude superadmin
-    let base = users.filter((u) => {
-      const r = String(u.role || "").toLowerCase();
-      return r !== "superadmin" && r !== "super_admin";
-    });
+  const fetchUsers = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("page", String(page));
+      params.set("limit", String(limit));
+      params.set("role", filter);
+      if (query.trim()) params.set("search", query.trim());
+      if (courseFilter) params.set("course", courseFilter);
+      if (sectionFilter) params.set("section", sectionFilter);
 
-    // Role filter (mandatory now)
-    base = base.filter((u) => u.role === filter);
-
-    // Get available courses/sections for this role subset
-    const userCourses = Array.from(new Set(base.map(u => u.course).filter(Boolean))).sort() as string[];
-    const userSections = Array.from(new Set(base.map(u => u.section).filter(Boolean))).sort() as string[];
-
-    // Apply other filters
-    if (courseFilter) base = base.filter(u => u.course === courseFilter);
-    if (sectionFilter) base = base.filter(u => u.section === sectionFilter);
-
-    if (query.trim()) {
-      const q = query.trim().toLowerCase();
-      base = base.filter(
-        (u) =>
-          (u.name || "").toLowerCase().includes(q) ||
-          (u.firstname || "").toLowerCase().includes(q) ||
-          (u.lastname || "").toLowerCase().includes(q) ||
-          (u.idnumber || "").toLowerCase().includes(q)
-      );
+      const res = await fetch(`/api/users?${params.toString()}`);
+      const data = await res.json();
+      if (data.users) {
+        setUsers(data.users);
+        setTotal(data.total);
+        setTotalPages(data.totalPages);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
     }
-    return { filtered: base, courses: userCourses, sections: userSections };
-  }, [users, filter, query, courseFilter, sectionFilter]);
+  }, [page, limit, filter, query, courseFilter, sectionFilter]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchUsers();
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [fetchUsers]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [filter, query, courseFilter, sectionFilter]);
+
+  const handleAdd = async (data: any) => {
+    await onAdd(data);
+    fetchUsers();
+    setShowAdd(false);
+  };
+  
+  const handleEdit = async (id: number, updates: any) => {
+    await onEdit(id, updates);
+    fetchUsers();
+    setEditingUser(null);
+  };
+
+  const handleDelete = async () => {
+    if (deletingUser) {
+      await onDelete(deletingUser.id);
+      fetchUsers();
+      setDeletingUser(null);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -1882,6 +2044,13 @@ export function UserManagementView({
            <h1 className="text-2xl font-bold text-[#1F2937]">Manage Users</h1>
            <p className="text-sm text-gray-500">View and manage system users</p>
         </div>
+        <button 
+          onClick={() => setShowAdd(true)}
+          className="flex items-center justify-center gap-2 bg-[#F97316] text-white px-5 py-2.5 rounded-xl hover:bg-[#EA580C] transition-colors font-semibold shadow-sm active:scale-95"
+        >
+          <Users size={18} />
+          <span>Add User</span>
+        </button>
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
@@ -1909,7 +2078,7 @@ export function UserManagementView({
         <div className="p-4 bg-gray-50 border-b border-gray-200 flex flex-col md:flex-row gap-4">
            <div className="relative flex-1">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                 <Search className="text-gray-400" size={18} />
               </div>
               <input
                  type="text"
@@ -1920,7 +2089,7 @@ export function UserManagementView({
               />
            </div>
            
-           {(filter === "student" || filter === "instructor" || courses.length > 0) && (
+           {(filter === "student" || filter === "instructor" || availableCourses.length > 0) && (
              <div className="flex gap-2">
                 <select
                   value={courseFilter}
@@ -1928,7 +2097,7 @@ export function UserManagementView({
                   className="px-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[140px] shadow-sm"
                 >
                   <option value="">All Courses</option>
-                  {courses.map(c => <option key={c} value={c}>{c}</option>)}
+                  {availableCourses.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
                 </select>
                 <select
                   value={sectionFilter}
@@ -1936,7 +2105,7 @@ export function UserManagementView({
                   className="px-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[140px] shadow-sm"
                 >
                   <option value="">All Sections</option>
-                  {sections.map(s => <option key={s} value={s}>{s}</option>)}
+                  {availableSections.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
                 </select>
              </div>
            )}
@@ -1953,11 +2122,11 @@ export function UserManagementView({
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {loading ? (
-                 <tr><td colSpan={4} className="px-6 py-12 text-center text-gray-500">Loading users...</td></tr>
-              ) : filtered.length === 0 ? (
-                 <tr><td colSpan={4} className="px-6 py-12 text-center text-gray-500">No users found matching your criteria</td></tr>
+                 <tr><td colSpan={3} className="px-6 py-12 text-center text-gray-500">Loading users...</td></tr>
+              ) : users.length === 0 ? (
+                 <tr><td colSpan={3} className="px-6 py-12 text-center text-gray-500">No users found matching your criteria</td></tr>
               ) : (
-                filtered.map((u) => {
+                users.map((u) => {
                   return (
                     <tr key={u.id} className="hover:bg-gray-50 transition-colors">
                       <td className="px-6 py-4 whitespace-nowrap">
@@ -1996,13 +2165,62 @@ export function UserManagementView({
             </tbody>
           </table>
         </div>
+        
+        <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 flex items-center justify-between sm:px-6">
+           <div className="flex-1 flex justify-between sm:hidden">
+              <button
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+              >
+                Previous
+              </button>
+              <button
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
+                className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+              >
+                Next
+              </button>
+           </div>
+           <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+              <div>
+                 <p className="text-sm text-gray-700">
+                    Showing <span className="font-medium">{(page - 1) * limit + 1}</span> to <span className="font-medium">{Math.min(page * limit, total)}</span> of <span className="font-medium">{total}</span> results
+                 </p>
+              </div>
+              <div>
+                 <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+                    <button
+                      onClick={() => setPage(p => Math.max(1, p - 1))}
+                      disabled={page === 1}
+                      className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      <span className="sr-only">Previous</span>
+                      <ChevronLeft className="h-5 w-5" aria-hidden="true" />
+                    </button>
+                    <span className="relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700">
+                       Page {page} of {totalPages}
+                    </span>
+                    <button
+                      onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                      disabled={page >= totalPages}
+                      className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      <span className="sr-only">Next</span>
+                      <ChevronRight className="h-5 w-5" aria-hidden="true" />
+                    </button>
+                 </nav>
+              </div>
+           </div>
+        </div>
       </div>
 
       {showAdd && (
         <Modal onClose={() => setShowAdd(false)} className="max-w-4xl">
           <AddUserForm 
             onClose={() => setShowAdd(false)} 
-            onSuccess={onAdd}
+            onSuccess={handleAdd}
             availableCourses={availableCourses}
             availableSections={availableSections}
           />
@@ -2013,7 +2231,7 @@ export function UserManagementView({
         <Modal onClose={() => setEditingUser(null)} className="max-w-4xl">
            <EditUserForm
              user={editingUser}
-             onSuccess={onEdit}
+             onSuccess={handleEdit}
              onClose={() => setEditingUser(null)}
              availableCourses={availableCourses}
              availableSections={availableSections}
@@ -2023,10 +2241,7 @@ export function UserManagementView({
 
       {deletingUser && (
          <DeleteConfirmationModal
-            onConfirm={async () => {
-               await onDelete(deletingUser.id);
-               setDeletingUser(null);
-            }}
+            onConfirm={handleDelete}
             onCancel={() => setDeletingUser(null)}
          />
       )}

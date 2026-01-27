@@ -82,7 +82,8 @@ export function ConfirmationModal({
   noteLabel,
   noteRequired,
   noteValue,
-  onNoteChange
+  onNoteChange,
+  isLoading
 }: { 
   message: string; 
   onConfirm: () => void; 
@@ -94,6 +95,7 @@ export function ConfirmationModal({
   noteRequired?: boolean;
   noteValue?: string;
   onNoteChange?: (value: string) => void;
+  isLoading?: boolean;
 }) {
   const styles = {
     warning: {
@@ -122,14 +124,23 @@ export function ConfirmationModal({
   const canConfirm = !noteRequired || (noteValue && noteValue.trim().length > 0);
 
   return (
-    <Modal onClose={onCancel}>
+    <Modal onClose={() => !isLoading && onCancel()}>
       <div className="flex flex-col items-center justify-center p-8 text-center">
         <div className={`w-20 h-20 ${currentStyle.bg} ${currentStyle.text} rounded-full flex items-center justify-center mb-6 ring-8 ${currentStyle.ring}`}>
-          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+          {isLoading ? (
+             <svg className="w-10 h-10 animate-spin" fill="none" viewBox="0 0 24 24">
+               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+             </svg>
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+          )}
         </div>
-        <h3 className="text-2xl font-bold text-gray-900 mb-2">{title}</h3>
-        <p className="text-gray-500 mb-6 max-w-sm mx-auto leading-relaxed">{message}</p>
-        {showNoteField && (
+        <h3 className="text-2xl font-bold text-gray-900 mb-2">{isLoading ? "Processing..." : title}</h3>
+        <p className="text-gray-500 mb-6 max-w-sm mx-auto leading-relaxed">
+          {isLoading ? "Please wait while we process your request." : message}
+        </p>
+        {showNoteField && !isLoading && (
           <div className="w-full max-w-md mx-auto mb-6 text-left">
             <label className="block text-sm font-semibold text-gray-700 mb-1">
               {noteLabel}{noteRequired ? " *" : ""}
@@ -139,22 +150,24 @@ export function ConfirmationModal({
               onChange={e => onNoteChange && onNoteChange(e.target.value)}
               className="w-full min-h-[90px] rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all resize-none"
               placeholder={noteRequired ? "Required. Explain the reason for rejection..." : "Optional note..."}
+              disabled={isLoading}
             />
           </div>
         )}
         <div className="flex gap-4">
           <button
             onClick={onCancel}
-            className="min-w-[120px] py-3 px-6 bg-white border border-gray-200 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-all"
+            disabled={isLoading}
+            className="min-w-[120px] py-3 px-6 bg-white border border-gray-200 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Cancel
           </button>
           <button
             onClick={onConfirm}
-            disabled={!canConfirm}
-            className={`min-w-[120px] py-3 px-6 text-white font-bold rounded-xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg ${currentStyle.btn} ${!canConfirm ? "opacity-60 cursor-not-allowed hover:scale-100" : ""}`}
+            disabled={!canConfirm || isLoading}
+            className={`min-w-[120px] py-3 px-6 text-white font-bold rounded-xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg ${currentStyle.btn} ${(!canConfirm || isLoading) ? "opacity-60 cursor-not-allowed hover:scale-100" : ""}`}
           >
-            {confirmLabel}
+            {isLoading ? "Processing..." : confirmLabel}
           </button>
         </div>
       </div>
@@ -311,30 +324,9 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
   }, [form.courseIds, allowedSections]);
 
   const eligibleSupervisors = useMemo(() => {
-    const studentCourseId = form.courseIds[0];
-    const studentSectionId = form.sectionIds[0];
-    if (!studentCourseId || !studentSectionId) return [];
-    const sCid = Number(studentCourseId);
-    const sSid = Number(studentSectionId);
-    const courseObj = availableCourses.find(c => c.id === sCid);
-    const sectionObj = availableSections.find(s => s.id === sSid);
-    const normalize = (s: string) => s.toLowerCase().trim();
     const q = supervisorSearch.toLowerCase().trim();
     return users
       .filter(u => String(u.role).toLowerCase() === "supervisor")
-      .filter(u => {
-        const hasCourseId = u.courseIds && u.courseIds.some(id => Number(id) === sCid);
-        const hasSectionId = u.sectionIds && u.sectionIds.some(id => Number(id) === sSid);
-        if (hasCourseId && hasSectionId) return true;
-        if (courseObj && sectionObj && u.course && u.section) {
-          const uCourses = u.course.split(",").map(normalize);
-          const uSections = u.section.split(",").map(normalize);
-          const matchCourse = uCourses.includes(normalize(courseObj.name));
-          const matchSection = uSections.includes(normalize(sectionObj.name));
-          if (matchCourse && matchSection) return true;
-        }
-        return false;
-      })
       .filter(u => {
         if (!q) return true;
         const name = `${u.firstname || ""} ${u.lastname || ""}`.toLowerCase();
@@ -343,7 +335,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
         const location = (u.location || "").toLowerCase();
         return name.includes(q) || id.includes(q) || company.includes(q) || location.includes(q);
       });
-  }, [users, form.courseIds, form.sectionIds, availableCourses, availableSections, supervisorSearch]);
+  }, [users, supervisorSearch]);
 
   const handleSubmitInit = () => {
     if (!form.idnumber || !form.password) {
@@ -914,24 +906,68 @@ export function ViewUserDetails({ user, users, onClose }: { user: User; users: U
 export function UsersView({ 
   role, 
   users, 
+  attendanceSummary,
   onAdd, 
   onEdit, 
   onView, 
   onDelete,
   onApprove,
-  hideAddButton = false
-}: { 
+  hideAddButton = false,
+  onRefresh
+}: {  
   role: RoleType; 
   users: User[]; 
+  attendanceSummary?: Record<string, number>;
   onAdd: () => void; 
   onEdit: (user: User) => void;
   onView: (user: User) => void;
   onDelete: (user: User) => void;
   onApprove?: (user: User) => void;
   hideAddButton?: boolean;
+  onRefresh?: () => void;
 }) {
   const [search, setSearch] = useState("");
+  const [confirmAction, setConfirmAction] = useState<{
+    type: "single";
+    id: number;
+    action: "reject";
+    user: User;
+  } | null>(null);
+  const [rejectionNote, setRejectionNote] = useState("");
+  const [actionLoading, setActionLoading] = useState<number | null>(null);
+
   const title = role.charAt(0).toUpperCase() + role.slice(1) + "s";
+
+  const performRejection = async (id: number, note: string) => {
+    setActionLoading(id);
+    try {
+      const actorId = typeof window !== "undefined" ? localStorage.getItem("idnumber") || "SYSTEM" : "SYSTEM";
+      const res = await fetch(`/api/users/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          signup_status: "REJECTED",
+          actorId,
+          actorRole: "instructor",
+          reason: "Instructor Rejection",
+          rejectionNote: note
+        }),
+      });
+      
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to reject");
+      }
+      
+      if (onRefresh) onRefresh();
+    } catch (e: any) {
+      alert(e.message || "Failed to reject student");
+    } finally {
+      setActionLoading(null);
+      setConfirmAction(null);
+      setRejectionNote("");
+    }
+  };
 
   const { activeUsers, pendingUsers } = useMemo(() => {
     const s = search.toLowerCase();
@@ -1059,6 +1095,11 @@ export function UsersView({
                     <span className="font-medium text-gray-600 bg-gray-100 px-2 py-0.5 rounded-md">{user.idnumber}</span>
                     {user.course && <span className="truncate">{user.course} - {user.section}</span>}
                     {user.company && <span className="truncate">{user.company}</span>}
+                    {role === 'student' && attendanceSummary && (
+                        <span className="font-bold text-[#F97316] bg-orange-50 px-2 py-0.5 rounded-md border border-orange-100 whitespace-nowrap">
+                           {((attendanceSummary[user.idnumber] || 0) / (1000 * 60 * 60)).toFixed(2)} hrs
+                        </span>
+                    )}
                   </div>
                 </div>
               </div>
