@@ -1063,7 +1063,8 @@ interface StudentsViewProps {
                     otOut: effectiveConfig.otOut
                 } : effectiveConfig;
 
-                const schedule = buildSchedule(dayDate, scheduleToUse, overtimeShifts?.find(s => s.student_id === student.idnumber && s.date === dateStr));
+                const otShift = overtimeShifts?.find(s => s.student_id === student.idnumber && s.date === dateStr);
+                const schedule = buildSchedule(dayDate, scheduleToUse, otShift);
 
                 // DEBUG LOGGING REMOVED
 
@@ -1077,6 +1078,28 @@ interface StudentsViewProps {
                     
                     for (const log of sortedLogs) {
                         if (log.type === 'in') {
+                            // Handle missing OUT for previous session (Auto-Timeout mid-day)
+                            if (currentIn) {
+                                const shift = determineShift(currentIn.timestamp, schedule);
+                                let outTs = shift === 'am' ? schedule.amOut : (shift === 'pm' ? schedule.pmOut : schedule.otEnd);
+                                
+                                // Ensure outTs > inTs
+                                if (outTs <= currentIn.timestamp) {
+                                     outTs = currentIn.timestamp + 60000;
+                                }
+
+                                const virtualOut: AttendanceEntry = {
+                                    id: -(currentIn.id || Math.floor(Math.random() * 1000000)),
+                                    idnumber: currentIn.idnumber,
+                                    type: 'out',
+                                    timestamp: outTs,
+                                    photoDataUrl: '',
+                                    status: 'Pending',
+                                    validated_by: 'AUTO TIME OUT',
+                                    is_overtime: currentIn.is_overtime
+                                };
+                                sessions.push({in: currentIn, out: virtualOut});
+                            }
                             currentIn = log;
                         } else if (log.type === 'out' && currentIn) {
                             sessions.push({in: currentIn, out: log});
@@ -1084,7 +1107,7 @@ interface StudentsViewProps {
                         }
                     }
 
-                    // Handle Auto-Timeout for past dates
+                    // Handle Auto-Timeout for past dates (Trailing IN)
                     if (currentIn && !isToday) {
                         const shift = determineShift(currentIn.timestamp, schedule);
                         let outTs = shift === 'am' ? schedule.amOut : (shift === 'pm' ? schedule.pmOut : schedule.otEnd);
@@ -1129,7 +1152,13 @@ interface StudentsViewProps {
                         // correctly handling the lunch break gap.
                         const am = calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'am', schedule);
                         const pm = calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'pm', schedule);
-                        const ot = calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'ot', schedule);
+                        
+                        // Only calculate OT if explicitly marked or authorized
+                        let ot = 0;
+                        if (s.in.is_overtime || otShift) {
+                            ot = calculateSessionDuration(s.in.timestamp, s.out.timestamp, 'ot', schedule);
+                        }
+                        
                         total += am + pm + ot;
                     });
                     return total;

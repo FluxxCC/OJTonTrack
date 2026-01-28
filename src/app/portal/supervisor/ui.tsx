@@ -1337,22 +1337,23 @@ export function StudentAttendanceDetailView({
                           let outEntry: AttendanceEntry | null = null;
                           
                           const shiftEnd = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
-                          if (shouldAutoClose(shiftEnd)) {
-                              let outTime = new Date(shiftEnd);
-                              if (currentIn.timestamp > outTime.getTime()) {
-                                  outTime = new Date(currentIn.timestamp + 60000);
-                              }
-
-                              outEntry = {
-                                  id: currentIn.id ? -currentIn.id : -Math.floor(Math.random() * 1000000),
-                                  idnumber: currentIn.idnumber,
-                                  type: 'out',
-                                  timestamp: outTime.getTime(),
-                                  photoDataUrl: '',
-                                  status: 'Pending',
-                                  validated_by: 'AUTO TIME OUT'
-                              };
+                          
+                          // Always auto-close previous session when a new IN is encountered (implies session ended)
+                          let outTime = new Date(shiftEnd);
+                          if (currentIn.timestamp > outTime.getTime()) {
+                              outTime = new Date(currentIn.timestamp + 60000);
                           }
+
+                          outEntry = {
+                              id: currentIn.id ? -currentIn.id : -Math.floor(Math.random() * 1000000),
+                              idnumber: currentIn.idnumber,
+                              type: 'out',
+                              timestamp: outTime.getTime(),
+                              photoDataUrl: '',
+                              status: 'Pending',
+                              validated_by: 'AUTO TIME OUT'
+                          };
+                          
                           sessions.push({ in: currentIn, out: outEntry, shift });
                       }
                       currentIn = log;
@@ -1401,7 +1402,13 @@ export function StudentAttendanceDetailView({
                       // Use shared utility for uniform calculation (Check all shifts)
                       const { am, pm, ot } = calculateShiftDurations(session.in.timestamp, session.out.timestamp, schedule);
 
-                      total += am + pm + ot;
+                      // Only calculate OT if explicitly marked or authorized
+                      let finalOt = 0;
+                      if (session.in.is_overtime || dynamicOt) {
+                          finalOt = ot;
+                      }
+
+                      total += am + pm + finalOt;
                   });
                   return total;
               };

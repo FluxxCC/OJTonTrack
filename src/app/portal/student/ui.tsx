@@ -1441,12 +1441,16 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
           const afternoonWindowStart = pmIn.getTime() - 30 * 60 * 1000;
           const afternoonWindowEnd = pmOut.getTime();
 
+          // Allow early time-in for PM session (gap between AM Out and PM In - 30m)
+          // The "Golden Rule" will clamp the hours anyway, so no need to block.
+          /* 
           if (nowMs >= amOut.getTime() && nowMs < afternoonWindowStart) {
             setBreakPmInText(formatDisplayTime(effectiveSchedule.pmIn));
             setShowBreakModal(true);
             setSubmitting(false);
             return;
           }
+          */
 
           const pmOutMs = pmOut.getTime();
           const otInMs = otIn ? otIn.getTime() : null;
