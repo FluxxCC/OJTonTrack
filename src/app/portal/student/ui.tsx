@@ -19,6 +19,7 @@ export type AttendanceEntry = {
   status?: "Pending" | "Approved" | "Rejected"; 
   approvedAt?: number;
   validated_by?: string | null;
+  is_overtime?: boolean;
 };
 export type ReportEntry = { id?: number; title: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string; isViewedByInstructor?: boolean; week?: number; };
 type ServerAttendanceEntry = { 
@@ -562,6 +563,8 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   const [earlyOutShiftEndText, setEarlyOutShiftEndText] = useState<string>("");
   const [showNoScheduleModal, setShowNoScheduleModal] = useState(false);
   const [showCooldownModal, setShowCooldownModal] = useState(false);
+  const [showDuplicateModal, setShowDuplicateModal] = useState(false);
+  const [duplicateModalMessage, setDuplicateModalMessage] = useState("");
   const [showHistoryMode, setShowHistoryMode] = useState(false);
   const [selectedImage, setSelectedImage] = useState<{ url: string; timestamp: number } | null>(null);
   const [cameraFeedback, setCameraFeedback] = useState<string>("");
@@ -1354,6 +1357,78 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
         const nowMs = now.getTime();
 
+        // ---------------------------------------------------------
+        // Shift-based Duplicate Entry & Session Completion Validation
+        // ---------------------------------------------------------
+        let isOvertime = false;
+        if (authorizedOvertime) {
+             if (nowMs >= authorizedOvertime.start && nowMs <= authorizedOvertime.end) {
+                 isOvertime = true;
+             }
+        }
+
+        if (!isOvertime) {
+            const amOutTime = timeStringToMinutes(effectiveSchedule.amOut || "12:00");
+            const pmInTime = timeStringToMinutes(effectiveSchedule.pmIn || "13:00");
+            const midpointMinutes = (amOutTime + pmInTime) / 2;
+
+            const getMinutes = (ts: number) => {
+                const d = new Date(ts);
+                return d.getHours() * 60 + d.getMinutes();
+            };
+            const isAm = (ts: number) => getMinutes(ts) < midpointMinutes;
+
+            const currentIsAm = isAm(nowMs);
+
+            const todayEntries = attendance.filter(l => {
+                const d = new Date(l.timestamp);
+                return (
+                    d.getFullYear() === now.getFullYear() && 
+                    d.getMonth() === now.getMonth() && 
+                    d.getDate() === now.getDate() &&
+                    !l.is_overtime
+                );
+            });
+
+            let hasIn = false;
+            let hasOut = false;
+            for (const entry of todayEntries) {
+                if (isAm(entry.timestamp) === currentIsAm) {
+                    if (entry.type === 'in') hasIn = true;
+                    if (entry.type === 'out') hasOut = true;
+                }
+            }
+            const isSessionComplete = hasIn && hasOut;
+
+            let count = 0;
+            for (const entry of todayEntries) {
+                if (entry.type === type && isAm(entry.timestamp) === currentIsAm) {
+                    count++;
+                }
+            }
+
+            if (count >= 1 || (type === 'in' && isSessionComplete)) {
+                 let msg = "Duplicate entry for this session is not allowed.";
+                 
+                 if (type === 'in' && isSessionComplete) {
+                      if (currentIsAm) {
+                          msg = "Morning session already completed. You may time in again for the afternoon session starting at 12:30 PM.";
+                      } else {
+                          msg = "You have completed your attendance sessions for today. You may time in again tomorrow.";
+                      }
+                 } else if (count >= 1) {
+                      if (type === 'in') msg = "You have already timed in for this session.";
+                      else msg = "You have already timed out for this session.";
+                 }
+
+                 setDuplicateModalMessage(msg);
+                 setShowDuplicateModal(true);
+                 setSubmitting(false);
+                 return;
+            }
+        }
+        // ---------------------------------------------------------
+
         if (type === "in") {
           if (!amIn || !amOut || !pmIn || !pmOut) {
             setShowNoScheduleModal(true);
@@ -1508,6 +1583,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
               status,
               approvedAt: approvedAtNum,
               validated_by: e.validated_by,
+              is_overtime: e.is_overtime,
             };
           }) as AttendanceEntry[];
           onUpdate(mapped);
@@ -2070,6 +2146,8 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
            </div>
         </div>
       )}
+
+      {showDuplicateModal && <DuplicateEntryModal onClose={() => setShowDuplicateModal(false)} message={duplicateModalMessage} />}
 
       {showBreakModal && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
@@ -2919,6 +2997,28 @@ function ReportDetailsModal({ report, onClose }: { report: ReportEntry; onClose:
              Close
            </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function DuplicateEntryModal({ onClose, message }: { onClose: () => void; message: string }) {
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col items-center text-center">
+        <div className="h-16 w-16 bg-red-100 rounded-full flex items-center justify-center text-red-600 mb-4">
+          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+        </div>
+        <h3 className="text-xl font-bold text-gray-900 mb-2">Attention</h3>
+        <p className="text-gray-600 mb-6 leading-relaxed">
+          {message}
+        </p>
+        <button 
+          onClick={onClose}
+          className="w-full py-3 bg-[#F97316] text-white font-bold rounded-xl hover:bg-[#EA580C] transition-colors shadow-lg shadow-orange-200"
+        >
+          I Understand
+        </button>
       </div>
     </div>
   );

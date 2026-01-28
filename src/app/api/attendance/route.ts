@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
 import { getSupabaseAdmin } from "@/lib/supabaseClient";
+import { timeStringToMinutes } from "@/lib/attendance";
 const webPush: any = require("web-push");
 
 function configureCloudinary() {
@@ -179,6 +180,60 @@ export async function POST(req: Request) {
         }
     } catch (err) {
         console.error("Error checking overtime status:", err);
+    }
+
+    if (!is_overtime) {
+      try {
+        const { data: schedule } = await admin
+          .from("student_shift_schedules")
+          .select("am_out, pm_in")
+          .eq("student_id", idnumber)
+          .maybeSingle();
+
+        const amOutStr = schedule?.am_out || "12:00";
+        const pmInStr = schedule?.pm_in || "13:00";
+        
+        const amOutMins = timeStringToMinutes(amOutStr);
+        const pmInMins = timeStringToMinutes(pmInStr);
+        const midpoint = (amOutMins + pmInMins) / 2;
+        
+        const d = new Date(ts);
+        const currentMins = d.getHours() * 60 + d.getMinutes();
+        const isAm = currentMins < midpoint;
+
+        const startOfDay = new Date(ts);
+        startOfDay.setHours(0,0,0,0);
+        const endOfDay = new Date(ts);
+        endOfDay.setHours(23,59,59,999);
+
+        const { data: todayLogs } = await admin
+            .from("attendance")
+            .select("ts, type, is_overtime")
+            .eq("idnumber", idnumber)
+            .gte("ts", startOfDay.getTime())
+            .lte("ts", endOfDay.getTime());
+
+        if (todayLogs) {
+            let count = 0;
+            for (const log of todayLogs) {
+                if (log.is_overtime) continue;
+
+                const ld = new Date(Number(log.ts));
+                const lMins = ld.getHours() * 60 + ld.getMinutes();
+                const lIsAm = lMins < midpoint;
+
+                if (log.type === type && lIsAm === isAm) {
+                    count++;
+                }
+            }
+
+            if (count >= 1) {
+                 return NextResponse.json({ error: "Duplicate entry for this session is not allowed." }, { status: 400 });
+            }
+        }
+      } catch (err) {
+        console.error("Error checking session limits:", err);
+      }
     }
 
     const createdat = new Date().toISOString();
