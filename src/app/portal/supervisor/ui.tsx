@@ -35,7 +35,7 @@ import * as XLSX from 'xlsx-js-style';
 type ShiftSchedule = LibShiftSchedule;
 
 // --- Types ---
-export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; photourl?: string; photoUrl?: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; idnumber?: string; validated_by?: string | null };
+export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; photourl?: string; photoUrl?: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; idnumber?: string; validated_by?: string | null; is_overtime?: boolean };
 export type DateOverride = {
   date: string; // YYYY-MM-DD
   am?: { start: string; end: string };
