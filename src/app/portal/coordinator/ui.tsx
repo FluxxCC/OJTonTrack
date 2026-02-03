@@ -4,7 +4,7 @@ import { Search, Users, Clock } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import { calculateSessionDuration, buildSchedule, formatHours } from "@/lib/attendance";
 
-export type RoleType = "student" | "instructor" | "supervisor" | "approval" | "assign";
+export type RoleType = "student" | "instructor" | "supervisor" | "approval" | "assign" | "settings" | "academic-catalog" | "scheduling";
 
 export interface User {
   id: number;
@@ -54,13 +54,13 @@ function formatCourseSection(courseStr?: string, sectionStr?: string): string {
 
 export function Modal({ children, onClose, className }: { children: React.ReactNode; onClose: () => void; className?: string }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-      <div className={`relative w-full max-h-[85vh] rounded-2xl bg-white shadow-2xl overflow-y-auto animate-in fade-in zoom-in duration-200 ${className || "max-w-lg md:max-w-3xl"}`}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 backdrop-blur-sm">
+      <div className={`relative w-full max-h-[85vh] rounded-lg bg-white shadow-2xl overflow-y-auto animate-in fade-in zoom-in duration-200 ${className || "max-w-lg md:max-w-3xl"}`}>
         <button
           onClick={onClose}
-          className="absolute right-4 top-4 text-gray-400 hover:text-gray-600 z-10 p-1 hover:bg-gray-100 rounded-full transition-colors"
+          className="absolute right-3 top-3 text-gray-400 hover:text-gray-600 z-10 p-1 hover:bg-gray-100 rounded-full transition-colors"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
         </button>
         {children}
       </div>
@@ -121,52 +121,52 @@ function ConfirmationModal({
 
   return (
     <Modal onClose={isLoading ? () => {} : onCancel}>
-      <div className="flex flex-col items-center justify-center p-8 text-center">
-        <div className={`w-20 h-20 ${currentStyle.bg} ${currentStyle.text} rounded-full flex items-center justify-center mb-6 ring-8 ${currentStyle.ring}`}>
+      <div className="flex flex-col items-center justify-center p-4 text-center">
+        <div className={`w-12 h-12 ${currentStyle.bg} ${currentStyle.text} rounded-full flex items-center justify-center mb-3 ring-4 ${currentStyle.ring}`}>
           {isLoading ? (
-            <svg className="animate-spin h-10 w-10" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <svg className="animate-spin h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg>
           ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
           )}
         </div>
-        <h3 className="text-2xl font-bold text-gray-900 mb-2">{isLoading ? "Processing..." : title}</h3>
-        <p className="text-gray-500 mb-6 max-w-sm mx-auto leading-relaxed">
+        <h3 className="text-lg font-bold text-gray-900 mb-2">{isLoading ? "Processing..." : title}</h3>
+        <p className="text-gray-500 mb-4 max-w-sm mx-auto leading-relaxed text-xs">
           {isLoading ? "Please wait while we update the database and send notification emails. This may take a few seconds." : message}
         </p>
         {showNoteField && !isLoading && (
-          <div className="w-full max-w-md mx-auto mb-6 text-left">
-            <label className="block text-sm font-semibold text-gray-700 mb-1">
+          <div className="w-full max-w-md mx-auto mb-4 text-left">
+            <label className="block text-[10px] font-semibold text-gray-700 mb-1">
               {noteLabel}
               {noteRequired ? " *" : ""}
             </label>
             <textarea
               value={noteValue || ""}
               onChange={e => onNoteChange && onNoteChange(e.target.value)}
-              className="w-full min-h-[90px] rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all resize-none"
+              className="w-full min-h-[60px] rounded-lg border border-gray-300 px-3 py-2 text-xs text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all resize-none"
               placeholder={noteRequired ? "Required. Explain the reason for rejection..." : "Optional note..."}
               disabled={isLoading}
             />
           </div>
         )}
-        <div className="flex gap-4">
+        <div className="flex gap-2">
           <button
             onClick={onCancel}
             disabled={isLoading}
-            className="min-w-[120px] py-3 px-6 bg-white border border-gray-200 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            className="min-w-[80px] py-1.5 px-3 bg-white border border-gray-200 text-gray-700 font-bold rounded-lg hover:bg-gray-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed text-xs"
           >
             Cancel
           </button>
           <button
             onClick={onConfirm}
             disabled={!canConfirm}
-            className={`min-w-[120px] py-3 px-6 text-white font-bold rounded-xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg ${currentStyle.btn} ${!canConfirm ? "opacity-60 cursor-not-allowed hover:scale-100" : ""}`}
+            className={`min-w-[80px] py-1.5 px-3 text-white font-bold rounded-lg transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-sm text-xs ${currentStyle.btn} ${!canConfirm ? "opacity-60 cursor-not-allowed hover:scale-100" : ""}`}
           >
             {isLoading ? (
                <span className="flex items-center gap-2">
-                 <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                 <svg className="animate-spin h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                  </svg>
@@ -306,94 +306,86 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
   };
 
   return (
-    <div className="flex flex-col h-full bg-white rounded-3xl border border-gray-200 shadow-sm overflow-hidden">
-      <div className="px-6 py-5 border-b border-gray-100 bg-white">
-        <div>
-          <h2 className="text-xl font-extrabold text-gray-900 tracking-tight">Account Approvals</h2>
-          <p className="text-sm text-gray-500 font-medium mt-1">
-            Review and approve student account requests
-          </p>
-        </div>
-      </div>
-      <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-gray-50/30">
-        <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm flex flex-col md:flex-row gap-4 items-center">
-          <div className="flex-1 relative w-full">
-            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500" size={18} />
+    <div className="flex flex-col h-full bg-white overflow-hidden pt-4">
+      <div className="px-3 py-2 border-b border-gray-100 flex flex-wrap items-center gap-2 bg-white">
+        <h2 className="text-sm font-bold text-gray-900 whitespace-nowrap mr-auto">Account Approvals</h2>
+
+        <div className="relative w-full sm:w-48">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" size={12} />
             <input
               type="text"
-              placeholder="Search by name or ID..."
+              placeholder="Search..."
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
-              className="w-full pl-11 pr-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm"
+              className="w-full pl-8 pr-3 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] transition-all"
             />
-          </div>
+        </div>
+
+        <div className="flex gap-1.5 overflow-x-auto pb-1 sm:pb-0">
           <select
             value={filterCourse}
             onChange={e => {
               setFilterCourse(e.target.value);
               setFilterSection("");
             }}
-            className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
+            className="px-2 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[80px]"
           >
-            <option value="">All Courses</option>
+            <option value="">Course</option>
             {uniqueCourses.map(c => (
-              <option key={c} value={c}>
-                {c}
-              </option>
+              <option key={c} value={c}>{c}</option>
             ))}
           </select>
           <select
             value={filterSection}
             onChange={e => setFilterSection(e.target.value)}
-            className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
+            className="px-2 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[60px]"
           >
-            <option value="">All Sections</option>
+            <option value="">Section</option>
             {uniqueSections.map(s => (
-              <option key={s} value={s}>
-                {s}
-              </option>
+              <option key={s} value={s}>{s}</option>
             ))}
           </select>
           <select
             value={filterStatus}
             onChange={e => setFilterStatus(e.target.value)}
-            className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
+            className="px-2 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[80px]"
           >
-            <option value="ALL">All Status</option>
+            <option value="ALL">Status</option>
             <option value="PENDING">Pending</option>
             <option value="APPROVED">Approved</option>
             <option value="REJECTED">Rejected</option>
           </select>
+        </div>
 
-          {selectedIds.size > 0 && (
-            <div className="flex items-center gap-2 animate-in fade-in zoom-in duration-200">
+        {selectedIds.size > 0 && (
+            <div className="flex items-center gap-1.5 animate-in fade-in zoom-in duration-200">
               <button
                 onClick={() => setConfirmAction({ type: "bulk", action: "approve" })}
                 disabled={isBulkApproving}
-                className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-sm font-bold shadow-sm transition-colors disabled:opacity-50 whitespace-nowrap"
+                className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-colors disabled:opacity-50 whitespace-nowrap"
               >
-                {isBulkApproving ? "Processing..." : `Approve (${selectedIds.size})`}
+                {isBulkApproving ? "..." : `Approve (${selectedIds.size})`}
               </button>
               <button
                 onClick={() => setConfirmAction({ type: "bulk", action: "reject" })}
                 disabled={isBulkApproving}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-bold shadow-sm transition-colors disabled:opacity-50 whitespace-nowrap"
+                className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-colors disabled:opacity-50 whitespace-nowrap"
               >
-                {isBulkApproving ? "Processing..." : `Reject (${selectedIds.size})`}
+                {isBulkApproving ? "..." : `Reject (${selectedIds.size})`}
               </button>
             </div>
-          )}
-        </div>
+        )}
+      </div>
 
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex-1">
-          <div className="overflow-x-auto h-full hidden md:block">
-            <table className="w-full text-sm text-left">
+      <div className="flex-1 overflow-y-auto bg-white">
+        <div className="h-full">
+            <table className="w-full text-xs text-left">
               <thead className="bg-gray-50 text-gray-500 font-medium border-b border-gray-100 sticky top-0 z-10">
                 <tr>
-                  <th className="px-6 py-3 w-10">
+                  <th className="px-3 py-1.5 w-8">
                     <input
                       type="checkbox"
-                      className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                      className="rounded border-gray-300 text-orange-600 focus:ring-orange-500 w-3.5 h-3.5"
                       onChange={toggleAll}
                       checked={
                         filteredStudents.some(s => (s.signup_status || "APPROVED") !== "APPROVED") &&
@@ -403,17 +395,17 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                       }
                     />
                   </th>
-                  <th className="px-6 py-3">Student</th>
-                  <th className="px-6 py-3">ID Number</th>
-                  <th className="px-6 py-3">Course & Section</th>
-                  <th className="px-6 py-3">Status</th>
-                  <th className="px-6 py-3">Action</th>
+                  <th className="px-3 py-1.5">Student</th>
+                  <th className="px-3 py-1.5">ID Number</th>
+                  <th className="px-3 py-1.5">Course & Section</th>
+                  <th className="px-3 py-1.5">Status</th>
+                  <th className="px-3 py-1.5">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {filteredStudents.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-6 py-8 text-center text-gray-500">
+                    <td colSpan={6} className="px-4 py-6 text-center text-gray-500">
                       No students found
                     </td>
                   </tr>
@@ -426,17 +418,17 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                         key={s.id}
                         className={`hover:bg-gray-50/50 ${isSelected ? "bg-orange-50/30" : ""}`}
                       >
-                        <td className="px-6 py-3">
+                        <td className="px-3 py-1">
                           {isPending && (
                             <input
                               type="checkbox"
                               checked={isSelected}
                               onChange={() => toggleSelection(s.id)}
-                              className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                              className="rounded border-gray-300 text-orange-600 focus:ring-orange-500 w-3.5 h-3.5"
                             />
                           )}
                         </td>
-                        <td className="px-6 py-3 font-medium text-gray-900">
+                        <td className="px-3 py-1 font-medium text-gray-900">
                           <button
                             type="button"
                             onClick={() => onView(s)}
@@ -445,13 +437,13 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                             {s.firstname} {s.lastname}
                           </button>
                         </td>
-                        <td className="px-6 py-3 text-gray-600">{s.idnumber}</td>
-                        <td className="px-6 py-3 text-gray-600">
+                        <td className="px-3 py-1 text-gray-600">{s.idnumber}</td>
+                        <td className="px-3 py-1 text-gray-600">
                           {formatCourseSection(s.course, s.section)}
                         </td>
-                        <td className="px-6 py-3">
+                        <td className="px-3 py-1">
                           <span
-                            className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium border ${
+                            className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium border ${
                               !isPending
                                 ? "bg-green-50 text-green-700 border-green-200"
                                 : s.signup_status === "REJECTED"
@@ -462,9 +454,9 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                             {s.signup_status || "APPROVED"}
                           </span>
                         </td>
-                        <td className="px-6 py-3">
+                        <td className="px-3 py-1">
                           {isPending && (
-                            <div className="flex gap-2">
+                            <div className="flex gap-1.5">
                               <button
                                 onClick={() =>
                                   setConfirmAction({
@@ -474,7 +466,7 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                                   })
                                 }
                                 disabled={actionLoading === s.id}
-                                className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
+                                className="px-2 py-0.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-colors disabled:opacity-50"
                               >
                                 {actionLoading === s.id ? "..." : "Approve"}
                               </button>
@@ -487,7 +479,7 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                                   })
                                 }
                                 disabled={actionLoading === s.id}
-                                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
+                                className="px-2 py-0.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-colors disabled:opacity-50"
                               >
                                 {actionLoading === s.id ? "..." : "Reject"}
                               </button>
@@ -515,7 +507,7 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                   return (
                     <div
                       key={s.id}
-                      className={`p-4 ${isSelected ? "bg-orange-50/30" : ""}`}
+                      className={`p-3 ${isSelected ? "bg-orange-50/30" : ""}`}
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex-1">
@@ -640,7 +632,6 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
             isLoading={actionLoading !== null || isBulkApproving}
           />
         )}
-      </div>
     </div>
   );
 }
@@ -669,16 +660,16 @@ const MultiSelect = ({ options, value, onChange, placeholder }: { options: {id: 
       <button 
         type="button" 
         onClick={() => setOpen(!open)} 
-        className="w-full text-left rounded-xl border border-gray-300 px-4 py-2.5 text-[#1F2937] bg-white flex justify-between items-center focus:ring-2 focus:ring-[#F97316]/20 transition-all hover:border-gray-400 group"
+        className="w-full text-left rounded-lg border border-gray-300 px-3 py-1.5 text-[#1F2937] bg-white flex justify-between items-center focus:ring-2 focus:ring-[#F97316]/20 transition-all hover:border-gray-400 group"
       >
-        <span className={`text-sm ${value.length > 0 ? 'text-gray-900 font-medium' : 'text-gray-500'}`}>
+        <span className={`text-xs ${value.length > 0 ? 'text-gray-900 font-medium' : 'text-gray-500'}`}>
           {value.length > 0 ? `${value.length} selected` : placeholder}
         </span>
-        <span className="text-xs text-gray-400 group-hover:text-gray-600 transition-colors">▼</span>
+        <span className="text-[10px] text-gray-400 group-hover:text-gray-600 transition-colors">▼</span>
       </button>
 
       {open && (
-        <div className="absolute z-50 mt-1 w-full max-h-60 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-xl p-2 flex flex-col gap-1 animate-in fade-in zoom-in-95 duration-100">
+        <div className="absolute z-50 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-xl p-1.5 flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100">
           {options.map(opt => {
             const isSelected = value.includes(opt.id);
             return (
@@ -692,14 +683,14 @@ const MultiSelect = ({ options, value, onChange, placeholder }: { options: {id: 
                     onChange([...value, opt.id]);
                   }
                 }}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-left group/item ${isSelected ? 'bg-orange-50' : 'hover:bg-gray-50'}`}
+                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors text-left group/item ${isSelected ? 'bg-orange-50' : 'hover:bg-gray-50'}`}
               >
-                <div className={`w-5 h-5 rounded-md border flex items-center justify-center transition-colors ${isSelected ? 'border-orange-500 bg-orange-500' : 'border-gray-300 bg-white group-hover/item:border-orange-300'}`}>
+                <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${isSelected ? 'border-orange-500 bg-orange-500' : 'border-gray-300 bg-white group-hover/item:border-orange-300'}`}>
                   {isSelected && (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                   )}
                 </div>
-                <span className={`text-sm font-medium ${isSelected ? 'text-orange-900' : 'text-[#1F2937]'}`}>{opt.name}</span>
+                <span className={`text-xs font-medium ${isSelected ? 'text-orange-900' : 'text-[#1F2937]'}`}>{opt.name}</span>
               </button>
             );
           })}
@@ -707,8 +698,8 @@ const MultiSelect = ({ options, value, onChange, placeholder }: { options: {id: 
       )}
 
       {value.length > 0 && (
-        <div className="mt-4 animate-in fade-in slide-in-from-top-2 duration-300">
-          <div className="flex items-center justify-between mb-2.5 px-1">
+        <div className="mt-2 animate-in fade-in slide-in-from-top-2 duration-300">
+          <div className="flex items-center justify-between mb-1.5 px-1">
             <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-widest">Assigned Classes</span>
             <button 
               type="button"
@@ -719,9 +710,9 @@ const MultiSelect = ({ options, value, onChange, placeholder }: { options: {id: 
               Clear All
             </button>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-1.5">
             {options.filter(o => value.includes(o.id)).map(o => (
-              <span key={o.id} className="inline-flex items-center px-3 py-1.5 rounded-lg bg-orange-50 text-orange-700 text-xs font-bold border border-orange-100 shadow-sm transition-all hover:bg-orange-100 hover:border-orange-200 group/tag">
+              <span key={o.id} className="inline-flex items-center px-2 py-1 rounded-md bg-orange-50 text-orange-700 text-[10px] font-bold border border-orange-100 shadow-sm transition-all hover:bg-orange-100 hover:border-orange-200 group/tag">
                 {o.name}
                 <button
                   type="button"
@@ -885,59 +876,59 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
   };
 
   return (
-    <div className="p-6 sm:p-8">
-      <h2 className="text-2xl font-bold text-[#1F2937] mb-6">Add New {title}</h2>
+    <div className="p-4">
+      <h2 className="text-base font-bold text-gray-900 mb-3">Add New {title}</h2>
       
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        <label className="grid gap-1.5">
-          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">ID Number</span>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <label className="grid gap-1">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">ID Number</span>
           <input
             value={form.idnumber}
             onChange={(e) => setForm({ ...form, idnumber: e.target.value })}
-            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="e.g. 2021-00001"
           />
         </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Password</span>
+        <label className="grid gap-1">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Password</span>
           <input
             value={form.password}
             onChange={(e) => setForm({ ...form, password: e.target.value })}
-            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="Temporary password"
           />
         </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">First Name</span>
+        <label className="grid gap-1">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">First Name</span>
           <input
             value={form.firstname}
             onChange={(e) => setForm({ ...form, firstname: e.target.value })}
-            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="First name"
           />
         </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Last Name</span>
+        <label className="grid gap-1">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Last Name</span>
           <input
             value={form.lastname}
             onChange={(e) => setForm({ ...form, lastname: e.target.value })}
-            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="Last name"
           />
         </label>
-        <label className="grid gap-1.5 md:col-span-2">
-          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Email</span>
+        <label className="grid gap-1 md:col-span-2">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Email</span>
           <input
             value={form.email}
             onChange={(e) => setForm({ ...form, email: e.target.value })}
-            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="Email address"
           />
         </label>
         {role === "student" && (
           <>
-            <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Course</span>
+            <label className="grid gap-1">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Course</span>
               <select
                 value={form.courseIds[0] || ""}
                 onChange={(e) => {
@@ -949,14 +940,14 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
                     course: course?.name || ""
                   });
                 }}
-                className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all bg-white"
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all bg-white"
               >
                 <option value="">Select course</option>
                 {availableCourses.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </label>
-            <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Section</span>
+            <label className="grid gap-1">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Section</span>
               <select
                 value={form.sectionIds[0] || ""}
                 onChange={(e) => {
@@ -968,7 +959,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
                     section: section?.name || ""
                   });
                 }}
-                className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all bg-white"
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all bg-white"
               >
                 <option value="">{form.courseIds.length === 0 ? "Select course first" : "Select section"}</option>
                 {availableSections
@@ -979,8 +970,8 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
           </>
         )}
         {role === "instructor" && (
-          <label className="grid gap-1.5">
-            <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Course & Section</span>
+          <label className="grid gap-1">
+            <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Course & Section</span>
             <MultiSelect
               options={combinedCourseSections}
               value={form.sectionIds}
@@ -995,21 +986,21 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
         )}
         {role === "supervisor" && (
           <>
-            <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Company</span>
+            <label className="grid gap-1">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Company</span>
               <input
                 value={form.company}
                 onChange={(e) => setForm({ ...form, company: e.target.value })}
-                className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
                 placeholder="Company name"
               />
             </label>
-            <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Location</span>
+            <label className="grid gap-1">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Location</span>
               <input
                 value={form.location}
                 onChange={(e) => setForm({ ...form, location: e.target.value })}
-                className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
                 placeholder="Location"
               />
             </label>
@@ -1017,12 +1008,12 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
         )}
         {role === "student" && (
           <>
-            <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Supervisor</span>
+            <label className="grid gap-1">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Supervisor</span>
               {form.supervisorid ? (
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex-1 min-w-0">
-                    <div className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900 bg-white sm:px-4 sm:py-2.5">
+                    <div className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 bg-white">
                       <span className="block truncate">
                         {(() => {
                           const sup = users.find(u => u.idnumber === form.supervisorid);
@@ -1034,7 +1025,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
                   </div>
                   <button
                     onClick={() => setForm({ ...form, supervisorid: "" })}
-                    className="shrink-0 text-sm font-semibold text-red-600 hover:text-red-700"
+                    className="shrink-0 text-xs font-semibold text-red-600 hover:text-red-700"
                   >
                     Clear
                   </button>
@@ -1043,7 +1034,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
                 <button 
                   onClick={() => setShowSupervisorModal(true)}
                   disabled={form.courseIds.length === 0 || form.sectionIds.length === 0}
-                  className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all bg-white text-left"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all bg-white text-left"
                 >
                   {form.courseIds.length === 0 || form.sectionIds.length === 0 ? "Select course & section first" : "Choose supervisor"}
                 </button>
@@ -1051,10 +1042,10 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
             </label>
             {showSupervisorModal && (
               <Modal onClose={() => setShowSupervisorModal(false)}>
-                <div className="p-6">
-                  <div className="mb-4 relative">
-                    <h3 className="text-lg font-bold text-gray-900">Select Supervisor</h3>
-                    <p className="text-xs text-gray-500 mt-1">Search and assign an eligible supervisor</p>
+                <div className="p-4">
+                  <div className="mb-3 relative">
+                    <h3 className="text-base font-bold text-gray-900">Select Supervisor</h3>
+                    <p className="text-[10px] text-gray-500 mt-0.5">Search and assign an eligible supervisor</p>
                     {(() => {
                       const eligible = users.filter(u => {
                         if (String(u.role).toLowerCase() !== "supervisor") return false;
@@ -1083,19 +1074,19 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
                         );
                       }).length;
                       return (
-                        <span className="absolute right-14 top-0 mt-1 inline-flex items-center justify-center h-6 min-w-6 px-2 rounded-full bg-[#F97316] text-white text-xs font-bold">
+                        <span className="absolute right-12 top-0 mt-1 inline-flex items-center justify-center h-5 min-w-5 px-1.5 rounded-full bg-[#F97316] text-white text-[10px] font-bold">
                           {eligible}
                         </span>
                       );
                     })()}
                   </div>
-                  <div className="relative mb-4">
-                    <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                  <div className="relative mb-3">
+                    <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                     <input
                       value={supervisorSearch}
                       onChange={(e) => setSupervisorSearch(e.target.value)}
                       placeholder="Search by name, ID, company or location..."
-                      className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-300 rounded-xl text-sm font-medium placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-900 transition-all shadow-sm"
+                      className="w-full pl-9 pr-3 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-900 transition-all shadow-sm"
                     />
                   </div>
                   <div className="space-y-2 max-h-[50vh] overflow-y-auto">
@@ -1115,17 +1106,17 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
                         );
                       })
                       .map(u => (
-                        <div key={u.id} className="w-full p-3 rounded-xl border border-gray-200 hover:border-orange-200 hover:bg-orange-50 transition-all">
+                        <div key={u.id} className="w-full p-2.5 rounded-lg border border-gray-200 hover:border-orange-200 hover:bg-orange-50 transition-all">
                           <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-3 min-w-0">
-                              <div className="h-10 w-10 rounded-xl bg-orange-50 border border-orange-100 text-[#F97316] flex items-center justify-center font-bold">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <div className="h-8 w-8 rounded-lg bg-orange-50 border border-orange-100 text-[#F97316] flex items-center justify-center font-bold text-xs">
                                 {(((u.firstname || u.name || u.idnumber || "?")[0]) || "?").toUpperCase()}
                               </div>
                               <div className="min-w-0">
-                                <div className="text-sm font-bold text-gray-900 truncate">
+                                <div className="text-xs font-bold text-gray-900 truncate">
                                   {((u.firstname || "") + " " + (u.lastname || "")).trim() || u.name || u.idnumber}
                                 </div>
-                                <div className="text-xs text-gray-500 mt-0.5 truncate">
+                                <div className="text-[10px] text-gray-500 mt-0.5 truncate">
                                   {u.idnumber} • {u.company || "Company N/A"} • {u.location || "Location N/A"}
                                 </div>
                               </div>
@@ -1135,7 +1126,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
                                 setForm({ ...form, supervisorid: u.idnumber });
                                 setShowSupervisorModal(false);
                               }}
-                              className="px-4 py-2 rounded-xl bg-[#F97316] text-white text-sm font-bold hover:bg-[#EA580C]"
+                              className="px-3 py-1.5 rounded-lg bg-[#F97316] text-white text-xs font-bold hover:bg-[#EA580C]"
                             >
                               Select
                             </button>
@@ -1146,7 +1137,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
                   <div className="mt-4 flex justify-end gap-2">
                     <button
                       onClick={() => setShowSupervisorModal(false)}
-                      className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl"
+                      className="px-3 py-1.5 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg"
                     >
                       Cancel
                     </button>
@@ -1158,12 +1149,12 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
         )}
       </div>
 
-      <div className="mt-8 flex flex-col gap-3">
-        {message && <div className="text-sm text-red-500 bg-red-50 p-3 rounded-xl border border-red-100">{message}</div>}
+      <div className="mt-5 flex flex-col gap-2">
+        {message && <div className="text-xs text-red-500 bg-red-50 p-2.5 rounded-lg border border-red-100">{message}</div>}
         <button
           onClick={submit}
           disabled={loading}
-          className="w-full rounded-xl bg-[#F97316] py-3.5 text-white font-bold hover:bg-[#EA580C] transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-orange-200"
+          className="w-full rounded-lg bg-[#F97316] py-2 text-white text-xs font-bold hover:bg-[#EA580C] transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-orange-200"
         >
           {loading ? "Adding..." : "Add User"}
         </button>
@@ -1282,8 +1273,22 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
         firstname: form.firstname || undefined,
         lastname: form.lastname || undefined,
         email: form.email || undefined,
-        course: form.course || undefined,
-        section: form.section || undefined,
+        // For students, we must send IDs for course/section, not names
+        course: (() => {
+          if (user.role === 'student') {
+            const c = availableCourses.find(c => c.name === form.course);
+            return c ? c.id : form.course;
+          }
+          return form.course || undefined;
+        })(),
+        section: (() => {
+           if (user.role === 'student') {
+             const c = availableCourses.find(c => c.name === form.course);
+             const s = availableSections.find(s => s.name === form.section && (c ? s.course_id === c.id : true));
+             return s ? s.id : form.section;
+           }
+           return form.section || undefined;
+        })(),
         company: form.company || undefined,
         location: form.location || undefined,
         actorId,
@@ -1313,59 +1318,59 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
   };
 
   return (
-    <div className="p-6 sm:p-8">
-      <h2 className="text-2xl font-bold text-[#1F2937] mb-6">Edit User</h2>
+    <div className="p-4">
+      <h2 className="text-base font-bold text-[#1F2937] mb-3">Edit User</h2>
       
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        <label className="grid gap-1.5">
-          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">ID Number</span>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <label className="grid gap-1">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">ID Number</span>
           <input
             value={form.idnumber}
             onChange={(e) => setForm({ ...form, idnumber: e.target.value })}
-            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="e.g. 2021-00001"
           />
         </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">New Password (Optional)</span>
+        <label className="grid gap-1">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">New Password (Optional)</span>
           <input
             value={form.password}
             onChange={(e) => setForm({ ...form, password: e.target.value })}
-            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="Leave blank to keep current"
           />
         </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">First Name</span>
+        <label className="grid gap-1">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">First Name</span>
           <input
             value={form.firstname}
             onChange={(e) => setForm({ ...form, firstname: e.target.value })}
-            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="First name"
           />
         </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Last Name</span>
+        <label className="grid gap-1">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Last Name</span>
           <input
             value={form.lastname}
             onChange={(e) => setForm({ ...form, lastname: e.target.value })}
-            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="Last name"
           />
         </label>
-        <label className="grid gap-1.5 md:col-span-2">
-          <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Email</span>
+        <label className="grid gap-1 md:col-span-2">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Email</span>
           <input
             value={form.email}
             onChange={(e) => setForm({ ...form, email: e.target.value })}
-            className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
             placeholder="Email address"
           />
         </label>
         {user.role === "student" && (
           <>
-            <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Course</span>
+            <label className="grid gap-1">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Course</span>
               <div className="relative">
                 <select
                   value={form.course}
@@ -1373,25 +1378,25 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
                     const newCourse = e.target.value;
                     setForm({ ...form, course: newCourse, section: "" });
                   }}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all appearance-none bg-white"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all appearance-none bg-white"
                 >
                   <option value="">Select Course</option>
                   {availableCourses.map(c => (
                     <option key={c.id} value={c.name}>{c.name}</option>
                   ))}
                 </select>
-                <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
                 </div>
               </div>
             </label>
-            <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Section</span>
+            <label className="grid gap-1">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Section</span>
               <div className="relative">
                 <select
                   value={form.section}
                   onChange={(e) => setForm({ ...form, section: e.target.value })}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all appearance-none bg-white"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all appearance-none bg-white"
                   disabled={!form.course}
                 >
                   <option value="">Select Section</option>
@@ -1406,17 +1411,17 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
                     ))
                   }
                 </select>
-                <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
                 </div>
               </div>
             </label>
-            <label className="grid gap-1.5 md:col-span-2">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Supervisor</span>
+            <label className="grid gap-1 md:col-span-2">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Supervisor</span>
               {form.supervisorid ? (
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex-1 min-w-0">
-                    <div className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900 bg-white sm:px-4 sm:py-2.5">
+                    <div className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 bg-white">
                       <span className="block truncate">
                         {(() => {
                           const sup = users.find(u => u.idnumber === form.supervisorid);
@@ -1428,7 +1433,7 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
                   </div>
                   <button
                     onClick={() => setForm({ ...form, supervisorid: "" })}
-                    className="shrink-0 text-sm font-semibold text-red-600 hover:text-red-700"
+                    className="shrink-0 text-[10px] font-bold text-red-600 hover:text-red-700 uppercase tracking-wide"
                   >
                     Clear
                   </button>
@@ -1436,7 +1441,7 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
               ) : (
                 <button 
                   onClick={() => setShowSupervisorModal(true)}
-                  className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all bg-white text-left"
+                  className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all bg-white text-left"
                 >
                   Choose supervisor
                 </button>
@@ -1445,8 +1450,8 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
           </>
         )}
         {user.role === "instructor" && (
-          <label className="grid gap-1.5 md:col-span-2">
-            <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Course & Section</span>
+          <label className="grid gap-1 md:col-span-2">
+            <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Course & Section</span>
             <MultiSelect
               options={combinedCourseSections}
               value={form.sectionIds}
@@ -1461,21 +1466,21 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
         )}
         {user.role === "supervisor" && (
           <>
-            <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Company</span>
+            <label className="grid gap-1">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Company</span>
               <input
                 value={form.company}
                 onChange={(e) => setForm({ ...form, company: e.target.value })}
-                className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
                 placeholder="Company name"
               />
             </label>
-            <label className="grid gap-1.5">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Location</span>
+            <label className="grid gap-1">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Location</span>
               <input
                 value={form.location}
                 onChange={(e) => setForm({ ...form, location: e.target.value })}
-                className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
                 placeholder="Location"
               />
             </label>
@@ -1483,12 +1488,12 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
         )}
       </div>
 
-      <div className="mt-8 flex flex-col gap-3">
-        {message && <div className="text-sm text-red-500 bg-red-50 p-3 rounded-xl border border-red-100">{message}</div>}
+      <div className="mt-6 flex flex-col gap-3">
+        {message && <div className="text-xs text-red-500 bg-red-50 p-3 rounded-lg border border-red-100">{message}</div>}
         <button
           onClick={submit}
           disabled={loading}
-          className="w-full rounded-xl bg-[#F97316] py-3.5 text-white font-bold hover:bg-[#EA580C] transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-orange-200"
+          className="w-full rounded-lg bg-[#F97316] py-2 text-xs font-bold hover:bg-[#EA580C] transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg text-white"
         >
           {loading ? "Saving..." : "Save Changes"}
         </button>
@@ -1496,15 +1501,15 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
 
       {assignmentConflict && (
         <Modal onClose={() => setAssignmentConflict(null)}>
-          <div className="p-6 sm:p-8">
-            <h3 className="text-xl font-bold text-gray-900 mb-2">Instructor already assigned</h3>
-            <p className="text-sm text-gray-600 mb-4">
+          <div className="p-5 sm:p-6">
+            <h3 className="text-lg font-bold text-gray-900 mb-2">Instructor already assigned</h3>
+            <p className="text-xs text-gray-600 mb-4">
               {assignmentConflict}
             </p>
             <div className="flex justify-end">
               <button
                 onClick={() => setAssignmentConflict(null)}
-                className="px-4 py-2.5 rounded-xl bg-[#F97316] text-white text-sm font-bold hover:bg-[#EA580C] transition-colors"
+                className="px-3 py-2 rounded-lg bg-[#F97316] text-white text-xs font-bold hover:bg-[#EA580C] transition-colors"
               >
                 Close
               </button>
@@ -1515,21 +1520,21 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
 
       {showSupervisorModal && (
         <Modal onClose={() => setShowSupervisorModal(false)}>
-          <div className="p-6">
-            <div className="mb-4 relative">
-              <h3 className="text-lg font-bold text-gray-900">Select Supervisor</h3>
-              <p className="text-xs text-gray-500 mt-1">Search and assign an eligible supervisor</p>
+          <div className="p-4">
+            <div className="mb-3 relative">
+              <h3 className="text-base font-bold text-gray-900">Select Supervisor</h3>
+              <p className="text-[10px] text-gray-500 mt-0.5">Search and assign an eligible supervisor</p>
               <div className="relative mt-2">
-                <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                 <input
                   value={supervisorSearch}
                   onChange={(e) => setSupervisorSearch(e.target.value)}
                   placeholder="Search by name, ID, or company"
-                  className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-300 rounded-xl text-sm font-medium placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-900 transition-all shadow-sm"
+                  className="w-full pl-9 pr-3 py-2 bg-white border border-gray-300 rounded-lg text-xs font-medium placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-900 transition-all shadow-sm"
                 />
               </div>
             </div>
-            <div className="space-y-2 max-h-[50vh] overflow-y-auto">
+            <div className="space-y-1.5 max-h-[50vh] overflow-y-auto">
               {users
                 .filter(u => {
                   if (String(u.role).toLowerCase() !== "supervisor") return false;
@@ -1567,16 +1572,16 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
                   return u.idnumber.toLowerCase().includes(s) || name.includes(s) || company.includes(s);
                 })
                 .map(u => (
-                  <div key={u.id} className="flex items-center justify-between p-3 rounded-xl border border-gray-200 bg-white hover:border-orange-200 hover:shadow-sm transition-all">
-                    <div className="flex items-center gap-3">
-                      <div className="h-10 w-10 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold">
+                  <div key={u.id} className="flex items-center justify-between p-2 rounded-lg border border-gray-200 bg-white hover:border-orange-200 hover:shadow-sm transition-all">
+                    <div className="flex items-center gap-2.5">
+                      <div className="h-8 w-8 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-xs">
                         {(u.firstname?.[0] || u.idnumber[0]).toUpperCase()}
                       </div>
                       <div className="min-w-0">
-                        <div className="font-semibold text-gray-900 truncate">
+                        <div className="font-semibold text-gray-900 truncate text-xs">
                           {((u.firstname || "") + " " + (u.lastname || "")).trim() || u.name || u.idnumber}
                         </div>
-                        <div className="text-xs text-gray-500 truncate">
+                        <div className="text-[10px] text-gray-500 truncate">
                           {u.company || "N/A"}
                         </div>
                       </div>
@@ -1586,17 +1591,17 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
                         setForm({ ...form, supervisorid: u.idnumber });
                         setShowSupervisorModal(false);
                       }}
-                      className="px-4 py-2 rounded-xl bg-[#F97316] text-white text-sm font-bold hover:bg-[#EA580C]"
+                      className="px-3 py-1.5 rounded-lg bg-[#F97316] text-white text-[10px] font-bold hover:bg-[#EA580C]"
                     >
                       Select
                     </button>
                   </div>
                 ))}
             </div>
-            <div className="mt-4 flex justify-end gap-2">
+            <div className="mt-3 flex justify-end gap-2">
               <button
                 onClick={() => setShowSupervisorModal(false)}
-                className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl"
+                className="px-3 py-1.5 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg"
               >
                 Cancel
               </button>
@@ -1608,7 +1613,7 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
   );
 }
 
-export function ViewUserDetails({ user, users, onClose }: { user: User; users: User[]; onClose: () => void }) {
+export function ViewUserDetails({ user, users, onClose }: { user: User; users: User[]; onClose: () => void; }) {
   const supervisor = useMemo(() => {
     if (!user.supervisorid) return null;
     return users.find(u => u.role === "supervisor" && u.idnumber === user.supervisorid) || null;
@@ -1621,8 +1626,11 @@ export function ViewUserDetails({ user, users, onClose }: { user: User; users: U
 
     const fetchStats = async () => {
       if (!supabase) return;
+      
+      let query = supabase.from('attendance').select('*').eq('idnumber', user.idnumber);
+      
       const [{ data: logs }, { data: otShifts }, { data: shiftsData }] = await Promise.all([
-        supabase.from('attendance').select('*').eq('idnumber', user.idnumber),
+        query,
         supabase.from('overtime_shifts').select('*').eq('student_id', user.idnumber),
         supabase.from('shifts').select('*')
       ]);
@@ -1701,87 +1709,87 @@ export function ViewUserDetails({ user, users, onClose }: { user: User; users: U
 
   
   return (
-    <div className="p-6 sm:p-8">
-      <h2 className="text-2xl font-bold text-[#1F2937] mb-6">User Details</h2>
+    <div className="p-4 sm:p-5">
+      <h2 className="text-lg font-bold text-[#1F2937] mb-4">User Details</h2>
       
-      <div className="space-y-6">
-        <div className="flex items-center gap-5 p-5 bg-gray-50 rounded-2xl border border-gray-100">
-          <div className="h-16 w-16 rounded-full bg-white text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-3xl shadow-sm">
+      <div className="space-y-4">
+        <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl border border-gray-100">
+          <div className="h-10 w-10 rounded-full bg-white text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-lg shadow-sm">
             {(user.firstname?.[0] || user.idnumber[0]).toUpperCase()}
           </div>
           <div>
-            <h3 className="text-xl font-bold text-gray-900">{user.firstname} {user.lastname}</h3>
-            <p className="text-sm text-gray-500 capitalize font-medium">{user.role}</p>
+            <h3 className="text-base font-bold text-gray-900">{user.firstname} {user.lastname}</h3>
+            <p className="text-[10px] text-gray-500 capitalize font-medium">{user.role}</p>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-            <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">ID Number</p>
-            <p className="text-base font-semibold text-gray-900">{user.idnumber}</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+            <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">ID Number</p>
+            <p className="text-xs font-semibold text-gray-900">{user.idnumber}</p>
           </div>
-          <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-            <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Full Name</p>
-            <p className="text-base font-semibold text-gray-900">{user.firstname} {user.middlename ? user.middlename + " " : ""}{user.lastname}</p>
+          <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+            <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Full Name</p>
+            <p className="text-xs font-semibold text-gray-900">{user.firstname} {user.middlename ? user.middlename + " " : ""}{user.lastname}</p>
           </div>
 
           {user.role === "student" && (
             <>
-              <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-                <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Course</p>
-                <p className="text-base font-semibold text-gray-900">{user.course || "N/A"}</p>
+              <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+                <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Course</p>
+                <p className="text-xs font-semibold text-gray-900">{user.course || "N/A"}</p>
               </div>
-              <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-                <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Section</p>
-                <p className="text-base font-semibold text-gray-900">{user.section || "N/A"}</p>
+              <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+                <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Section</p>
+                <p className="text-xs font-semibold text-gray-900">{user.section || "N/A"}</p>
               </div>
-              <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-                <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Supervisor</p>
-                <p className="text-base font-semibold text-gray-900">
+              <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+                <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Supervisor</p>
+                <p className="text-xs font-semibold text-gray-900">
                   {supervisor ? (supervisor.firstname || supervisor.lastname ? `${supervisor.firstname || ""} ${supervisor.lastname || ""}`.trim() : supervisor.name || supervisor.idnumber) : (user.supervisorid || "N/A")}
                 </p>
               </div>
-              <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-                <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Supervisor Company</p>
-                <p className="text-base font-semibold text-gray-900">{supervisor?.company || "N/A"}</p>
+              <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+                <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Supervisor Company</p>
+                <p className="text-xs font-semibold text-gray-900">{supervisor?.company || "N/A"}</p>
               </div>
-              <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-                <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Supervisor Location</p>
-                <p className="text-base font-semibold text-gray-900">{supervisor?.location || "N/A"}</p>
+              <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+                <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Supervisor Location</p>
+                <p className="text-xs font-semibold text-gray-900">{supervisor?.location || "N/A"}</p>
               </div>
             </>
           )}
           {user.role === "instructor" && (
-            <div className="col-span-1 md:col-span-2 p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-              <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Assigned Classes</p>
-              <div className="flex flex-wrap gap-2 mt-2">
+            <div className="col-span-1 md:col-span-2 p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+              <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Assigned Classes</p>
+              <div className="flex flex-wrap gap-1.5 mt-1">
                 {user.course ? formatCourseSection(user.course, user.section).split(', ').map((cls, idx) => (
-                  <span key={idx} className="px-3 py-1.5 bg-orange-50 text-orange-700 rounded-lg text-sm font-semibold border border-orange-100 shadow-sm">
+                  <span key={idx} className="px-2 py-0.5 bg-orange-50 text-orange-700 rounded-md text-[10px] font-semibold border border-orange-100 shadow-sm">
                     {cls}
                   </span>
-                )) : <span className="text-gray-400 italic">No classes assigned</span>}
+                )) : <span className="text-gray-400 italic text-[10px]">No classes assigned</span>}
               </div>
             </div>
           )}
           {user.role === "supervisor" && (
             <>
-              <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-                <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Company</p>
-                <p className="text-base font-semibold text-gray-900">{user.company || "N/A"}</p>
+              <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+                <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Company</p>
+                <p className="text-xs font-semibold text-gray-900">{user.company || "N/A"}</p>
               </div>
-              <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-                <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Location</p>
-                <p className="text-base font-semibold text-gray-900">{user.location || "N/A"}</p>
+              <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+                <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Location</p>
+                <p className="text-xs font-semibold text-gray-900">{user.location || "N/A"}</p>
               </div>
             </>
           )}
         </div>
       </div>
 
-      <div className="mt-8">
+      <div className="mt-5">
         <button
           onClick={onClose}
-          className="w-full rounded-xl bg-gray-100 py-3.5 text-gray-700 font-bold hover:bg-gray-200 transition-colors"
+          className="w-full rounded-lg bg-gray-100 py-2 text-gray-700 text-xs font-bold hover:bg-gray-200 transition-colors"
         >
           Close
         </button>
@@ -1971,22 +1979,22 @@ export function AssignSupervisorView({
     filteredStudents.length === 0;
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="mb-4">
-        <h2 className="text-xl font-extrabold text-gray-900 tracking-tight">
+    <div className="flex flex-col h-full bg-white overflow-hidden pt-4">
+      <div className="px-3 py-1.5 border-b border-gray-100 bg-white">
+        <h2 className="text-base font-bold text-gray-900 whitespace-nowrap">
           Assign Supervisor
         </h2>
       </div>
 
-      <div className="flex-1 p-4 bg-gray-50/30 overflow-hidden min-h-0">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full">
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[calc(100vh-130px)]">
-            <div className="p-4 border-b border-gray-100 flex items-center justify-between gap-2">
+      <div className="flex-1 bg-gray-50/30 overflow-hidden min-h-0">
+        <div className="grid grid-cols-1 lg:grid-cols-2 h-full divide-x divide-gray-200">
+          <div className="bg-white flex flex-col h-full overflow-hidden">
+            <div className="px-3 py-1.5 border-b border-gray-100 flex items-center justify-between gap-2">
               <div>
-                <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
                   STUDENTS WITHOUT SUPERVISOR
                 </p>
-                <p className="text-xs text-gray-500 mt-0.5">
+                <p className="text-[10px] text-gray-500 mt-0.5">
                   {unsupervisedStudents.length} total student
                   {unsupervisedStudents.length === 1 ? "" : "s"} available
                 </p>
@@ -1994,32 +2002,40 @@ export function AssignSupervisorView({
               <button
                 onClick={toggleAllStudents}
                 disabled={filteredStudents.length === 0}
-                className="px-3 py-1.5 rounded-lg text-[11px] font-bold border border-gray-300 text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-3 py-1.5 rounded-lg text-[10px] font-bold border border-gray-300 text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed uppercase tracking-wide"
               >
                 Select All
               </button>
             </div>
-            <div className="p-4 border-b border-gray-100">
+            <div className="p-3 border-b border-gray-100">
               <div className="relative">
                 <Search
-                  className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500"
-                  size={16}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500"
+                  size={14}
                 />
                 <input
                   value={studentSearch}
                   onChange={(e) => setStudentSearch(e.target.value)}
                   placeholder="Search by name, ID, course or section..."
-                  className="w-full pl-10 pr-3 py-2.5 bg-white border border-gray-300 rounded-xl text-sm placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                  className="w-full pl-9 pr-8 py-1.5 bg-white border border-gray-300 rounded-lg text-xs placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
                 />
+                {studentSearch && (
+                  <button
+                    onClick={() => setStudentSearch("")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5 rounded-full hover:bg-gray-200 transition-colors"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                  </button>
+                )}
               </div>
-              <div className="mt-3 flex flex-wrap sm:flex-nowrap gap-2">
+              <div className="mt-2 flex flex-wrap sm:flex-nowrap gap-2">
                 <select
                   value={studentCourseFilter}
                   onChange={(e) => {
                     setStudentCourseFilter(e.target.value);
                     setStudentSectionFilter("");
                   }}
-                  className="flex-1 min-w-0 px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs sm:text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                  className="flex-1 min-w-0 px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
                 >
                   <option value="">All Courses</option>
                   {studentCourses.map((course) => (
@@ -2031,7 +2047,7 @@ export function AssignSupervisorView({
                 <select
                   value={studentSectionFilter}
                   onChange={(e) => setStudentSectionFilter(e.target.value)}
-                  className="flex-1 min-w-0 px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs sm:text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                  className="flex-1 min-w-0 px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
                 >
                   <option value="">All Sections</option>
                   {studentSections.map((section) => (
@@ -2042,9 +2058,9 @@ export function AssignSupervisorView({
                 </select>
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto mt-2 space-y-2 pr-2">
+            <div className="flex-1 overflow-y-auto mt-1.5 space-y-1.5 px-2 custom-scrollbar">
               {filteredStudents.length === 0 ? (
-                <div className="p-6 text-center text-sm text-gray-500 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                <div className="p-4 text-center text-xs text-gray-500 bg-gray-50 rounded-lg border border-dashed border-gray-200">
                   No students without supervisor match your filters.
                 </div>
               ) : (
@@ -2054,14 +2070,14 @@ export function AssignSupervisorView({
                     <button
                       key={s.id}
                       onClick={() => toggleStudent(s.id)}
-                      className={`w-full flex items-center gap-3 p-3 rounded-xl border bg-white text-left transition-all ${
+                      className={`w-full flex items-center gap-3 p-2.5 rounded-lg border bg-white text-left transition-all ${
                         isSelected
                           ? "border-[#F97316] bg-orange-50/60 shadow-sm"
                           : "border-gray-200 hover:border-orange-200 hover:bg-orange-50/40"
                       }`}
                     >
                       <div
-                        className={`h-5 w-5 rounded-md border flex items-center justify-center ${
+                        className={`h-4 w-4 rounded border flex items-center justify-center ${
                           isSelected
                             ? "border-[#F97316] bg-[#F97316]"
                             : "border-gray-300 bg-white"
@@ -2070,8 +2086,8 @@ export function AssignSupervisorView({
                         {isSelected && (
                           <svg
                             xmlns="http://www.w3.org/2000/svg"
-                            width="14"
-                            height="14"
+                            width="10"
+                            height="10"
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="white"
@@ -2084,14 +2100,14 @@ export function AssignSupervisorView({
                         )}
                       </div>
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className="h-9 w-9 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center text-xs font-bold">
+                        <div className="h-8 w-8 rounded-lg bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center text-xs font-bold">
                           {(s.firstname?.[0] || s.idnumber[0]).toUpperCase()}
                         </div>
                         <div className="min-w-0">
-                          <p className="text-sm font-semibold text-gray-900 truncate">
+                          <p className="text-xs font-bold text-gray-900 truncate">
                             {s.firstname} {s.lastname}
                           </p>
-                          <p className="text-xs text-gray-500 truncate">
+                          <p className="text-[10px] text-gray-500 truncate">
                             {s.idnumber}{" "}
                             {s.course && s.section && (
                               <span className="ml-1">
@@ -2107,49 +2123,57 @@ export function AssignSupervisorView({
               )}
             </div>
           </div>
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[calc(100vh-130px)]">
-            <div className="p-4 border-b border-gray-100 flex items-center justify-between gap-2">
+          <div className="bg-white flex flex-col h-full overflow-hidden">
+            <div className="px-3 py-1.5 border-b border-gray-100 flex items-center justify-between gap-2">
               <div>
-                <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
                   CHOOSE SUPERVISOR
                 </p>
-                <p className="text-xs text-gray-500 mt-0.5">
+                <p className="text-[10px] text-gray-500 mt-0.5">
                   {supervisors.length} supervisor
                   {supervisors.length === 1 ? "" : "s"} available
                 </p>
               </div>
-              <div className="text-[11px] text-gray-500 font-medium">
+              <div className="text-[10px] text-gray-500 font-medium">
                 {selectedStudentIds.size} selected student
                 {selectedStudentIds.size === 1 ? "" : "s"}
               </div>
             </div>
             
-            <div className="p-4 border-b border-gray-100">
+            <div className="p-3 border-b border-gray-100">
               <div className="relative">
                 <Search
-                  className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500"
-                  size={16}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500"
+                  size={14}
                 />
                 <input
                   value={supervisorSearch}
                   onChange={(e) => setSupervisorSearch(e.target.value)}
                   placeholder="Search by name, ID, company..."
-                  className="w-full pl-10 pr-3 py-2.5 bg-white border border-gray-300 rounded-xl text-sm placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                  className="w-full pl-9 pr-8 py-1.5 bg-white border border-gray-300 rounded-lg text-xs placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
                 />
+                {supervisorSearch && (
+                  <button
+                    onClick={() => setSupervisorSearch("")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5 rounded-full hover:bg-gray-200 transition-colors"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                  </button>
+                )}
               </div>
-              <div className="mt-3">
+              <div className="mt-2">
                 <button
                   onClick={handleAssign}
                   disabled={assignDisabled}
-                  className="w-full flex items-center justify-center px-6 py-2.5 rounded-xl bg-[#F97316] text-white text-sm font-bold hover:bg-[#EA580C] transition-colors shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                  className="w-full flex items-center justify-center px-4 py-2 rounded-lg bg-[#F97316] text-white text-xs font-bold hover:bg-[#EA580C] transition-colors shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                 >
                   Assign Supervisor
                 </button>
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto mt-2 space-y-2 pr-2">
+            <div className="flex-1 overflow-y-auto mt-1.5 space-y-1.5 px-2 custom-scrollbar">
               {filteredSupervisors.length === 0 ? (
-                <div className="p-6 text-center text-sm text-gray-500 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                <div className="p-4 text-center text-xs text-gray-500 bg-gray-50 rounded-lg border border-dashed border-gray-200">
                   No supervisors match your search.
                 </div>
               ) : (
@@ -2163,14 +2187,14 @@ export function AssignSupervisorView({
                           selectedSupervisorId === u.idnumber ? "" : u.idnumber
                         )
                       }
-                      className={`w-full flex items-center gap-3 p-3 rounded-xl border bg-white text-left transition-all ${
+                      className={`w-full flex items-center gap-3 p-2.5 rounded-lg border bg-white text-left transition-all ${
                         isActive
                           ? "border-[#F97316] bg-orange-50/60 shadow-sm"
                           : "border-gray-200 hover:border-orange-200 hover:bg-orange-50/40"
                       }`}
                     >
                       <div
-                        className={`h-5 w-5 rounded-md border flex items-center justify-center flex-shrink-0 ${
+                        className={`h-4 w-4 rounded border flex items-center justify-center flex-shrink-0 ${
                           isActive
                             ? "border-[#F97316] bg-[#F97316]"
                             : "border-gray-300 bg-white"
@@ -2179,8 +2203,8 @@ export function AssignSupervisorView({
                         {isActive && (
                           <svg
                             xmlns="http://www.w3.org/2000/svg"
-                            width="14"
-                            height="14"
+                            width="10"
+                            height="10"
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="white"
@@ -2193,16 +2217,16 @@ export function AssignSupervisorView({
                         )}
                       </div>
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className="h-9 w-9 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center text-xs font-bold">
+                        <div className="h-8 w-8 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center text-xs font-bold">
                           {(u.firstname?.[0] || u.idnumber[0]).toUpperCase()}
                         </div>
                         <div className="min-w-0">
-                          <p className="text-sm font-semibold text-gray-900 truncate">
+                          <p className="text-xs font-bold text-gray-900 truncate">
                             {`${u.firstname || ""} ${u.lastname || ""}`.trim() ||
                               u.name ||
                               u.idnumber}
                           </p>
-                          <p className="text-xs text-gray-500 truncate">
+                          <p className="text-[10px] text-gray-500 truncate">
                             {u.idnumber} • {u.company || "Company N/A"}{" "}
                             {u.location && `• ${u.location}`}
                           </p>
@@ -2241,7 +2265,7 @@ export function AssignSupervisorView({
         )}
 
         {assignMessage && (
-          <div className="mt-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-3">
+          <div className="mt-4 text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-4 py-2.5">
             {assignMessage}
           </div>
         )}
@@ -2309,7 +2333,8 @@ export function UsersView({
       (sectionFilter === "" || u.section === sectionFilter) &&
       (u.idnumber?.toLowerCase().includes(s) || 
        u.firstname?.toLowerCase().includes(s) || 
-       u.lastname?.toLowerCase().includes(s));
+       u.lastname?.toLowerCase().includes(s) ||
+       u.company?.toLowerCase().includes(s));
 
     let active: User[] = [];
     // We don't show pending users in the main views anymore - they go to ApprovalsView (for students)
@@ -2317,9 +2342,13 @@ export function UsersView({
     
     if (role === 'student') {
       active = roleUsers.filter(u => u.signup_status !== 'PENDING').filter(filterFn);
+      // Sort students alphabetically by lastname
+      active.sort((a, b) => (a.lastname || "").localeCompare(b.lastname || ""));
     } else {
       // For instructors/supervisors, show everyone in the main list as they don't need approval
       active = roleUsers.filter(filterFn);
+      // Sort others alphabetically too
+      active.sort((a, b) => (a.lastname || "").localeCompare(b.lastname || ""));
     }
 
     return { 
@@ -2331,54 +2360,40 @@ export function UsersView({
   }, [users, role, search, courseFilter, sectionFilter]);
 
   return (
-    <div className="flex flex-col h-full bg-white rounded-3xl border border-gray-200 shadow-sm overflow-hidden">
-      <div className="px-6 py-5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white">
-        <div>
-          <h2 className="text-xl font-extrabold text-gray-900 tracking-tight">{title} Directory</h2>
-          <p className="text-sm text-gray-500 font-medium mt-1">
-            Manage and monitor {role} accounts
-          </p>
-        </div>
-        <button
-            onClick={onAdd}
-            className="flex items-center justify-center gap-2 bg-[#F97316] text-white px-5 py-2.5 rounded-xl text-sm font-bold hover:bg-[#EA580C] transition-all shadow-md hover:shadow-lg active:scale-95"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <line x1="12" y1="5" x2="12" y2="19"></line>
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
-            Add New {role}
-          </button>
-      </div>
+    <div className="flex flex-col h-full bg-white overflow-hidden pt-4">
+      {/* Combined Header & Toolbar */}
+      <div className="px-3 py-1.5 border-b border-gray-100 flex flex-wrap items-center gap-2 bg-white">
+        <h2 className="text-base font-bold text-gray-900 whitespace-nowrap mr-auto">{title} Directory</h2>
 
-      {/* Search & Filter */}
-      <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex flex-col sm:flex-row gap-3">
-        <div className="relative flex-1">
-          <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        {/* Search */}
+        <div className="relative w-full sm:w-60 md:w-72">
+          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
           <input 
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder={`Search by name or ID...`}
-            className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-300 rounded-xl text-sm font-medium placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] transition-all shadow-sm"
+            placeholder={`Search...`}
+            className="w-full pl-8 pr-8 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] transition-all placeholder-gray-500 text-gray-900"
           />
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5 rounded-full hover:bg-gray-200 transition-colors"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+          )}
         </div>
-        
+
+        {/* Filters */}
         {role !== "supervisor" && (role === "student" || role === "instructor" || courses.length > 0 || sections.length > 0) && (
-          <div className="flex gap-2">
+          <div className="flex gap-1.5">
             <select
               value={courseFilter}
-              onChange={(e) => setCourseFilter(e.target.value)}
-              className="px-4 py-2.5 bg-white border border-gray-300 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[140px] shadow-sm"
+              onChange={(e) => {
+                setCourseFilter(e.target.value);
+                if (e.target.value === "") setSectionFilter("");
+              }}
+              className="px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[90px]"
             >
               <option value="">All Courses</option>
               {courses.map(course => (
@@ -2389,7 +2404,7 @@ export function UsersView({
             <select
               value={sectionFilter}
               onChange={(e) => setSectionFilter(e.target.value)}
-              className="px-4 py-2.5 bg-white border border-gray-300 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[140px] shadow-sm"
+              className="px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[70px]"
             >
               <option value="">All Sections</option>
               {sections.map(section => (
@@ -2398,9 +2413,31 @@ export function UsersView({
             </select>
           </div>
         )}
+
+        <button
+          onClick={onAdd}
+          className="flex items-center justify-center gap-1.5 bg-[#F97316] text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-[#EA580C] transition-all shadow-sm active:scale-95 whitespace-nowrap"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          Add New
+        </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-gray-50/30">
+      <div className="flex-1 overflow-y-auto bg-white">
+
         {pendingUsers.length > 0 && (
           <div className="animate-in fade-in slide-in-from-top-4 duration-500">
             <div className="flex items-center gap-2 mb-3 px-1">
@@ -2410,20 +2447,20 @@ export function UsersView({
             </div>
             <div className="space-y-3">
               {pendingUsers.map((user) => (
-                <div key={user.id} className="group flex items-center justify-between p-4 rounded-2xl bg-orange-50 border border-orange-100 shadow-sm hover:shadow-md transition-all duration-200">
-                  <div className="flex items-center gap-4 overflow-hidden">
-                    <div className="flex-shrink-0 h-12 w-12 rounded-full bg-white text-[#F97316] border border-orange-200 flex items-center justify-center font-bold text-lg shadow-sm">
+                <div key={user.id} className="group flex items-center justify-between p-3 rounded-lg bg-orange-50 border border-orange-100 shadow-sm hover:shadow-md transition-all duration-200">
+                  <div className="flex items-center gap-3 overflow-hidden">
+                    <div className="flex-shrink-0 h-10 w-10 rounded-full bg-white text-[#F97316] border border-orange-200 flex items-center justify-center font-bold text-base shadow-sm">
                       {(user.firstname?.[0] || user.idnumber[0]).toUpperCase()}
                     </div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <h3 className="font-bold text-gray-900 text-sm sm:text-base truncate">
+                        <h3 className="font-bold text-gray-900 text-xs sm:text-sm truncate">
                           {user.firstname} {user.lastname}
                         </h3>
-                        <span className="px-2 py-0.5 bg-orange-200 text-orange-800 text-[10px] font-bold rounded-md uppercase tracking-wide">Pending</span>
+                        <span className="px-1.5 py-0.5 bg-orange-200 text-orange-800 text-[10px] font-bold rounded uppercase tracking-wide">Pending</span>
                       </div>
-                      <div className="flex items-center gap-2 text-xs sm:text-sm text-gray-600 mt-0.5">
-                        <span className="font-medium bg-white/50 px-2 py-0.5 rounded-md border border-orange-100">{user.idnumber}</span>
+                      <div className="flex items-center gap-2 text-[10px] sm:text-xs text-gray-600 mt-0.5">
+                        <span className="font-medium bg-white/50 px-1.5 py-0.5 rounded border border-orange-100">{user.idnumber}</span>
                         {user.course && (
                           <span className="truncate">
                             • {user.role === 'instructor' 
@@ -2438,7 +2475,7 @@ export function UsersView({
                     {onApprove && (
                       <button 
                         onClick={() => onApprove(user)}
-                        className="px-4 py-2 bg-[#F97316] text-white text-xs font-bold rounded-xl hover:bg-[#EA580C] shadow-sm hover:shadow-orange-200 transition-all active:scale-95"
+                        className="px-3 py-1.5 bg-[#F97316] text-white text-[10px] font-bold rounded-lg hover:bg-[#EA580C] shadow-sm hover:shadow-orange-200 transition-all active:scale-95"
                       >
                         Approve
                       </button>
@@ -2473,23 +2510,263 @@ export function UsersView({
                 <p className="font-medium">No {role}s found matching your criteria.</p>
               </div>
             ) : (
-              activeUsers.map((user) => {
+              <>
+                {role === 'student' && (
+                  <div className="bg-white">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                        <thead className="bg-gray-50 text-gray-500 font-bold border-b border-gray-100 uppercase tracking-wider text-[10px] sticky top-0 z-10">
+                          <tr>
+                            <th className="px-3 py-1.5 whitespace-nowrap">Student</th>
+                            <th className="px-3 py-1.5 whitespace-nowrap">Course & Section</th>
+                            <th className="px-3 py-1.5 whitespace-nowrap">Supervisor</th>
+                            <th className="px-3 py-1.5 whitespace-nowrap">Company & Location</th>
+                            <th className="px-3 py-1.5 text-right whitespace-nowrap">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {activeUsers.map((user) => {
+                             const supervisor = user.supervisorid ? users.find(u => u.idnumber === user.supervisorid) : null;
+                             return (
+                            <tr key={user.id} className="hover:bg-gray-50/50 transition-colors group">
+                              <td className="px-3 py-1.5">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="h-8 w-8 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-[10px] shrink-0">
+                                    {(user.firstname?.[0] || user.idnumber[0]).toUpperCase()}
+                                  </div>
+                                  <div className="flex flex-col">
+                                      <div className="font-bold text-gray-900 whitespace-nowrap">
+                                        {user.lastname}, {user.firstname}
+                                      </div>
+                                      <div className="text-xs text-gray-500 font-mono">
+                                        {user.idnumber}
+                                      </div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-600">
+                                {formatCourseSection(user.course, user.section)}
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-600">
+                                {supervisor ? (
+                                    <div className="flex flex-col">
+                                        <span className="font-medium text-gray-900">{supervisor.firstname} {supervisor.lastname}</span>
+                                        <span className="text-[10px] text-gray-400">{supervisor.idnumber}</span>
+                                    </div>
+                                ) : <span className="text-gray-400 italic">Not Assigned</span>}
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-600">
+                                <div className="flex flex-col max-w-[200px]">
+                                    <span className="font-medium text-gray-900 truncate" title={user.company || supervisor?.company}>
+                                      {user.company || supervisor?.company || "Not Assigned"}
+                                    </span>
+                                    <span className="text-[10px] text-gray-500 truncate" title={user.location || supervisor?.location}>
+                                      {user.location || supervisor?.location || ""}
+                                    </span>
+                                </div>
+                              </td>
+                              <td className="px-3 py-1.5 text-right">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <button 
+                                    onClick={() => onEdit(user)}
+                                    className="p-1.5 text-gray-400 hover:text-[#F97316] hover:bg-orange-50 rounded-lg transition-colors"
+                                    title="Edit User"
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                                  </button>
+                                  <button 
+                                    onClick={() => onDelete(user)}
+                                    className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                    title="Delete User"
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+                
+                {role === 'instructor' && (
+                  <div className="bg-white">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                        <thead className="bg-gray-50 text-gray-500 font-bold border-b border-gray-100 uppercase tracking-wider text-[10px] sticky top-0 z-10">
+                          <tr>
+                            <th className="px-3 py-1.5 whitespace-nowrap">Instructor</th>
+                            <th className="px-3 py-1.5 whitespace-nowrap">Department</th>
+                            <th className="px-3 py-1.5 whitespace-nowrap">Account Approval</th>
+                            <th className="px-3 py-1.5 text-right whitespace-nowrap">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {activeUsers.map((user) => {
+                             const approvalAllowed = instructorApprovalStatuses?.[user.idnumber] ?? true;
+                             return (
+                            <tr key={user.id} className="hover:bg-gray-50/50 transition-colors group">
+                              <td className="px-3 py-1.5">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="h-8 w-8 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-[10px] shrink-0">
+                                    {(user.firstname?.[0] || user.idnumber[0]).toUpperCase()}
+                                  </div>
+                                  <div className="flex flex-col">
+                                      <div className="font-bold text-gray-900 whitespace-nowrap">
+                                        {user.lastname}, {user.firstname}
+                                      </div>
+                                      <div className="text-xs text-gray-500 font-mono">
+                                        {user.idnumber}
+                                      </div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-600">
+                                {formatCourseSection(user.course, user.section)}
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-600">
+                                {onToggleInstructorApproval && (
+                                  <div className="flex items-center gap-2">
+                                    <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                                      <span className="text-[10px] text-gray-500">
+                                        {approvalAllowed ? "Enabled" : "Restricted"}
+                                      </span>
+                                      <div className="relative">
+                                        <input
+                                          type="checkbox"
+                                          className="sr-only peer"
+                                          checked={approvalAllowed}
+                                          onChange={() => onToggleInstructorApproval(user.idnumber, approvalAllowed)}
+                                        />
+                                        <div className="w-8 h-4 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all" />
+                                      </div>
+                                    </label>
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-3 py-1.5 text-right">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <button 
+                                    onClick={() => onEdit(user)}
+                                    className="p-1.5 text-gray-400 hover:text-[#F97316] hover:bg-orange-50 rounded-lg transition-colors"
+                                    title="Edit User"
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                                  </button>
+                                  <button 
+                                    onClick={() => onDelete(user)}
+                                    className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                    title="Delete User"
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {role === 'supervisor' && (
+                  <div className="bg-white">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                        <thead className="bg-gray-50 text-gray-500 font-bold border-b border-gray-100 uppercase tracking-wider text-[10px] sticky top-0 z-10">
+                          <tr>
+                            <th className="px-3 py-1.5 whitespace-nowrap">Supervisor</th>
+                            <th className="px-3 py-1.5 whitespace-nowrap">Company & Location</th>
+                            <th className="px-3 py-1.5 whitespace-nowrap">Assigned Students</th>
+                            <th className="px-3 py-1.5 text-right whitespace-nowrap">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {activeUsers.map((user) => (
+                            <tr key={user.id} className="hover:bg-gray-50/50 transition-colors group">
+                              <td className="px-3 py-1.5">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="h-8 w-8 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-[10px] shrink-0">
+                                    {(user.firstname?.[0] || user.idnumber[0]).toUpperCase()}
+                                  </div>
+                                  <div className="flex flex-col">
+                                      <div className="font-bold text-gray-900 whitespace-nowrap">
+                                        {user.lastname}, {user.firstname}
+                                      </div>
+                                      <div className="text-xs text-gray-500 font-mono">
+                                        {user.idnumber}
+                                      </div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-600">
+                                <div className="flex flex-col max-w-[200px]">
+                                    <span className="font-medium text-gray-900 truncate" title={user.company}>
+                                      {user.company || "Not Assigned"}
+                                    </span>
+                                    <span className="text-[10px] text-gray-500 truncate" title={user.location}>
+                                      {user.location || ""}
+                                    </span>
+                                </div>
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-600">
+                                <button
+                                  onClick={() => viewAssignedStudents(user.idnumber)}
+                                  className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors border border-blue-100"
+                                >
+                                  <Users size={14} />
+                                  View Students
+                                </button>
+                              </td>
+                              <td className="px-3 py-1.5 text-right">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <button 
+                                    onClick={() => onEdit(user)}
+                                    className="p-1.5 text-gray-400 hover:text-[#F97316] hover:bg-orange-50 rounded-lg transition-colors"
+                                    title="Edit User"
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                                  </button>
+                                  <button 
+                                    onClick={() => onDelete(user)}
+                                    className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                    title="Delete User"
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+                
+                <div className={(role === 'student' || role === 'instructor' || role === 'supervisor') ? 'hidden' : 'space-y-2'}>
+                  {activeUsers.map((user) => {
                 const isInstructor = role === "instructor";
                 const approvalAllowed = isInstructor
                   ? instructorApprovalStatuses?.[user.idnumber] ?? true
                   : undefined;
                 return (
-                  <div key={user.id} className="group flex items-center justify-between p-4 rounded-2xl bg-white border border-gray-100 hover:border-orange-200 hover:shadow-md transition-all duration-200">
-                    <div className="flex items-center gap-4 overflow-hidden">
-                      <div className="flex-shrink-0 h-12 w-12 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-lg">
+                  <div key={user.id} className="group flex items-center justify-between p-3 rounded-lg bg-white border border-gray-100 hover:border-orange-200 hover:shadow-sm transition-all duration-200">
+                    <div className="flex items-center gap-3 overflow-hidden">
+                      <div className="flex-shrink-0 h-10 w-10 rounded-full bg-orange-50 text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-base">
                         {(user.firstname?.[0] || user.idnumber[0]).toUpperCase()}
                       </div>
                       <div className="min-w-0">
-                        <h3 className="font-bold text-gray-900 text-sm sm:text-base truncate">
+                        <h3 className="font-bold text-gray-900 text-xs sm:text-sm truncate">
                           {user.firstname} {user.lastname}
                         </h3>
-                        <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm text-gray-500">
-                          <span className="font-medium text-gray-600 bg-gray-100 px-2 py-0.5 rounded-md">{user.idnumber}</span>
+                        <div className="flex flex-wrap items-center gap-1.5 text-[10px] sm:text-xs text-gray-500">
+                          <span className="font-medium text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded">{user.idnumber}</span>
                           {user.course && user.role !== 'supervisor' && (
                             <span className="truncate">
                               • {user.role === 'instructor' 
@@ -2500,12 +2777,12 @@ export function UsersView({
                           {user.company && <span className="truncate">• {user.company}</span>}
                         </div>
                         {isInstructor && approvalAllowed !== undefined && onToggleInstructorApproval && (
-                          <div className="mt-2 flex items-center gap-3">
-                            <span className="text-[11px] font-semibold text-gray-600 uppercase tracking-wider">
+                          <div className="mt-1.5 flex items-center gap-2">
+                            <span className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider">
                               Account Approval
                             </span>
-                            <label className="flex items-center gap-2 cursor-pointer select-none">
-                              <span className="text-[11px] text-gray-500">
+                            <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                              <span className="text-[10px] text-gray-500">
                                 {approvalAllowed ? "Enabled" : "Restricted"}
                               </span>
                               <div className="relative">
@@ -2515,7 +2792,7 @@ export function UsersView({
                                   checked={approvalAllowed}
                                   onChange={() => onToggleInstructorApproval(user.idnumber, approvalAllowed)}
                                 />
-                                <div className="w-10 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all" />
+                                <div className="w-8 h-4 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all" />
                               </div>
                             </label>
                           </div>
@@ -2526,77 +2803,80 @@ export function UsersView({
                       {user.role === "supervisor" && (
                         <button
                           onClick={() => viewAssignedStudents(user.idnumber)}
-                          className="p-2.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-colors"
+                          className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
                           title="View Assigned Students"
                         >
-                          <Users size={20} />
+                          <Users size={16} />
                         </button>
                       )}
                       <button 
                         onClick={() => onView(user)}
-                        className="p-2.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-colors"
+                        className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
                         title="View Details"
                       >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                       </button>
                       <button 
                         onClick={() => onEdit(user)}
-                        className="p-2.5 text-gray-400 hover:text-[#F97316] hover:bg-orange-50 rounded-xl transition-colors"
+                        className="p-1.5 text-gray-400 hover:text-[#F97316] hover:bg-orange-50 rounded-lg transition-colors"
                         title="Edit User"
                       >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
                       </button>
                       <button 
                         onClick={() => onDelete(user)}
-                        className="p-2.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
+                        className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                         title="Delete User"
                       >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path></svg>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path></svg>
                       </button>
                     </div>
                   </div>
                 );
               })
-            )}
+            }
           </div>
-        </div>
+        </>
+      )}
       </div>
+    </div>
+  </div>
       
       {showAssignedStudentsModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col animate-in fade-in zoom-in duration-200">
-            <div className="p-6 border-b border-gray-100">
-              <div className="flex items-center justify-between mb-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col animate-in fade-in zoom-in duration-200">
+            <div className="p-4 border-b border-gray-100">
+              <div className="flex items-center justify-between mb-3">
                 <div>
-                  <h3 className="text-lg font-bold text-gray-900">Assigned Students</h3>
-                  <p className="text-sm text-gray-500">
+                  <h3 className="text-base font-bold text-gray-900">Assigned Students</h3>
+                  <p className="text-xs text-gray-500">
                     {assignedStudents.length} student{assignedStudents.length !== 1 ? 's' : ''} assigned
                   </p>
                 </div>
                 <button
                   onClick={() => setShowAssignedStudentsModal(false)}
-                  className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                  className="p-1.5 hover:bg-gray-100 rounded-full transition-colors"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                 </button>
               </div>
               
               <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600" size={18} />
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600" size={16} />
                 <input
                   type="text"
                   placeholder="Search students..."
                   value={assignedSearch}
                   onChange={(e) => setAssignedSearch(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all text-base text-gray-700"
+                  className="w-full pl-9 pr-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all text-sm text-gray-700"
                 />
               </div>
 
-              <div className="flex gap-2 mt-3">
+              <div className="flex gap-2 mt-2.5">
                 <select
                   value={assignedCourseFilter}
                   onChange={(e) => setAssignedCourseFilter(e.target.value)}
-                  className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-base text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 flex-1"
+                  className="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 flex-1"
                 >
                   <option value="">All Courses</option>
                   {Array.from(new Set(assignedStudents.map(u => u.course).filter(Boolean))).sort().map(course => (
@@ -2606,7 +2886,7 @@ export function UsersView({
                 <select
                   value={assignedSectionFilter}
                   onChange={(e) => setAssignedSectionFilter(e.target.value)}
-                  className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-base text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 flex-1"
+                  className="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 flex-1"
                 >
                   <option value="">All Sections</option>
                   {Array.from(new Set(assignedStudents.map(u => u.section).filter(Boolean))).sort().map(section => (
@@ -2616,7 +2896,7 @@ export function UsersView({
               </div>
             </div>
             
-            <div className="overflow-y-auto p-6">
+            <div className="overflow-y-auto p-4">
               {assignedStudents.filter(s => 
                 (assignedCourseFilter === "" || s.course === assignedCourseFilter) &&
                 (assignedSectionFilter === "" || s.section === assignedSectionFilter) &&
@@ -2624,12 +2904,12 @@ export function UsersView({
                 s.lastname?.toLowerCase().includes(assignedSearch.toLowerCase()) ||
                 s.idnumber?.toLowerCase().includes(assignedSearch.toLowerCase()))
               ).length === 0 ? (
-                <div className="text-center py-12 text-gray-400">
-                  <Users className="w-12 h-12 mx-auto mb-3 opacity-20" />
-                  <p>No students found.</p>
+                <div className="text-center py-8 text-gray-400">
+                  <Users className="w-10 h-10 mx-auto mb-2 opacity-20" />
+                  <p className="text-sm">No students found.</p>
                 </div>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-2">
                   {assignedStudents
                     .filter(s => 
                       (assignedCourseFilter === "" || s.course === assignedCourseFilter) &&
@@ -2639,15 +2919,15 @@ export function UsersView({
                       s.idnumber?.toLowerCase().includes(assignedSearch.toLowerCase()))
                     )
                     .map((student) => (
-                    <div key={student.id} className="flex items-center gap-4 p-4 rounded-xl border border-gray-100 bg-gray-50/50">
-                      <div className="h-10 w-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-sm">
+                    <div key={student.id} className="flex items-center gap-3 p-3 rounded-lg border border-gray-100 bg-gray-50/50">
+                      <div className="h-8 w-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-xs">
                         {(student.firstname?.[0] || student.idnumber[0]).toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <h4 className="font-semibold text-gray-900 truncate">
+                        <h4 className="font-semibold text-gray-900 text-sm truncate">
                           {student.firstname} {student.lastname}
                         </h4>
-                        <div className="flex items-center gap-2 text-sm text-gray-700">
+                        <div className="flex items-center gap-2 text-xs text-gray-700">
                           <span className="bg-white border border-gray-300 px-1.5 py-0.5 rounded">{student.idnumber}</span>
                           <span className="truncate">{student.course} - {student.section}</span>
                         </div>
@@ -2658,10 +2938,10 @@ export function UsersView({
               )}
             </div>
             
-            <div className="p-4 border-t border-gray-100 bg-gray-50 rounded-b-2xl flex justify-end">
+            <div className="p-3 border-t border-gray-100 bg-gray-50 rounded-b-lg flex justify-end">
               <button
                 onClick={() => setShowAssignedStudentsModal(false)}
-                className="px-4 py-2 bg-white border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 font-medium text-sm transition-colors"
+                className="px-3 py-1.5 bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 font-medium text-xs transition-colors"
               >
                 Close
               </button>

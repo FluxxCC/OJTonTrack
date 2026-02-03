@@ -11,8 +11,8 @@ import {
   ChevronRight,
   Users,
   ClipboardCheck,
-  BellRing,
-  CalendarClock
+  CalendarClock,
+  Info
 } from 'lucide-react';
 import { supabase } from "@/lib/supabaseClient";
 import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
@@ -27,6 +27,20 @@ import {
   User
 } from "./ui";
 import ServiceWorkerRegister from "../../../components/ServiceWorkerRegister";
+import PushNotificationManager from "../../../components/PushNotificationManager";
+
+const urlBase64ToUint8Array = (base64String: string) => {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding)
+    .replace(/\-/g, '+')
+    .replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+};
 
 const DashboardView = dynamic(() => import('./ui').then(mod => mod.DashboardView), {
   ssr: false,
@@ -65,6 +79,7 @@ function SupervisorContent() {
   const [students, setStudents] = useState<User[]>([]);
   const [supervisorInfo, setSupervisorInfo] = useState<{ company?: string; location?: string } | null>(null);
   const [me, setMe] = useState<User | null>(null);
+  const [loadingMe, setLoadingMe] = useState(true);
   const [myIdnumber, setMyIdnumber] = useState("");
   const [evalStatuses, setEvalStatuses] = useState<Record<string, boolean>>({});
   const [completedIds, setCompletedIds] = useState<Set<string>>(new Set());
@@ -87,6 +102,25 @@ function SupervisorContent() {
   const [evalScore, setEvalScore] = useState(5);
   const [isSubmittingEval, setIsSubmittingEval] = useState(false);
   const [toasts, setToasts] = useState<{ id: string; title: string; message: string }[]>([]);
+
+  // Removed manual subscription state/effects as they are handled globally now
+
+  const handlePushUnsubscribeInternal = async () => {
+      if (!('serviceWorker' in navigator)) return;
+      try {
+          const reg = await navigator.serviceWorker.ready;
+          const sub = await reg.pushManager.getSubscription();
+          if (sub) {
+              await sub.unsubscribe();
+              await fetch("/api/push/unsubscribe", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ endpoint: sub.endpoint })
+              });
+          }
+      } catch {}
+  };
+
   const pushToast = (title: string, message: string) => {
     const id = String(Date.now() + Math.random());
     setToasts((prev) => [...prev, { id, title, message }]);
@@ -97,10 +131,27 @@ function SupervisorContent() {
 
   // User Info - Client Side Only to avoid Hydration Mismatch
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem("idnumber");
-      if (stored) setMyIdnumber(stored.trim());
-    } catch {}
+    const initUser = async () => {
+        try {
+            // 1. Try LocalStorage first
+            const stored = localStorage.getItem("idnumber");
+            if (stored) {
+                setMyIdnumber(stored.trim());
+            } else {
+                // 2. If missing, try session check
+                const res = await fetch("/api/auth/check-session");
+                if (res.ok) {
+                    const session = await res.json();
+                    if (session.idnumber && session.role === 'supervisor') {
+                        localStorage.setItem("idnumber", session.idnumber);
+                        localStorage.setItem("role", session.role);
+                        setMyIdnumber(session.idnumber);
+                    }
+                }
+            }
+        } catch {}
+    };
+    initUser();
   }, []);
 
   useEffect(() => {
@@ -195,23 +246,22 @@ function SupervisorContent() {
 
   useEffect(() => {
     if (!supabase) return;
-    const idsSet = new Set(students.map(s => String(s.idnumber).trim()));
     const ch = supabase
       .channel('supervisor-badges-attendance')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, async (payload: RealtimePostgresChangesPayload<any>) => {
-        const row = payload.new as { idnumber?: string; status?: string; type?: string; createdat?: string; ts?: string } | null;
-        const oldRow = payload.old as { idnumber?: string; status?: string } | null;
+        const row = payload.new as { student_id?: number; status?: string; type?: string; createdat?: string; ts?: string } | null;
+        const oldRow = payload.old as { student_id?: number; status?: string } | null;
         
-        const rowId = row?.idnumber ? String(row.idnumber).trim() : "";
-        const oldRowId = oldRow?.idnumber ? String(oldRow.idnumber).trim() : "";
+        // Find student by ID (int) since attendance table uses student_id, not idnumber
+        const studentNew = row?.student_id ? students.find(s => Number(s.id) === Number(row.student_id)) : null;
+        const studentOld = oldRow?.student_id ? students.find(s => Number(s.id) === Number(oldRow.student_id)) : null;
 
-        const inScopeNew = rowId && idsSet.has(rowId);
-        const inScopeOld = oldRowId && idsSet.has(oldRowId);
+        const inScopeNew = !!studentNew;
+        const inScopeOld = !!studentOld;
 
         if (payload.eventType === 'INSERT') {
-          if (inScopeNew) {
-             const student = students.find(s => String(s.idnumber).trim() === rowId);
-             const name = student ? `${student.firstname} ${student.lastname}` : (rowId || 'Student');
+          if (inScopeNew && studentNew) {
+             const name = `${studentNew.firstname} ${studentNew.lastname}`;
              const type = row!.type === 'in' ? "Times in" : "Times out";
              // Use ts (timestamp) if createdat is missing
              const timeMs = row!.ts ? Number(row!.ts) : (row!.createdat ? new Date(row!.createdat).getTime() : Date.now());
@@ -219,14 +269,6 @@ function SupervisorContent() {
 
              // 1. In-App Toast (Always show)
              pushToast("Attendance Update", message);
-
-             try {
-                fetch('/api/push/send-attendance', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ idnumber: myIdnumber, message, origin: window.location.origin })
-                }).catch(() => {});
-             } catch {}
 
              if (String(row!.status).trim() === 'Pending') {
                setPendingApprovalsCount(c => c + 1);
@@ -256,8 +298,15 @@ function SupervisorContent() {
   useEffect(() => {
     if (students.length === 0) return;
     const tab = (searchParams.get("tab") || "").toLowerCase();
-    if (tab === "attendance" || tab === "evaluation" || tab === "profile" || tab === "dashboard" || tab === "schedule") {
+    if (tab === "attendance") {
+      setActiveTab("dashboard");
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("tab", "dashboard");
+      router.replace(`?${params.toString()}`, { scroll: false });
+    } else if (tab === "evaluation" || tab === "profile" || tab === "dashboard" || tab === "schedule") {
       setActiveTab(tab as any);
+    } else {
+      setActiveTab("dashboard");
     }
     const id = searchParams.get("studentId");
     if (id) {
@@ -360,14 +409,20 @@ function SupervisorContent() {
   // Fetch Data
   const fetchSupervisorData = async () => {
       if (!myIdnumber) return;
+      setLoadingMe(true);
       try {
         // Fetch Me
-        const resMe = await fetch(`/api/users?idnumber=${encodeURIComponent(myIdnumber)}`, { cache: "no-store" });
+        // console.log(`[Supervisor] Fetching profile for ${myIdnumber}...`);
+        const resMe = await fetch(`/api/users?idnumber=${encodeURIComponent(myIdnumber)}&role=supervisor`, { cache: "no-store" });
         const jsonMe = await resMe.json();
+        // console.log(`[Supervisor] Profile fetch result:`, jsonMe);
+
         if (jsonMe.users && jsonMe.users.length > 0) {
            const myself = jsonMe.users[0];
            setMe(myself);
            setSupervisorInfo({ company: myself.company, location: myself.location });
+        } else {
+           console.warn(`[Supervisor] No user found for ${myIdnumber}`);
         }
 
         // Fetch Assigned Students
@@ -375,10 +430,11 @@ function SupervisorContent() {
         const jsonStudents = await resStudents.json();
         
         if (Array.isArray(jsonStudents.users)) {
-          console.log(`[Supervisor] Loaded ${jsonStudents.users.length} students for supervisor ${myIdnumber}`);
+          // console.log(`[Supervisor] Loaded ${jsonStudents.users.length} students for supervisor ${myIdnumber}`);
           setStudents(jsonStudents.users);
         }
       } catch (e) { console.error(e); }
+      finally { setLoadingMe(false); }
   };
 
   useEffect(() => {
@@ -389,7 +445,7 @@ function SupervisorContent() {
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        console.log('[Supervisor] App foregrounded, refreshing data...');
+        // console.log('[Supervisor] App foregrounded, refreshing data...');
         fetchSupervisorData();
         fetchBadgeCounts();
         setRefreshKey(prev => prev + 1);
@@ -405,9 +461,11 @@ function SupervisorContent() {
 
   // Logout
   const handleLogout = async () => {
+    await handlePushUnsubscribeInternal();
     try {
       await fetch("/api/auth/logout", { method: "POST" });
       localStorage.clear();
+      sessionStorage.clear();
     } catch (e) {
       console.error("Logout failed", e);
     }
@@ -457,6 +515,13 @@ function SupervisorContent() {
                 key={item.id}
                 onClick={() => {
                   setActiveTab(item.id as any);
+                  const params = new URLSearchParams(searchParams.toString());
+                  if (item.id === "dashboard") {
+                    params.delete("tab");
+                  } else {
+                    params.set("tab", item.id);
+                  }
+                  router.replace(`?${params.toString()}`, { scroll: false });
                   if (isMobile) setSidebarOpen(false);
                 }}
                 className={`w-full flex items-center justify-between px-4 py-3.5 rounded-xl text-sm font-semibold transition-all duration-200 group ${
@@ -470,7 +535,7 @@ function SupervisorContent() {
                   <span>{item.label}</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  {item.id === "attendance" && pendingApprovalsCount > 0 && (
+                  {item.id === "dashboard" && pendingApprovalsCount > 0 && (
                     <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold border bg-red-50 text-red-700 border-red-200">
                       {pendingApprovalsCount}
                     </span>
@@ -588,7 +653,7 @@ function SupervisorContent() {
               />
             )}
             {activeTab === 'schedule' && <SetOfficialTimeView students={students} myIdnumber={myIdnumber} />}
-            {activeTab === 'profile' && <ProfileView user={me} />}
+            {activeTab === 'profile' && <ProfileView user={me} isLoading={loadingMe} />}
           </div>
         </main>
 
@@ -609,7 +674,7 @@ function SupervisorContent() {
             {toasts.map(t => (
               <div key={t.id} className="w-80 bg-white border border-gray-200 shadow-xl rounded-xl p-4 flex items-start gap-3">
                 <div className="h-10 w-10 rounded-lg bg-orange-100 text-[#F97316] flex items-center justify-center">
-                  <BellRing size={18} />
+                  <Info size={18} />
                 </div>
                 <div className="flex-1">
                   <p className="text-sm font-bold text-gray-900">{t.title}</p>
@@ -636,6 +701,7 @@ export default function SupervisorPage() {
     <Suspense fallback={<div className="p-8 text-center text-gray-500">Loading supervisor portal...</div>}>
       <>
         <ServiceWorkerRegister />
+        <PushNotificationManager />
         <SupervisorContent />
       </>
     </Suspense>

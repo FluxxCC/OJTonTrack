@@ -2,6 +2,7 @@ import { getSupabaseAdmin } from "./supabaseClient";
 
 export async function sendEmail(to: string, subject: string, html: string) {
   const apiKey = process.env.RESEND_API_KEY;
+  
   if (!apiKey) {
     console.log("---------------------------------------------------");
     console.log(`[Mock Email] To: ${to}`);

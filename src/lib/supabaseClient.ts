@@ -10,8 +10,22 @@ export function getSupabaseAdmin() {
     throw new Error("supabaseAdmin is server-only");
   }
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+  
+  // Debug log (remove in production)
+  if (!serviceKey) {
+      console.warn("getSupabaseAdmin: SUPABASE_SERVICE_ROLE_KEY is missing, falling back to anon key (will fail for admin tasks).");
+  } else {
+      console.log("getSupabaseAdmin: URL:", publicUrl);
+      console.log("getSupabaseAdmin: Key Prefix:", serviceKey.substring(0, 15), "Length:", serviceKey.length);
+  }
+
   if (publicUrl && serviceKey) {
-    return createClient(publicUrl, serviceKey);
+    return createClient(publicUrl, serviceKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    });
   }
   if (publicUrl && publicAnon) {
     return createClient(publicUrl, publicAnon);

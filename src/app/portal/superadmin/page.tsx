@@ -9,7 +9,8 @@ import {
   ShieldCheck,
   Menu, 
   LogOut,
-  ChevronRight 
+  ChevronRight,
+  BookOpen
 } from "lucide-react";
 import { 
   UserManagementView, 
@@ -20,12 +21,14 @@ import {
   Course, 
   Section 
 } from "./ui";
+import { AcademicCatalogView } from "./AcademicCatalogView";
 
 export default function SuperAdminPage() {
   const router = useRouter();
   
   // Data state
   const [users, setUsers] = useState<User[]>([]);
+  const [adminName, setAdminName] = useState("Super Admin");
   const [availableCourses, setAvailableCourses] = useState<Course[]>([]);
   const [availableSections, setAvailableSections] = useState<Section[]>([]);
   const [loading, setLoading] = useState(true);
@@ -33,7 +36,7 @@ export default function SuperAdminPage() {
 
   // Layout state
   const [isSidebarOpen, setSidebarOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"view-account" | "new-account" | "time-entry" | "system-logs">("view-account");
+  const [activeTab, setActiveTab] = useState<"view-account" | "new-account" | "time-entry" | "system-logs" | "academic-catalog">("view-account");
   const [isMobile, setIsMobile] = useState(false);
 
   // Mobile check
@@ -60,16 +63,28 @@ export default function SuperAdminPage() {
     }
   };
 
+  const fetchMetadata = async () => {
+    try {
+      const res = await fetch("/api/metadata");
+      const data = await res.json();
+      if (data.courses) setAvailableCourses(data.courses);
+      if (data.sections) setAvailableSections(data.sections);
+    } catch (e) {
+      console.error("Failed to fetch metadata", e);
+    }
+  };
+
   useEffect(() => {
-    fetch("/api/metadata")
-      .then(res => res.json())
-      .then(data => {
-        if (data.courses) setAvailableCourses(data.courses);
-        if (data.sections) setAvailableSections(data.sections);
-      })
-      .catch(console.error);
+    fetchMetadata();
     load();
   }, []);
+
+  // Refresh metadata when switching to account tabs to ensure latest courses/sections
+  useEffect(() => {
+    if (activeTab === 'new-account' || activeTab === 'view-account') {
+      fetchMetadata();
+    }
+  }, [activeTab]);
 
   const addUser = async (formData: any) => {
     setError(null);
@@ -117,10 +132,10 @@ export default function SuperAdminPage() {
     }
   };
 
-  const deleteUser = async (id: number) => {
+  const deleteUser = async (id: number, role?: string) => {
     setError(null);
     try {
-      const res = await fetch(`/api/users/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/users/${id}?role=${role || 'student'}`, { method: "DELETE" });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || "Failed to delete user");
       await load();
@@ -147,6 +162,7 @@ export default function SuperAdminPage() {
     { id: "view-account", label: "View Account", icon: LayoutDashboard },
     { id: "time-entry", label: "Time Entry", icon: Clock },
     { id: "system-logs", label: "System Logs", icon: ShieldCheck },
+    { id: "academic-catalog", label: "Academic Catalog", icon: BookOpen },
   ];
 
   return (
@@ -203,10 +219,19 @@ export default function SuperAdminPage() {
         </nav>
 
         {/* Footer / Logout */}
-        <div className="p-4 border-t border-gray-100">
+        <div className="p-4 border-t border-gray-100 bg-gray-50/50">
+          <div className="flex items-center gap-3 mb-4 px-2">
+            <div className="h-10 w-10 rounded-full bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center text-white font-bold shadow-md overflow-hidden relative">
+              {(adminName?.[0] || "A").toUpperCase()}
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-bold text-gray-900 truncate">{adminName || "Super Admin"}</p>
+              <p className="text-xs text-gray-500 truncate">Administrator</p>
+            </div>
+          </div>
           <button
             onClick={logout}
-            className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold text-gray-600 hover:bg-red-50 hover:text-red-600 transition-colors"
+            className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold text-red-600 hover:bg-red-50 hover:text-red-700 transition-colors"
           >
             <LogOut size={20} />
             <span>Sign Out</span>
@@ -266,6 +291,8 @@ export default function SuperAdminPage() {
              {activeTab === 'time-entry' && <TimeEntryView />}
              
              {activeTab === 'system-logs' && <SystemLogsView />}
+
+             {activeTab === 'academic-catalog' && <AcademicCatalogView />}
            </div>
         </main>
       </div>

@@ -2,10 +2,10 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import * as XLSX from "xlsx-js-style";
 import { StudentBottomNav, StudentHeader, User } from "../ui";
-import { formatHours, calculateSessionDuration, calculateShiftDurations } from "@/lib/attendance";
+import { formatHours, calculateSessionDuration, buildSchedule } from "@/lib/attendance";
 
-type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; is_overtime?: boolean; validated_by?: string };
-type ServerAttendanceEntry = { id?: number; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null };
+type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" | "Official"; is_overtime?: boolean; validated_by?: string; validated_hours?: number; rendered_hours?: number; official_time_in?: string; official_time_out?: string };
+type ServerAttendanceEntry = { id?: number; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null; validated_hours?: number | null; rendered_hours?: number | null; official_time_in?: string | null; official_time_out?: string | null };
 
 export default function StudentHistoryPage() {
   const idnumber = useMemo(() => {
@@ -14,6 +14,7 @@ export default function StudentHistoryPage() {
   }, []);
   const [attendance, setAttendance] = useState<AttendanceEntry[]>([]);
   const [user, setUser] = useState<User | null>(null);
+  const [schedule, setSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
 
   const fetchUser = useCallback(async () => {
     try {
@@ -29,6 +30,35 @@ export default function StudentHistoryPage() {
   useEffect(() => {
     if (idnumber) fetchUser();
   }, [fetchUser, idnumber]);
+
+  useEffect(() => {
+    const fetchSchedule = async () => {
+      try {
+        if (!user?.supervisorid) return;
+        const res = await fetch(`/api/shifts?supervisor_id=${encodeURIComponent(String(user.supervisorid))}`, { cache: "no-store" });
+        const data = await res.json();
+        const rows = Array.isArray(data.shifts) ? data.shifts.filter((r: any) => r && (r.official_start || r.official_end)) : [];
+        if (!rows.length) {
+          setSchedule(null);
+          return;
+        }
+        const findByName = (match: (name: string) => boolean) =>
+          rows.find((r: any) => {
+            const n = String(r.shift_name || "").toLowerCase().trim();
+            return match(n);
+          });
+        const amRow = findByName((n) => n.includes("am") || n.includes("morning")) || rows[0];
+        const pmRow = findByName((n) => n.includes("pm") || n.includes("afternoon")) || rows[1] || rows[0];
+        setSchedule({
+          amIn: amRow?.official_start || "08:00",
+          amOut: amRow?.official_end || "12:00",
+          pmIn: pmRow?.official_start || "13:00",
+          pmOut: pmRow?.official_end || "17:00",
+        });
+      } catch {}
+    };
+    fetchSchedule();
+  }, [user]);
 
   const uniqueAttendance = useMemo(() => {
     const seen = new Set<string>();
@@ -60,6 +90,10 @@ export default function StudentHistoryPage() {
               photoDataUrl: e.photourl,
               status,
               validated_by: e.validated_by || undefined,
+              validated_hours: e.validated_hours != null ? Number(e.validated_hours) : undefined,
+              rendered_hours: e.rendered_hours != null ? Number(e.rendered_hours) : undefined,
+              official_time_in: e.official_time_in || undefined,
+              official_time_out: e.official_time_out || undefined,
             };
           }) as AttendanceEntry[];
           setAttendance(mapped);
@@ -91,10 +125,10 @@ export default function StudentHistoryPage() {
       dayGroups.get(key)!.push(log);
     });
 
-    const fallbackSchedule = {
-      amIn: 9*60, amOut: 12*60,
-      pmIn: 13*60, pmOut: 17*60,
-      otStart: 17*60, otEnd: 18*60
+    const fallbackConfig = {
+      amIn: "09:00", amOut: "12:00",
+      pmIn: "13:00", pmOut: "17:00",
+      otIn: "17:00", otOut: "18:00"
     };
 
     let overallTotal = 0;
@@ -106,28 +140,70 @@ export default function StudentHistoryPage() {
         const dayDate = new Date(dayLogs[0].timestamp);
         dayDate.setHours(0, 0, 0, 0);
         const sorted = [...dayLogs].sort((a, b) => a.timestamp - b.timestamp);
-        const noonCutoff = new Date(dayDate).setHours(12, 30, 0, 0);
-        
-        const s1 = sorted.find(l => l.type === "in" && l.timestamp < noonCutoff && !l.is_overtime) || null;
-        const s2 = sorted.find(l => l.type === "out" && l.timestamp < noonCutoff && !l.is_overtime) || null;
-        const s3 = sorted.find(l => l.type === "in" && l.timestamp >= noonCutoff && !l.is_overtime) || null;
-        const s4 = sorted.find(l => l.type === "out" && l.timestamp >= noonCutoff && !l.is_overtime) || null;
-        const s5 = sorted.find(l => l.type === "in" && l.is_overtime) || null;
-        const s6 = sorted.find(l => l.type === "out" && l.is_overtime) || null;
+        const cfg = schedule || fallbackConfig;
+        const daySchedule = buildSchedule(dayDate, cfg);
 
-        const calcSession = (inEntry: AttendanceEntry | null, outEntry: AttendanceEntry | null, shift: 'am' | 'pm' | 'ot') => {
+        // Sequential pairing: In -> Out -> In -> Out (non-OT), then OT In -> OT Out
+        const nonOtLogs = sorted.filter(l => !l.is_overtime);
+        const otLogs = sorted.filter(l => l.is_overtime);
+
+        let s1: AttendanceEntry | null = null;
+        let s2: AttendanceEntry | null = null;
+        let s3: AttendanceEntry | null = null;
+        let s4: AttendanceEntry | null = null;
+        let s5: AttendanceEntry | null = null;
+        let s6: AttendanceEntry | null = null;
+
+        const today = new Date(); today.setHours(0,0,0,0);
+        const isPastDate = dayDate < today;
+
+        // s1: first IN
+        s1 = nonOtLogs.find(l => l.type === "in") || null;
+        // s2: first OUT after s1
+        if (s1) {
+          s2 = nonOtLogs.find(l => l.type === "out" && l.timestamp > s1!.timestamp) || null;
+          if (!s2 && isPastDate) {
+            s2 = { id: s1.id ? -s1.id : -Math.floor(Math.random()*1000000), type: "out", timestamp: Math.max(daySchedule.amOut || (s1.timestamp + 60000), s1.timestamp + 60000), photoDataUrl: "", status: "Pending", validated_by: "AUTO TIME OUT" };
+          }
+        }
+
+        // s3: next IN after s2 (or after s1 if s2 missing)
+        const afterTsForS3 = s2 ? s2.timestamp : (s1 ? s1.timestamp : 0);
+        s3 = nonOtLogs.find(l => l.type === "in" && l.timestamp > afterTsForS3) || null;
+        // s4: first OUT after s3
+        if (s3) {
+          s4 = nonOtLogs.find(l => l.type === "out" && l.timestamp > s3!.timestamp) || null;
+          if (!s4 && isPastDate) {
+            s4 = { id: s3.id ? -s3.id : -Math.floor(Math.random()*1000000), type: "out", timestamp: Math.max(daySchedule.pmOut || (s3.timestamp + 60000), s3.timestamp + 60000), photoDataUrl: "", status: "Pending", validated_by: "AUTO TIME OUT" };
+          }
+        }
+
+        // s5/s6: OT pair
+        s5 = otLogs.find(l => l.type === "in") || null;
+        if (s5) {
+          s6 = otLogs.find(l => l.type === "out" && l.timestamp > s5!.timestamp) || null;
+          if (!s6 && isPastDate) {
+            s6 = { id: s5.id ? -s5.id : -Math.floor(Math.random()*1000000), type: "out", timestamp: Math.max(daySchedule.otEnd || (s5.timestamp + 60000), s5.timestamp + 60000), photoDataUrl: "", status: "Pending", validated_by: "AUTO TIME OUT" };
+          }
+        }
+
+           const daySchedule2 = buildSchedule(dayDate, cfg);
+
+           const calcSession = (inEntry: AttendanceEntry | null, outEntry: AttendanceEntry | null, shift: 'am' | 'pm' | 'ot') => {
           if (!inEntry || !outEntry) return 0;
-          const { am, pm, ot } = calculateShiftDurations(inEntry.timestamp, outEntry.timestamp, fallbackSchedule);
-          // Return the specific shift duration requested (for breakdown) or total?
-          // The caller sums them up.
-          // But wait, the original code called calculateSessionDuration for 'am', 'pm', 'ot' separately.
-          // calculateShiftDurations returns all 3.
-          // We can just return the specific component.
-          if (shift === 'am') return am;
-          if (shift === 'pm') return pm;
-          if (shift === 'ot') return ot;
-          return 0;
-        };
+
+          // 1. Check Validated Hours (Ledger - Source of Truth)
+          if ((outEntry as any).validated_hours !== undefined && (outEntry as any).validated_hours !== null && Number((outEntry as any).validated_hours) >= 0) {
+            return Number((outEntry as any).validated_hours) * 3600000;
+          }
+
+          // 2. Check Rendered Hours (Legacy)
+          if ((outEntry as any).rendered_hours !== undefined && (outEntry as any).rendered_hours !== null && Number((outEntry as any).rendered_hours) >= 0) {
+            return Number((outEntry as any).rendered_hours) * 3600000;
+          }
+
+          return calculateSessionDuration(inEntry.timestamp, outEntry.timestamp, shift, daySchedule2);
+           };
 
         const dayTotalMs = calcSession(s1, s2, 'am') + calcSession(s3, s4, 'pm') + calcSession(s5, s6, 'ot');
         overallTotal += dayTotalMs;
@@ -314,7 +390,7 @@ export default function StudentHistoryPage() {
                       </div>
                     ) : (entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? (
                             <div className="h-12 w-20 flex-shrink-0 flex items-center justify-center">
-                              <span className="text-[10px] font-bold text-red-500">AUTO TIME OUT</span>
+                              {/* Blank for auto timeout */}
                             </div>
                           ) : (
                       <div className="h-12 w-20 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 border border-gray-200 flex items-center justify-center" />
@@ -327,20 +403,24 @@ export default function StudentHistoryPage() {
                         </span>
                       </div>
                       <div className="text-xs text-gray-500 mt-0.5">
-                        {(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? (
-                            <span className="text-red-600 font-bold">AUTO TIME OUT</span>
+                        {entry.status === "Official" ? (
+                            <span>{new Date(entry.timestamp).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })} (Official Time-Out)</span>
+                        ) : (entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? (
+                            <span></span>
                         ) : (
                             new Date(entry.timestamp).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
                         )}
                       </div>
                     </div>
+                    {(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") && entry.status !== "Official" ? null : (
                     <span className={`inline-flex items-center px-2 py-1 rounded text-xs ${
-                      entry.status === "Approved" ? "bg-green-100 text-green-700" : 
+                      entry.status === "Approved" || entry.status === "Official" ? "bg-green-100 text-green-700" : 
                       entry.status === "Rejected" ? "bg-red-100 text-red-700" : 
                       "bg-yellow-100 text-yellow-700"
                     }`}>
-                      {entry.status === "Approved" ? "Validated" : entry.status === "Rejected" ? "Unvalidated" : "Pending"}
+                      {entry.status === "Approved" || entry.status === "Official" ? "Validated" : entry.status === "Rejected" ? "Unvalidated" : "Pending"}
                     </span>
+                    )}
                   </div>
                 ))
               )}

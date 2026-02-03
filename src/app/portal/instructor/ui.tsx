@@ -663,8 +663,21 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses = [], 
         idnumber: form.idnumber.trim(),
         firstname: form.firstname || undefined,
         lastname: form.lastname || undefined,
-        course: form.course || undefined,
-        section: form.section || undefined,
+        course: (() => {
+          if (user.role === 'student') {
+            const c = availableCourses.find(c => c.name === form.course);
+            return c ? c.id : form.course;
+          }
+          return form.course || undefined;
+        })(),
+        section: (() => {
+           if (user.role === 'student') {
+             const c = availableCourses.find(c => c.name === form.course);
+             const s = availableSections.find(s => s.name === form.section && (c ? s.course_id === c.id : true));
+             return s ? s.id : form.section;
+           }
+           return form.section || undefined;
+        })(),
         company: form.company || undefined,
         location: form.location || undefined,
         courseIds: form.courseIds,
@@ -987,41 +1000,41 @@ export function UsersView({
   }, [users, role, search]);
 
   return (
-    <div className="flex flex-col h-full bg-white rounded-3xl border border-gray-200 shadow-sm overflow-hidden">
+    <div className="flex flex-col h-full bg-white overflow-hidden">
       {/* Header */}
-      <div className="px-6 py-5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white">
+      <div className="px-3 py-1.5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-white">
         <div>
-          <h2 className="text-xl font-extrabold text-gray-900 tracking-tight">{title} Directory</h2>
-          <p className="text-sm text-gray-500 font-medium mt-1">
+          <h2 className="text-base font-bold text-gray-900 tracking-tight">{title} Directory</h2>
+          <p className="text-[10px] text-gray-500 font-medium">
             Manage and monitor {role} accounts
           </p>
         </div>
         {!hideAddButton && (
           <button 
             onClick={onAdd}
-            className="flex items-center justify-center gap-2 bg-[#F97316] text-white px-5 py-2.5 rounded-xl text-sm font-bold hover:bg-[#EA580C] transition-all shadow-md hover:shadow-lg active:scale-95"
+            className="flex items-center justify-center gap-2 bg-[#F97316] text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-[#EA580C] transition-all shadow-md hover:shadow-lg active:scale-95"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
             Add New {role}
           </button>
         )}
       </div>
 
       {/* Search */}
-      <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex flex-col sm:flex-row gap-3">
+      <div className="px-3 py-1.5 border-b border-gray-100 bg-gray-50/50 flex flex-col sm:flex-row gap-3">
         <div className="relative flex-1">
-          <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
           <input 
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder={`Search by name or ID...`}
-            className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-300 rounded-xl text-sm font-medium placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-black transition-all shadow-sm"
+            className="w-full pl-9 pr-3 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-black transition-all shadow-sm"
           />
         </div>
       </div>
 
       {/* List */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50/30">
+      <div className="flex-1 overflow-y-auto p-0 space-y-0 bg-gray-50/30">
         {/* Pending Section */}
         {pendingUsers.length > 0 && (
           <div className="mb-6">

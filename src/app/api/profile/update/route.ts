@@ -9,15 +9,23 @@ export async function POST(req: Request) {
     }
 
     const body = await req.json();
-    const { idnumber, company, location } = body;
+    let { idnumber, company, location } = body;
 
     if (!idnumber) {
       return NextResponse.json({ error: "User ID number is required" }, { status: 400 });
     }
 
-    // Check if user exists
+    // Normalize idnumber
+    idnumber = String(idnumber).trim();
+
+    // Check if user exists in students table (assuming profile update is for students)
+    // If needed for other roles, we should pass 'role' in the body
+    const tableName = body.role === 'supervisor' ? 'users_supervisors' : 
+                      body.role === 'coordinator' ? 'users_coordinators' : 
+                      body.role === 'instructor' ? 'users_instructors' : 'users_students';
+
     const { data: user, error: fetchError } = await admin
-      .from("users")
+      .from(tableName)
       .select("id")
       .eq("idnumber", idnumber)
       .maybeSingle();
@@ -40,7 +48,7 @@ export async function POST(req: Request) {
     }
 
     const { error: updateError } = await admin
-      .from("users")
+      .from(tableName)
       .update(updates)
       .eq("id", user.id);
 

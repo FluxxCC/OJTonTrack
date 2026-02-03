@@ -11,17 +11,24 @@ export default function StudentProfilePage() {
   const [supervisor, setSupervisor] = useState<User | null>(null);
 
   const fetchData = useCallback(async () => {
+    if (!idnumber) return;
     try {
-      const res = await fetch("/api/users");
+      const res = await fetch(`/api/users?idnumber=${encodeURIComponent(idnumber)}`);
       const json = await res.json();
-      if (Array.isArray(json.users)) {
-        const me = json.users.find((u: User) => String(u.idnumber) === String(idnumber) && String(u.role).toLowerCase() === "student");
-        if (me) {
-          setStudent(me);
-          if (me.supervisorid) {
-            const sup = json.users.find((u: User) => String(u.role).toLowerCase() === "supervisor" && String(u.id) === String(me.supervisorid));
-            if (sup) setSupervisor(sup);
-          }
+      if (Array.isArray(json.users) && json.users.length > 0) {
+        const me = json.users[0];
+        setStudent(me);
+        if ((me as any).users_supervisors) {
+            const joinedSup = (me as any).users_supervisors;
+            setSupervisor({
+                id: Number(me.supervisorid) || 0,
+                idnumber: joinedSup.idnumber,
+                role: 'supervisor',
+                firstname: joinedSup.firstname,
+                lastname: joinedSup.lastname,
+                company: joinedSup.company,
+                location: joinedSup.location
+            } as User);
         }
       }
     } catch {}

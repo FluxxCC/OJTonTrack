@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabaseClient";
 import crypto from "crypto";
+import bcrypt from "bcryptjs";
 
 export async function POST(req: Request) {
   try {
@@ -39,10 +40,18 @@ export async function POST(req: Request) {
     }
 
     // Update password
+    const tableName = payload.table;
+    if (!tableName) {
+       return NextResponse.json({ error: "Invalid token: missing role information" }, { status: 400 });
+    }
+
+    // Hash the new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
     const { error: updateError } = await admin
-      .from("users")
+      .from(tableName)
       .update({
-        password: newPassword,
+        password: hashedPassword,
       })
       .eq("id", payload.id);
 

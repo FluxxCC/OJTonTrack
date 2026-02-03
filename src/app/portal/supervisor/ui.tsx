@@ -29,13 +29,14 @@ import {
   Plus,
   XCircle
 } from 'lucide-react';
-import { calculateSessionDuration, determineShift, buildSchedule, ShiftSchedule as LibShiftSchedule, formatHours, calculateShiftDurations } from "@/lib/attendance";
+import Image from "next/image";
+import { calculateSessionDuration, determineShift, buildSchedule, ShiftSchedule as LibShiftSchedule, formatHours, calculateShiftDurations, isLate, calculateHoursWithinOfficialTime } from "@/lib/attendance";
 import * as XLSX from 'xlsx-js-style';
 
 type ShiftSchedule = LibShiftSchedule;
 
 // --- Types ---
-export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; photourl?: string; photoUrl?: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; idnumber?: string; validated_by?: string | null; is_overtime?: boolean };
+export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; photourl?: string; photoUrl?: string; status?: "Pending" | "Approved" | "Rejected" | "Validated" | "VALIDATED" | "OFFICIAL" | "ADJUSTED" | "Official" | "REJECTED"; validatedAt?: number; idnumber?: string; studentId?: number; validated_by?: string | null; is_overtime?: boolean; rendered_hours?: number; official_time_in?: string; official_time_out?: string; };
 export type DateOverride = {
   date: string; // YYYY-MM-DD
   am?: { start: string; end: string };
@@ -88,7 +89,12 @@ export type ApprovalRow = {
 };
 
 // --- Helpers ---
-
+const toDateKey = (d: Date) => {
+    return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+};
+const toLocalDateKey = (d: Date) => {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 // --- Components ---
 export function EvaluationButton({ 
@@ -109,7 +115,7 @@ export function EvaluationButton({
       }}
       disabled={!active}
       suppressHydrationWarning
-      className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all shadow-md flex items-center gap-2 text-white ${
+      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all shadow-sm flex items-center gap-2 text-white ${
         active
           ? "bg-green-600 hover:bg-green-700 shadow-green-200 ring-2 ring-green-200 ring-offset-1 cursor-pointer"
           : "bg-red-500 shadow-red-200 ring-2 ring-red-200 ring-offset-1 cursor-not-allowed opacity-80"
@@ -193,6 +199,8 @@ export function SetOfficialTimeView({ students, myIdnumber }: { students: User[]
     setIsSavingOverride(true);
     try {
         const supervisorId = myIdnumber || localStorage.getItem("idnumber") || "";
+        console.log("Saving override for:", supervisorId, overrideModal);
+
         const res = await fetch("/api/shifts/overrides", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -205,11 +213,17 @@ export function SetOfficialTimeView({ students, myIdnumber }: { students: User[]
                 pmOut: overrideModal.pmOut
             })
         });
-        if (!res.ok) throw new Error("Failed to save");
+
+        if (!res.ok) {
+            const errData = await res.json();
+            throw new Error(errData.error || "Failed to save");
+        }
+
         setOverrideModal({ ...overrideModal, isOpen: false });
         fetchOverrides();
     } catch (e) {
-        alert("Failed to save schedule override");
+        console.error(e);
+        alert(e instanceof Error ? e.message : "Failed to save schedule override");
     } finally {
         setIsSavingOverride(false);
     }
@@ -383,26 +397,26 @@ export function SetOfficialTimeView({ students, myIdnumber }: { students: User[]
   return (
     <div className="max-w-4xl mx-auto animate-in fade-in duration-500">
       {/* Header */}
-      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm px-6 py-5 mb-6 flex items-center gap-4">
-        <div className="h-12 w-12 rounded-xl bg-orange-50 flex items-center justify-center text-orange-500">
-           <Clock size={24} />
+      <div className="bg-white rounded-lg border border-gray-100 shadow-sm px-3 py-2 mb-3 flex items-center gap-3">
+        <div className="h-9 w-9 rounded-lg bg-orange-50 flex items-center justify-center text-orange-500">
+           <Clock size={18} />
         </div>
         <div>
-           <h2 className="text-xl font-bold text-gray-900">Official Schedule</h2>
-           <p className="text-sm text-gray-500">Set the required working hours for all your students.</p>
+           <h2 className="text-base font-bold text-gray-900">Official Schedule</h2>
+           <p className="text-[10px] text-gray-500">Set the required working hours for all your students.</p>
         </div>
       </div>
 
       {noChangeModal && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
-            <h2 className="text-xl font-bold text-gray-900 mb-2">No Changes Detected</h2>
-            <p className="text-gray-700 mb-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-4">
+            <h2 className="text-base font-bold text-gray-900 mb-2">No Changes Detected</h2>
+            <p className="text-xs text-gray-700 mb-3">
               The official schedule has not been modified. Please adjust the times before saving to avoid creating duplicate entries.
             </p>
             <button
               onClick={() => setNoChangeModal(false)}
-              className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
+              className="w-full px-3 py-1.5 bg-[#F97316] text-white rounded-lg font-bold text-xs"
             >
               Close
             </button>
@@ -412,14 +426,14 @@ export function SetOfficialTimeView({ students, myIdnumber }: { students: User[]
 
       {successModal && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
-            <h2 className="text-xl font-bold text-gray-900 mb-2">Schedule Saved</h2>
-            <p className="text-gray-700 mb-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-4">
+            <h2 className="text-base font-bold text-gray-900 mb-2">Schedule Saved</h2>
+            <p className="text-xs text-gray-700 mb-3">
               Schedule saved successfully for all students.
             </p>
             <button
               onClick={() => setSuccessModal(false)}
-              className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
+              className="w-full px-3 py-1.5 bg-[#F97316] text-white rounded-lg font-bold text-xs"
             >
               OK
             </button>
@@ -428,90 +442,90 @@ export function SetOfficialTimeView({ students, myIdnumber }: { students: User[]
       )}
 
       {/* Settings View */}
-      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-8">
-        <div className="max-w-xl mx-auto w-full space-y-8">
-          <div className="bg-gray-50 rounded-2xl p-6 border border-gray-200 space-y-6">
-            <div className="flex items-center gap-3 pb-4 border-b border-gray-200">
-              <div className="p-2 bg-orange-100 rounded-lg text-orange-600">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+      <div className="bg-white rounded-lg border border-gray-100 shadow-sm p-4">
+        <div className="max-w-xl mx-auto w-full space-y-4">
+          <div className="bg-gray-50 rounded-lg p-3 border border-gray-200 space-y-3">
+            <div className="flex items-center gap-2 pb-2 border-b border-gray-200">
+              <div className="p-1 bg-orange-100 rounded text-orange-600">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
               </div>
               <div>
-                 <h3 className="font-bold text-gray-900">Standard Schedule</h3>
-                 <p className="text-xs text-gray-500">This schedule will apply to all students under your supervision.</p>
+                 <h3 className="text-xs font-bold text-gray-900">Standard Schedule</h3>
+                 <p className="text-[10px] text-gray-500">This schedule will apply to all students under your supervision.</p>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="space-y-4">
-                 <h4 className="text-xs font-bold text-gray-800 uppercase tracking-wider flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-orange-500"></span>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="space-y-2">
+                 <h4 className="text-[10px] font-bold text-gray-800 uppercase tracking-wider flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-orange-500"></span>
                     Morning Shift
                  </h4>
                  <div>
-                   <label className="block text-sm font-bold text-gray-900 mb-1">Time In</label>
+                   <label className="block text-[10px] font-bold text-gray-900 mb-1">Time In</label>
                    <input 
                      type="time" 
                      value={timeSettings.amIn}
                      onClick={(e) => e.currentTarget.showPicker()}
                      onChange={(e) => setTimeSettings(prev => ({ ...prev, amIn: e.target.value }))}
-                     className="w-full rounded-xl border border-gray-400 bg-gray-50 px-3 py-2 text-sm font-semibold text-gray-900 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all shadow-sm"
+                     className="w-full rounded-lg border border-gray-400 bg-gray-50 px-2 py-1 text-xs font-semibold text-gray-900 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all shadow-sm"
                    />
                  </div>
                  <div>
-                   <label className="block text-sm font-bold text-gray-900 mb-1">Time Out</label>
+                   <label className="block text-[10px] font-bold text-gray-900 mb-1">Time Out</label>
                    <input 
                      type="time" 
                      value={timeSettings.amOut}
                      onClick={(e) => e.currentTarget.showPicker()}
                      onChange={(e) => setTimeSettings(prev => ({ ...prev, amOut: e.target.value }))}
-                     className="w-full rounded-xl border border-gray-400 bg-gray-50 px-3 py-2 text-sm font-semibold text-gray-900 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all shadow-sm"
+                     className="w-full rounded-lg border border-gray-400 bg-gray-50 px-2 py-1 text-xs font-semibold text-gray-900 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all shadow-sm"
                    />
                  </div>
               </div>
 
-              <div className="space-y-4">
-                 <h4 className="text-xs font-bold text-gray-800 uppercase tracking-wider flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-orange-500"></span>
+              <div className="space-y-2">
+                 <h4 className="text-[10px] font-bold text-gray-800 uppercase tracking-wider flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-orange-500"></span>
                     Afternoon Shift
                  </h4>
                  <div>
-                   <label className="block text-sm font-bold text-gray-900 mb-1">Time In</label>
+                   <label className="block text-[10px] font-bold text-gray-900 mb-1">Time In</label>
                    <input 
                      type="time" 
                      value={timeSettings.pmIn}
                      onClick={(e) => e.currentTarget.showPicker()}
                      onChange={(e) => setTimeSettings(prev => ({ ...prev, pmIn: e.target.value }))}
-                     className="w-full rounded-xl border border-gray-400 bg-gray-50 px-3 py-2 text-sm font-semibold text-gray-900 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all shadow-sm"
+                     className="w-full rounded-lg border border-gray-400 bg-gray-50 px-2 py-1 text-xs font-semibold text-gray-900 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all shadow-sm"
                    />
                  </div>
                  <div>
-                   <label className="block text-sm font-bold text-gray-900 mb-1">Time Out</label>
+                   <label className="block text-[10px] font-bold text-gray-900 mb-1">Time Out</label>
                    <input 
                      type="time" 
                      value={timeSettings.pmOut}
                      onClick={(e) => e.currentTarget.showPicker()}
                      onChange={(e) => setTimeSettings(prev => ({ ...prev, pmOut: e.target.value }))}
-                     className="w-full rounded-xl border border-gray-400 bg-gray-50 px-3 py-2 text-sm font-semibold text-gray-900 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all shadow-sm"
+                     className="w-full rounded-lg border border-gray-400 bg-gray-50 px-2 py-1 text-xs font-semibold text-gray-900 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all shadow-sm"
                    />
                  </div>
               </div>
             </div>
           </div>
 
-          <div className="flex justify-end pt-4 border-t border-gray-100">
+          <div className="flex justify-end pt-3 border-t border-gray-100">
             <button
               onClick={handleSave}
               disabled={isSaving}
-              className="px-8 py-3 rounded-xl bg-[#F97316] text-white font-bold shadow-lg shadow-orange-200 hover:bg-orange-600 transition-all active:scale-95 disabled:opacity-70 disabled:cursor-not-allowed flex items-center gap-2"
+              className="px-6 py-2 rounded-lg bg-[#F97316] text-white font-bold shadow-sm shadow-orange-200 hover:bg-orange-600 transition-all active:scale-95 disabled:opacity-70 disabled:cursor-not-allowed flex items-center gap-2 text-xs"
             >
               {isSaving ? (
                 <>
-                  <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                  <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
                   Saving...
                 </>
               ) : (
                 <>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
                   Save Schedule
                 </>
               )}
@@ -520,15 +534,15 @@ export function SetOfficialTimeView({ students, myIdnumber }: { students: User[]
         </div>
 
       {/* Specific Date Schedules Section */}
-      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-8 mt-6">
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-              <div className="p-2 bg-blue-100 rounded-lg text-blue-600">
-                <Calendar size={20} />
+      <div className="bg-white rounded-lg border border-gray-100 shadow-sm p-3 mt-3">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+              <div className="p-1.5 bg-blue-100 rounded text-blue-600">
+                <Calendar size={16} />
               </div>
               <div>
-                 <h3 className="font-bold text-gray-900">Specific Date Schedules</h3>
-                 <p className="text-xs text-gray-500">Set custom official times for specific dates.</p>
+                 <h3 className="font-bold text-gray-900 text-xs">Specific Date Schedules</h3>
+                 <p className="text-[10px] text-gray-500">Set custom official times for specific dates.</p>
               </div>
           </div>
           <button
@@ -538,7 +552,7 @@ export function SetOfficialTimeView({ students, myIdnumber }: { students: User[]
               amIn: timeSettings.amIn, amOut: timeSettings.amOut, 
               pmIn: timeSettings.pmIn, pmOut: timeSettings.pmOut 
             })}
-            className="px-4 py-2 rounded-xl bg-blue-50 text-blue-600 font-bold text-sm hover:bg-blue-100 transition-colors flex items-center gap-2"
+            className="px-3 py-1.5 rounded-xl bg-blue-50 text-blue-600 font-bold text-xs hover:bg-blue-100 transition-colors flex items-center gap-2"
           >
             <Plus size={16} />
             Add Date Schedule
@@ -546,23 +560,23 @@ export function SetOfficialTimeView({ students, myIdnumber }: { students: User[]
         </div>
 
         {dateOverrides.length === 0 ? (
-          <div className="text-center py-8 text-gray-400 text-sm bg-gray-50 rounded-xl border border-dashed border-gray-200">
+          <div className="text-center py-6 text-gray-400 text-xs bg-gray-50 rounded-xl border border-dashed border-gray-200">
             No specific date schedules set.
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="space-y-2">
             {dateOverrides.map((override) => (
-              <div key={override.date} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-200">
-                 <div className="flex items-center gap-4">
-                    <div className="text-center bg-white p-2 rounded-lg border border-gray-200 min-w-[60px]">
-                       <div className="text-xs font-bold text-gray-500 uppercase">{new Date(override.date).toLocaleDateString('en-US', { month: 'short' })}</div>
-                       <div className="text-xl font-bold text-gray-900">{new Date(override.date).getDate()}</div>
+              <div key={override.date} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-200">
+                 <div className="flex items-center gap-3">
+                    <div className="text-center bg-white p-2 rounded-lg border border-gray-200 min-w-[50px]">
+                       <div className="text-[10px] font-bold text-gray-500 uppercase">{new Date(override.date).toLocaleDateString('en-US', { month: 'short' })}</div>
+                       <div className="text-lg font-bold text-gray-900">{new Date(override.date).getDate()}</div>
                     </div>
                     <div>
-                       <div className="text-sm font-bold text-gray-900">
+                       <div className="text-xs font-bold text-gray-900">
                           {new Date(override.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
                        </div>
-                       <div className="text-xs text-gray-500 mt-1 flex gap-3">
+                       <div className="text-[10px] text-gray-500 mt-1 flex gap-3">
                           {override.am && (
                               <span className="flex items-center gap-1">
                                   <span className="w-1.5 h-1.5 rounded-full bg-orange-400"></span>
@@ -586,15 +600,15 @@ export function SetOfficialTimeView({ students, myIdnumber }: { students: User[]
                           amIn: override.am?.start || "", amOut: override.am?.end || "",
                           pmIn: override.pm?.start || "", pmOut: override.pm?.end || ""
                       })}
-                      className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                      className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
                     >
-                       <UserCog size={16} />
+                       <UserCog size={14} />
                     </button>
                     <button 
                       onClick={() => handleDeleteOverride(override.date)}
-                      className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                      className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                     >
-                       <XCircle size={16} />
+                       <XCircle size={14} />
                     </button>
                  </div>
               </div>
@@ -607,105 +621,105 @@ export function SetOfficialTimeView({ students, myIdnumber }: { students: User[]
       {overrideModal.isOpen && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4 animate-in fade-in duration-200">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden">
-            <div className="p-6 border-b border-gray-100 flex items-center justify-between">
-               <h2 className="text-xl font-bold text-gray-900">Specific Date Schedule</h2>
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+               <h2 className="text-lg font-bold text-gray-900">Specific Date Schedule</h2>
                <button onClick={() => setOverrideModal({ ...overrideModal, isOpen: false })} className="text-gray-400 hover:text-gray-600">
-                 <X size={24} />
+                 <X size={20} />
                </button>
             </div>
             
-            <div className="p-6 space-y-6">
+            <div className="p-5 space-y-5">
                {/* Summary Section */}
-               <div className="bg-orange-50 rounded-xl p-4 border border-orange-100 flex items-center justify-between">
+               <div className="bg-orange-50 rounded-xl p-3 border border-orange-100 flex items-center justify-between">
                   <div>
-                     <div className="text-xs font-bold text-orange-600 uppercase tracking-wider mb-1">Total Schedule Duration</div>
-                     <div className="text-2xl font-bold text-gray-900">{formatDuration(totalDuration)}</div>
+                     <div className="text-[10px] font-bold text-orange-600 uppercase tracking-wider mb-1">Total Schedule Duration</div>
+                     <div className="text-xl font-bold text-gray-900">{formatDuration(totalDuration)}</div>
                   </div>
                   <div className="flex gap-4">
                      <div className="text-right">
                          <div className="text-[10px] font-bold text-gray-500 uppercase">AM Shift</div>
-                         <div className="text-sm font-bold text-gray-700">{formatDuration(amDuration)}</div>
+                         <div className="text-xs font-bold text-gray-700">{formatDuration(amDuration)}</div>
                      </div>
                      <div className="text-right">
                          <div className="text-[10px] font-bold text-gray-500 uppercase">PM Shift</div>
-                         <div className="text-sm font-bold text-gray-700">{formatDuration(pmDuration)}</div>
+                         <div className="text-xs font-bold text-gray-700">{formatDuration(pmDuration)}</div>
                      </div>
                   </div>
                </div>
 
                <div>
-                  <label className="block text-sm font-bold text-gray-900 mb-2">Select Date</label>
+                  <label className="block text-xs font-bold text-gray-900 mb-1.5">Select Date</label>
                   <input 
                     type="date"
                     value={overrideModal.date || ""}
                     onChange={(e) => setOverrideModal({ ...overrideModal, date: e.target.value })}
-                    className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-gray-50 font-semibold text-gray-900 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none"
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 bg-gray-50 font-semibold text-gray-900 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none"
                   />
                </div>
 
-               <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-4 p-4 bg-orange-50/50 rounded-xl border border-orange-100/50">
-                     <h4 className="text-xs font-bold text-orange-600 uppercase tracking-wider flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-orange-500"></span>
+               <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-3 p-3 bg-orange-50/50 rounded-xl border border-orange-100/50">
+                     <h4 className="text-[10px] font-bold text-orange-600 uppercase tracking-wider flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-orange-500"></span>
                         Morning Shift
                      </h4>
                      <div>
-                        <label className="block text-xs font-semibold text-gray-700 mb-1">Time In</label>
+                        <label className="block text-[10px] font-semibold text-gray-700 mb-1">Time In</label>
                         <input 
                            type="time" 
                            value={overrideModal.amIn} 
                            onChange={(e) => setOverrideModal({...overrideModal, amIn: e.target.value})} 
-                           className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm font-bold text-gray-900 bg-white focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none transition-all" 
+                           className="w-full px-2 py-1.5 rounded-lg border border-gray-300 text-xs font-bold text-gray-900 bg-white focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none transition-all" 
                         />
                      </div>
                      <div>
-                        <label className="block text-xs font-semibold text-gray-700 mb-1">Time Out</label>
+                        <label className="block text-[10px] font-semibold text-gray-700 mb-1">Time Out</label>
                         <input 
                            type="time" 
                            value={overrideModal.amOut} 
                            onChange={(e) => setOverrideModal({...overrideModal, amOut: e.target.value})} 
-                           className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm font-bold text-gray-900 bg-white focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none transition-all" 
+                           className="w-full px-2 py-1.5 rounded-lg border border-gray-300 text-xs font-bold text-gray-900 bg-white focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none transition-all" 
                         />
                      </div>
                   </div>
-                  <div className="space-y-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100/50">
-                     <h4 className="text-xs font-bold text-blue-600 uppercase tracking-wider flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                  <div className="space-y-3 p-3 bg-blue-50/50 rounded-xl border border-blue-100/50">
+                     <h4 className="text-[10px] font-bold text-blue-600 uppercase tracking-wider flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
                         Afternoon Shift
                      </h4>
                      <div>
-                        <label className="block text-xs font-semibold text-gray-700 mb-1">Time In</label>
+                        <label className="block text-[10px] font-semibold text-gray-700 mb-1">Time In</label>
                         <input 
                            type="time" 
                            value={overrideModal.pmIn} 
                            onChange={(e) => setOverrideModal({...overrideModal, pmIn: e.target.value})} 
-                           className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm font-bold text-gray-900 bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all" 
+                           className="w-full px-2 py-1.5 rounded-lg border border-gray-300 text-xs font-bold text-gray-900 bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all" 
                         />
                      </div>
                      <div>
-                        <label className="block text-xs font-semibold text-gray-700 mb-1">Time Out</label>
+                        <label className="block text-[10px] font-semibold text-gray-700 mb-1">Time Out</label>
                         <input 
                            type="time" 
                            value={overrideModal.pmOut} 
                            onChange={(e) => setOverrideModal({...overrideModal, pmOut: e.target.value})} 
-                           className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm font-bold text-gray-900 bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all" 
+                           className="w-full px-2 py-1.5 rounded-lg border border-gray-300 text-xs font-bold text-gray-900 bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all" 
                         />
                      </div>
                   </div>
                </div>
             </div>
 
-            <div className="p-6 bg-gray-50 border-t border-gray-100 flex justify-end gap-3">
+            <div className="px-5 py-4 bg-gray-50 border-t border-gray-100 flex justify-end gap-3">
                <button 
                  onClick={() => setOverrideModal({ ...overrideModal, isOpen: false })}
-                 className="px-6 py-2 rounded-xl text-gray-600 font-bold hover:bg-gray-200 transition-colors"
+                 className="px-4 py-1.5 rounded-xl text-gray-600 font-bold text-xs hover:bg-gray-200 transition-colors"
                >
                  Cancel
                </button>
                <button 
                  onClick={handleSaveOverride}
                  disabled={!overrideModal.date || isSavingOverride}
-                 className="px-6 py-2 rounded-xl bg-blue-600 text-white font-bold hover:bg-blue-700 transition-colors shadow-lg shadow-blue-200 disabled:opacity-70 disabled:cursor-not-allowed"
+                 className="px-4 py-1.5 rounded-xl bg-blue-600 text-white font-bold text-xs hover:bg-blue-700 transition-colors shadow-lg shadow-blue-200 disabled:opacity-70 disabled:cursor-not-allowed"
                >
                  {isSavingOverride ? "Saving..." : "Save Schedule"}
                </button>
@@ -802,7 +816,7 @@ export function EvaluationModal({
     : overallPercent >= 75 ? "Fair"
     : "Needs Improvement";
   const totalRequired = rubric.reduce((sum, cat) => sum + cat.items.length, 0);
-  const filledCount = Object.values(criteria).filter(v => typeof v === "number").length;
+  const filledCount = Object.values(criteria).filter(v => typeof v === "number" && v >= 75).length;
   const hasComments = evalComments.trim().length > 0;
   const isComplete = filledCount === totalRequired && hasComments;
   const submitPayload = () => onSubmit({
@@ -820,99 +834,154 @@ export function EvaluationModal({
   ];
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="w-full max-w-3xl bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col">
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
-          <h3 className="font-bold text-gray-900">Evaluate Student</h3>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-full hover:bg-gray-200 text-gray-500 transition-colors"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-          </button>
-        </div>
-        <div className="p-6 space-y-6 max-h-[70vh] overflow-y-auto custom-scrollbar">
-          <div className="text-sm text-gray-600">
-            Evaluating <span className="font-bold text-gray-900">{selected.firstname} {selected.lastname}</span>
+      <div className="w-full max-w-4xl bg-white rounded-lg shadow-xl overflow-hidden flex flex-col max-h-[90vh]">
+        <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between bg-gray-50 shrink-0">
+          <div>
+            <h3 className="font-bold text-gray-900 text-lg">Evaluate Student</h3>
+            <div className="text-xs text-gray-600">
+              Evaluating <span className="font-bold text-gray-900">{selected.firstname} {selected.lastname}</span>
+            </div>
           </div>
-          <div className="flex items-center justify-between">
-            <span className="bg-gray-100 text-gray-700 text-xs font-bold px-2.5 py-0.5 rounded-full">
-              {filledCount}/{totalRequired} fields completed
-            </span>
-            {!isComplete && (
-              <span className="text-xs text-red-600">
-                Complete all fields to enable submission
+          <div className="flex items-center gap-3">
+            <div className="flex flex-col items-end">
+              <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                isComplete ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"
+              }`}>
+                {filledCount}/{totalRequired} fields completed
               </span>
-            )}
+              {!isComplete && (
+                <span className="text-[10px] text-red-600 mt-0.5">
+                  Complete all fields to enable submission
+                </span>
+              )}
+            </div>
+            <button
+              onClick={onClose}
+              className="p-1 rounded-full hover:bg-gray-200 text-gray-500 transition-colors"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
           </div>
-          <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
-            <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Grade Interpretation</div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        </div>
+        
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">
+          <div className="p-3 rounded-lg bg-blue-50/50 border border-blue-100">
+            <div className="text-xs font-bold text-blue-800 uppercase tracking-wider mb-2">Grade Interpretation</div>
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
               {gradeTags.map((t) => (
-                <div key={t.label} className="rounded-lg bg-white border border-gray-200 px-3 py-2">
-                  <div className="text-xs font-bold text-gray-900">{t.label}</div>
-                  <div className="text-[11px] text-gray-500">{t.range}</div>
+                <div key={t.label} className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-gray-900">{t.label}</span>
+                  <span className="text-xs text-gray-500 font-medium">({t.range})</span>
                 </div>
               ))}
             </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {rubric.map(cat => (
-              <div key={cat.id} className="rounded-xl border border-gray-100 bg-white shadow-sm p-4">
-                <div className="text-sm font-bold text-gray-900 mb-2">{cat.title}</div>
-                <div className="space-y-3">
-                  {cat.items.map(item => (
-                    <div key={item.id} className="space-y-2">
-                      <div className="text-xs text-gray-600">{item.label}</div>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="number"
-                          min={1}
-                          max={100}
-                          value={criteria[item.id] ?? ""}
-                          onChange={(e) => {
-                            const raw = e.target.value;
-                            const valNum = Number(raw);
-                            const val = Number.isFinite(valNum) ? Math.max(1, Math.min(100, valNum)) : null;
-                            const next = { ...criteria, [item.id]: val };
-                            setCriteria(next);
-                          }}
-                          placeholder="1–100"
-                          className="w-24 sm:w-28 rounded-lg px-3 py-2 text-sm font-medium text-gray-900 placeholder:text-xs placeholder:text-gray-500 outline-none focus:ring-2 focus:ring-[#F97316]/20 border border-gray-300 bg-white shadow-sm focus:border-[#F97316]"
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+
+          <div className="border border-gray-200 rounded-lg overflow-hidden">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th className="px-4 py-3 font-bold text-gray-900 text-xs uppercase tracking-wider">Criteria / Performance Indicator</th>
+                  <th className="px-4 py-3 font-bold text-gray-900 text-xs uppercase tracking-wider w-32 text-center">Rating (1-100)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {rubric.map(cat => (
+                  <React.Fragment key={cat.id}>
+                    <tr className="bg-gray-50/50">
+                      <td colSpan={2} className="px-4 py-2 text-xs font-bold text-gray-800 bg-gray-100/50">
+                        {cat.title}
+                      </td>
+                    </tr>
+                    {cat.items.map(item => (
+                      <tr key={item.id} className="hover:bg-gray-50 transition-colors">
+                        <td className="px-4 py-2 text-xs text-gray-600 align-middle">
+                          {item.label}
+                        </td>
+                        <td className="px-4 py-2 align-middle">
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            maxLength={3}
+                            value={criteria[item.id] ?? ""}
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              if (raw === "") {
+                                setCriteria({ ...criteria, [item.id]: null });
+                                return;
+                              }
+                              // Allow digits only
+                              if (!/^\d+$/.test(raw)) return;
+
+                              const valNum = Number(raw);
+                              
+                              // Strict Input Filtering for 75-100 range
+                              // 1. Single digit: Must be 1, 7, 8, or 9
+                              if (raw.length === 1) {
+                                if (valNum !== 1 && (valNum < 7 || valNum > 9)) return;
+                              }
+                              // 2. Two digits
+                              else if (raw.length === 2) {
+                                // If starts with 1, must be 10
+                                if (raw.startsWith("1")) {
+                                    if (valNum !== 10) return;
+                                }
+                                // If starts with 7, must be >= 75
+                                else if (raw.startsWith("7")) {
+                                    if (valNum < 75) return;
+                                }
+                                // 80-99 are valid
+                              }
+                              // 3. Three digits: Must be 100
+                              else if (raw.length === 3) {
+                                if (valNum !== 100) return;
+                              }
+
+                              const next = { ...criteria, [item.id]: valNum };
+                              setCriteria(next);
+                            }}
+                            placeholder="75–100"
+                            className="w-full rounded border border-gray-300 px-3 py-1.5 text-xs text-center font-medium text-gray-900 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all shadow-sm"
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
           </div>
-          <div className="rounded-2xl border border-gray-100 bg-white shadow-sm p-4">
-            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Comments / Remarks</label>
+
+          <div className="space-y-2">
+            <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider">Comments / Remarks</label>
             <textarea
               value={evalComments}
               onChange={e => setEvalComments(e.target.value)}
-              className={`w-full h-40 rounded-xl p-4 text-sm font-medium text-gray-900 placeholder-gray-500 outline-none resize-y focus:ring-2 focus:ring-[#F97316]/20 ${
-                hasComments ? "border-gray-300 focus:border-[#F97316]" : "border-red-300 focus:border-red-400"
+              className={`w-full h-24 rounded-lg p-3 text-xs font-medium text-gray-900 placeholder-gray-500 outline-none resize-y border shadow-sm transition-all focus:ring-1 ${
+                hasComments 
+                  ? "border-gray-300 focus:border-[#F97316] focus:ring-[#F97316]/20" 
+                  : "border-red-300 focus:border-red-400 focus:ring-red-200"
               }`}
               placeholder="Write remarks..."
             />
           </div>
         </div>
-        <div className="p-4 border-t border-gray-100 bg-gray-50 flex justify-end gap-3">
+
+        <div className="px-4 py-3 border-t border-gray-100 bg-gray-50 flex justify-end gap-3 shrink-0">
           <button
             onClick={onClose}
-            className="px-4 py-2 rounded-xl text-sm font-semibold text-gray-600 hover:bg-gray-200 transition-colors"
+            className="px-4 py-2 rounded-lg text-xs font-semibold text-gray-600 hover:bg-gray-200 transition-colors"
           >
             Cancel
           </button>
           <button
             onClick={submitPayload}
             disabled={isSubmitting || !isComplete}
-            className="px-4 py-2 rounded-xl text-sm font-semibold text-white bg-[#F97316] hover:bg-[#EA580C] transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg shadow-orange-200"
+            className="px-4 py-2 rounded-lg text-xs font-bold text-white bg-[#F97316] hover:bg-[#EA580C] transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-md shadow-orange-200"
           >
             {isSubmitting ? (
               <>
-                <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                <svg className="animate-spin h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
                 Submitting...
               </>
             ) : (
@@ -986,28 +1055,45 @@ export function StudentAttendanceDetailView({
 
   useEffect(() => {
     if (!supabase) return;
-    const id = student.idnumber;
-    if (!id) return;
-    type RTEntry = ServerAttendanceEntry & { id: number; idnumber: string };
+    const studentId = student.id;
+    if (!studentId) return;
+
+    // Realtime payload definition matching the 'attendance' table structure
+    type RTEntry = {
+        id: number;
+        student_id: number;
+        type: "in" | "out";
+        logged_at: string;
+        photourl: string;
+        status: string;
+        validated_by?: string | null;
+        validated_at?: string | null;
+        rendered_hours?: number;
+    };
+
     const channel = supabase
-      .channel(`student_attendance_detail_${id}`)
+      .channel(`student_attendance_detail_${studentId}`)
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "attendance", filter: `idnumber=eq.${id}` },
+        { event: "INSERT", schema: "public", table: "attendance", filter: `student_id=eq.${studentId}` },
         (payload: RealtimePostgresChangesPayload<RTEntry>) => {
           const e = payload.new as RTEntry;
           if (!e) return;
           const sStr = String(e.status || "").trim().toLowerCase();
           const isRejected = sStr === "rejected";
           const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
+          
           const entry: AttendanceEntry = {
             id: e.id,
+            studentId: e.student_id,
+            idnumber: student.idnumber,
             type: e.type,
-            timestamp: Number(e.ts),
+            timestamp: new Date(e.logged_at).getTime(),
             photoDataUrl: e.photourl,
             status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
             validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
-            validated_by: e.validated_by
+            validated_by: e.validated_by,
+            rendered_hours: e.rendered_hours
           };
           setLogs(prev => {
             const others = prev.filter(x => x.id !== entry.id);
@@ -1018,18 +1104,20 @@ export function StudentAttendanceDetailView({
       )
       .on(
         "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "attendance", filter: `idnumber=eq.${id}` },
+        { event: "UPDATE", schema: "public", table: "attendance", filter: `student_id=eq.${studentId}` },
         (payload: RealtimePostgresChangesPayload<RTEntry>) => {
           const e = payload.new as RTEntry;
           if (!e) return;
           const sStr = String(e.status || "").trim().toLowerCase();
           const isRejected = sStr === "rejected";
           const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
+          
           const updatedStatus: "Pending" | "Approved" | "Rejected" =
             isRejected ? "Rejected" : isApproved ? "Approved" : "Pending";
           const updatedValidatedAt = e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined;
-          const tsNum = Number(e.ts);
+          const tsNum = new Date(e.logged_at).getTime();
           const idNum = e.id;
+          
           setLogs(prev =>
             prev
               .map(log =>
@@ -1040,7 +1128,9 @@ export function StudentAttendanceDetailView({
                       photoDataUrl: e.photourl,
                       status: updatedStatus,
                       validatedAt: updatedValidatedAt,
-                      validated_by: e.validated_by
+                      validated_by: e.validated_by,
+                      studentId: e.student_id,
+                      rendered_hours: e.rendered_hours
                     }
                   : log
               )
@@ -1051,7 +1141,7 @@ export function StudentAttendanceDetailView({
       )
       .on(
         "postgres_changes",
-        { event: "DELETE", schema: "public", table: "attendance", filter: `idnumber=eq.${id}` },
+        { event: "DELETE", schema: "public", table: "attendance", filter: `student_id=eq.${studentId}` },
         (payload: RealtimePostgresChangesPayload<RTEntry>) => {
           const e = payload.old as RTEntry;
           if (!e) return;
@@ -1060,12 +1150,13 @@ export function StudentAttendanceDetailView({
         }
       )
       .subscribe();
+
     return () => {
       try {
         supabase?.removeChannel(channel);
       } catch {}
     };
-  }, [student.idnumber]);
+  }, [student.id, student.idnumber]);
 
   const [studentDbSchedule, setStudentDbSchedule] = useState<any>(null);
 
@@ -1147,12 +1238,12 @@ export function StudentAttendanceDetailView({
 
       pairs.forEach(pair => {
           // Check if either slot in the pair is Pending
-          const inPending = pair.in && (pair.in.status || "Pending") === "Pending";
-          const outPending = pair.out && (pair.out.status || "Pending") === "Pending";
+          const inPending = pair.in && ((pair.in as any).status || "Pending") === "Pending";
+          const outPending = pair.out && ((pair.out as any).status || "Pending") === "Pending";
           
           if (inPending || outPending) {
-              if (pair.in && pair.in.id != null && (pair.in.status || "Pending") === "Pending") ids.add(Number(pair.in.id));
-              if (pair.out && pair.out.id != null && (pair.out.status || "Pending") === "Pending") ids.add(Number(pair.out.id));
+              if (pair.in && (pair.in as any).id != null && ((pair.in as any).status || "Pending") === "Pending") ids.add(Number((pair.in as any).id));
+              if (pair.out && (pair.out as any).id != null && ((pair.out as any).status || "Pending") === "Pending") ids.add(Number((pair.out as any).id));
           }
       });
     });
@@ -1179,8 +1270,8 @@ export function StudentAttendanceDetailView({
     const map = new Map<string, string>();
     logs.forEach(a => {
       const d = new Date(a.timestamp);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      const label = d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+      const key = toDateKey(d).substring(0, 7);
+      const label = d.toLocaleDateString('en-US', { month: "long", year: "numeric", timeZone: 'Asia/Manila' });
       if (!map.has(key)) {
         map.set(key, label);
       }
@@ -1194,7 +1285,7 @@ export function StudentAttendanceDetailView({
     if (!monthFilter) return logs;
     return logs.filter(a => {
       const d = new Date(a.timestamp);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const key = toDateKey(d).substring(0, 7);
       return key === monthFilter;
     });
   }, [logs, monthFilter]);
@@ -1254,7 +1345,7 @@ export function StudentAttendanceDetailView({
       const grouped = new Map<string, { date: Date, logs: AttendanceEntry[] }>();
       studentLogs.forEach(log => {
           const date = new Date(log.timestamp);
-          const key = date.toLocaleDateString();
+          const key = toDateKey(date);
           if (!grouped.has(key)) grouped.set(key, { date, logs: [] });
           grouped.get(key)!.logs.push(log);
       });
@@ -1266,18 +1357,18 @@ export function StudentAttendanceDetailView({
           .sort((a, b) => b.date.getTime() - a.date.getTime())
           .map(day => {
               const otAuthLog = day.logs.find(l => l.photoDataUrl && l.photoDataUrl.startsWith("OT_AUTH:"));
-              const processingLogs = day.logs.filter(l => !l.photoDataUrl?.startsWith("OT_AUTH:"));
+              const processingLogs = day.logs.filter(l => !l.photoDataUrl?.startsWith("OT_AUTH:") && l.status !== "Rejected");
 
-              // Deduplicate logs to prevent double-counting (robustness against subscription duplicates)
+              // Deduplicate logs to prevent double-counting
               const uniqueMap = new Map<string, AttendanceEntry>();
               processingLogs.forEach(l => {
                   const key = l.id ? String(l.id) : `${l.timestamp}-${l.type}`;
                   if (!uniqueMap.has(key)) uniqueMap.set(key, l);
               });
 
-              const dayLogs = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+              const sortedLogs = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp);
 
-              const dateStr = day.date.toLocaleDateString('en-CA');
+              const dateStr = toDateKey(day.date);
               const dynamicOt = (overtimeShifts || []).find((ot: any) => ot.effective_date === dateStr);
 
               const effSchedule = studentDbSchedule || scheduleConfig || {
@@ -1289,7 +1380,7 @@ export function StudentAttendanceDetailView({
               // Check for Date Override
               const override = Array.isArray(dateOverrides) 
                   ? dateOverrides.find(o => o.date === dateStr)
-                  : (dateOverrides as any)[dateStr]; // Fallback if it somehow becomes a Map
+                  : (dateOverrides as any)[dateStr];
               const scheduleToUse = override ? {
                   amIn: override.am?.start || effSchedule.amIn,
                   amOut: override.am?.end || effSchedule.amOut,
@@ -1312,146 +1403,218 @@ export function StudentAttendanceDetailView({
                   dynamicOt ? { start: dynamicOt.overtime_start, end: dynamicOt.overtime_end } : undefined
               );
 
-              // --- New Session Logic (Consistent with Dashboard) ---
-              type Session = { in: AttendanceEntry; out: AttendanceEntry | null; shift: 'am' | 'pm' | 'ot' };
-              const sessions: Session[] = [];
-              let currentIn: AttendanceEntry | null = null;
+              // --- SMART PAIRING LOGIC (Greedy Window Assignment) ---
+              const usedIds = new Set<string>();
+              const isAvailable = (l: AttendanceEntry) => {
+                   const key = l.id ? String(l.id) : `${l.timestamp}-${l.type}`;
+                   return !usedIds.has(key);
+              };
+              const markUsed = (l: AttendanceEntry) => {
+                   const key = l.id ? String(l.id) : `${l.timestamp}-${l.type}`;
+                   usedIds.add(key);
+              };
+
+              let s1: AttendanceEntry | null = null;
+              let s3: AttendanceEntry | null = null;
+              let s5: AttendanceEntry | null = null;
+
+              const isInWindow = (ts: number, start: number | undefined, end: number | undefined) => {
+                   if (!start || !end) return false;
+                   // 30 min buffer before start, up to end
+                   return ts >= (start - 30 * 60000) && ts <= end;
+              };
+
+              // 1. Assign INs to Slots (Greedy by Window)
+              sortedLogs.filter(l => (l.type || "").toLowerCase() === 'in' && isAvailable(l)).forEach(l => {
+                   if (!s1 && isInWindow(l.timestamp, schedule.amIn, schedule.amOut)) {
+                       s1 = l; markUsed(l); return;
+                   }
+                   if (!s3 && isInWindow(l.timestamp, schedule.pmIn, schedule.pmOut)) {
+                       s3 = l; markUsed(l); return;
+                   }
+                   if (!s5 && isInWindow(l.timestamp, schedule.otStart, schedule.otEnd)) {
+                       s5 = l; markUsed(l); return;
+                   }
+              });
+
+              // 2. Fallback Assignment for Remaining INs (Sequential Fill)
+              sortedLogs.filter(l => (l.type || "").toLowerCase() === 'in' && isAvailable(l)).forEach(l => {
+                   if (!s1) { s1 = l; markUsed(l); }
+                   else if (!s3) { s3 = l; markUsed(l); }
+                   else if (!s5) { s5 = l; markUsed(l); }
+              });
 
               const today = new Date();
               today.setHours(0,0,0,0);
               const isPastDate = day.date < today;
-              const isToday = day.date.toDateString() === today.toDateString();
 
-              const shouldAutoClose = (shiftEndTs: number) => {
-                  // Only auto-close for past dates (New Day logic)
-                  return isPastDate;
+              const createVirtualOut = (inEntry: AttendanceEntry, shift: 'am' | 'pm' | 'ot'): AttendanceEntry => {
+                   const outTs = shift === 'am' ? schedule.amOut : (shift === 'pm' ? schedule.pmOut : schedule.otEnd);
+                   const finalOutTs = outTs > inEntry.timestamp ? outTs : inEntry.timestamp + 60000;
+                   
+                   return {
+                        id: inEntry.id ? -Math.abs(Number(inEntry.id)) : -Math.floor(Math.random() * 1000000),
+                        idnumber: inEntry.idnumber,
+                        type: 'out',
+                        timestamp: finalOutTs,
+                        photoDataUrl: '',
+                        validated_by: 'AUTO TIME OUT',
+                        status: 'Pending'
+                   } as AttendanceEntry;
               };
 
-              for (const log of dayLogs) {
-                  if (log.status === "Rejected") continue;
-
-                  if (log.type === "in") {
-                      if (currentIn) {
-                          // Previous session incomplete (forgot to time out).
-                          const shift = determineShift(currentIn.timestamp, schedule);
-                          let outEntry: AttendanceEntry | null = null;
-                          
-                          const shiftEnd = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
-                          
-                          // Always auto-close previous session when a new IN is encountered (implies session ended)
-                          let outTime = new Date(shiftEnd);
-                          if (currentIn.timestamp > outTime.getTime()) {
-                              outTime = new Date(currentIn.timestamp + 60000);
-                          }
-
-                          outEntry = {
-                              id: currentIn.id ? -currentIn.id : -Math.floor(Math.random() * 1000000),
-                              idnumber: currentIn.idnumber,
-                              type: 'out',
-                              timestamp: outTime.getTime(),
-                              photoDataUrl: '',
-                              status: 'Pending',
-                              validated_by: 'AUTO TIME OUT'
-                          };
-                          
-                          sessions.push({ in: currentIn, out: outEntry, shift });
-                      }
-                      currentIn = log;
-                  } else if (log.type === "out") {
-                      if (currentIn) {
-                          // Normal Session
-                          sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.timestamp, schedule) });
-                          currentIn = null;
-                      }
+              // 2. Find OUTs for each IN
+              let s2: AttendanceEntry | null = null;
+              if (s1) {
+                  const searchEnd = s3 ? (s3 as AttendanceEntry).timestamp : (new Date(day.date).setHours(23, 59, 59, 999));
+                  const candidates = sortedLogs.filter(l => (l.type || "").toLowerCase() === "out" && l.timestamp > (s1 as AttendanceEntry).timestamp && l.timestamp < searchEnd && isAvailable(l));
+                  const candidate = candidates.pop() || null; // Take the latest valid out
+                  if (candidate) {
+                      s2 = candidate;
+                      markUsed(s2);
+                  } else if (isPastDate) {
+                      s2 = createVirtualOut(s1 as AttendanceEntry, 'am');
                   }
               }
-              if (currentIn) {
-                  const shift = determineShift(currentIn.timestamp, schedule);
-                  let outEntry: AttendanceEntry | null = null;
-                  
-                  const shiftEnd = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
-                  if (shouldAutoClose(shiftEnd)) {
-                      let outTime = new Date(shiftEnd);
-                      if (currentIn.timestamp > outTime.getTime()) {
-                          outTime = new Date(currentIn.timestamp + 60000);
-                      }
 
-                      outEntry = {
-                          id: currentIn.id ? -currentIn.id : -Math.floor(Math.random() * 1000000),
-                          idnumber: currentIn.idnumber,
-                          type: 'out',
-                          timestamp: outTime.getTime(),
-                          photoDataUrl: '',
-                          status: 'Pending',
-                          validated_by: 'AUTO TIME OUT'
-                      };
+              let s4: AttendanceEntry | null = null;
+              if (s3) {
+                  const searchEnd = s5 ? (s5 as AttendanceEntry).timestamp : (new Date(day.date).setHours(23, 59, 59, 999));
+                  const candidates = sortedLogs.filter(l => (l.type || "").toLowerCase() === "out" && l.timestamp > (s3 as AttendanceEntry).timestamp && l.timestamp < searchEnd && isAvailable(l));
+                  s4 = candidates.pop() || null;
+                  if (s4) {
+                      markUsed(s4);
+                  } else if (isPastDate) {
+                      s4 = createVirtualOut(s3 as AttendanceEntry, 'pm');
                   }
-                  sessions.push({ in: currentIn, out: outEntry, shift });
               }
 
-              // Calculate Hours (Shift Window Intersection - Strict Shift Isolation)
-              const calculateHours = (requireApproved: boolean) => {
-                  let total = 0;
-                  sessions.forEach(session => {
-                      const isInValid = !requireApproved || session.in.status === "Approved";
-                      const isOutValid = !session.out || !requireApproved || session.out?.status === "Approved";
-                      if (!isInValid || !isOutValid) return;
-                      
-                      if (!session.out) return;
+              let s6: AttendanceEntry | null = null;
+              if (s5) {
+                  const candidates = sortedLogs.filter(l => (l.type || "").toLowerCase() === "out" && l.timestamp > (s5 as AttendanceEntry).timestamp && isAvailable(l));
+                  s6 = candidates.pop() || null;
+                  if (s6) {
+                      markUsed(s6);
+                  } else if (isPastDate) {
+                      s6 = createVirtualOut(s5 as AttendanceEntry, 'ot');
+                  }
+              }
 
-                      // Use shared utility for uniform calculation (Check all shifts)
-                      const { am, pm, ot } = calculateShiftDurations(session.in.timestamp, session.out.timestamp, schedule);
+              // 3. Calculate Hours (Golden Rule - Superadmin Logic)
+              const calc = (inLog: AttendanceEntry | null, outLog: AttendanceEntry | null, shift: 'am' | 'pm' | 'ot', requireApproved: boolean) => {
+                  if (!inLog || !outLog) return 0;
 
-                      // Only calculate OT if explicitly marked or authorized
-                      let finalOt = 0;
-                      if (session.in.is_overtime || dynamicOt) {
-                          finalOt = ot;
-                      }
+                  // Exclude Rejected
+                  if (inLog.status === 'Rejected' || outLog.status === 'Rejected') return 0;
 
-                      total += am + pm + finalOt;
-                  });
-                  return total;
+                // Priority: Frozen rendered_hours (History) - TRUST DB if present
+                const vh = (outLog as any)?.validated_hours;
+                if (vh !== undefined && vh !== null && Number(vh) >= 0) {
+                    if (requireApproved) {
+                         const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
+                         const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
+                         if (!inOk || !outOk) return 0;
+                    }
+                    if (shift === 'pm' && outLog.id === s2?.id) return 0;
+                    if (shift === 'ot' && (outLog.id === s2?.id || outLog.id === s4?.id)) return 0;
+                    return Number(vh) * 3600000;
+                }
+                if (outLog.rendered_hours !== undefined && outLog.rendered_hours !== null && Number(outLog.rendered_hours) >= 0) {
+                    // If requireApproved is true, ensure status is approved/validated
+                    if (requireApproved) {
+                         const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
+                         const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
+                         if (!inOk || !outOk) return 0;
+                    }
+                    // Avoid double counting if s4/s6 is same as s2/s4 (though unlikely with smart pairing)
+                    if (shift === 'pm' && outLog.id === s2?.id) return 0;
+                    if (shift === 'ot' && (outLog.id === s2?.id || outLog.id === s4?.id)) return 0;
+                    return Number(outLog.rendered_hours) * 3600000;
+                }
+
+                if (requireApproved) {
+                    const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
+                    const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
+                    if (!inOk || !outOk) return 0;
+                }
+
+                // Priority: Snapshot Rules (Ledger Logic)
+                if (outLog.official_time_in && outLog.official_time_out) {
+                       try {
+                           const dateBase = new Date(inLog.timestamp);
+                           const parseTime = (t: string) => {
+                               const [h, m, s] = t.split(':').map(Number);
+                               const d = new Date(dateBase);
+                               d.setHours(h, m, s || 0, 0);
+                               return d;
+                           };
+                           const offIn = parseTime(outLog.official_time_in);
+                           const offOut = parseTime(outLog.official_time_out);
+                           // Handle cross-day shifts
+                           if (offOut.getTime() < offIn.getTime()) {
+                               offOut.setDate(offOut.getDate() + 1);
+                           }
+                           return calculateHoursWithinOfficialTime(
+                               new Date(inLog.timestamp), 
+                               new Date(outLog.timestamp), 
+                               offIn, 
+                               offOut
+                           );
+                       } catch (e) {
+                           console.error("Error calculating from snapshot", e);
+                       }
+                  }
+
+                  // Fallback: Live Schedule
+                  let oInTs: number = 0;
+                  let oOutTs: number = 0;
+
+                  if (shift === 'am') {
+                      oInTs = schedule.amIn;
+                      oOutTs = schedule.amOut;
+                  } else if (shift === 'pm') {
+                      oInTs = schedule.pmIn;
+                      oOutTs = schedule.pmOut;
+                  } else { // ot
+                      oInTs = schedule.otStart;
+                      oOutTs = schedule.otEnd;
+                  }
+
+                  // Safety check: if schedule is invalid (e.g. 0), return 0
+                  if (!oInTs || !oOutTs) return 0;
+
+                  return calculateHoursWithinOfficialTime(
+                      new Date(inLog.timestamp), 
+                      new Date(outLog.timestamp), 
+                      new Date(oInTs), 
+                      new Date(oOutTs)
+                  );
               };
 
-              const dayTotalMs = calculateHours(false);
-              const dayValidatedMs = calculateHours(true);
+              let dayTotalMs = 0;
+              let dayValidatedMs = 0;
               
-              // Helper for specific shift calculation (for OT column)
-              const calculateSpecificShiftHours = (targetShift: 'ot', requireApproved: boolean) => {
-                   let total = 0;
-                   sessions.forEach(session => {
-                      // Calculate OT hours regardless of session shift label
-                      const isInValid = !requireApproved || session.in.status === "Approved";
-                      const isOutValid = !session.out || !requireApproved || session.out.status === "Approved";
-                      if (!isInValid || !isOutValid) return;
-                      if (!session.out) return;
-
-                      const durations = calculateShiftDurations(session.in.timestamp, session.out.timestamp, schedule);
-                      total += durations[targetShift];
-                   });
-                   return total;
-              };
+              dayTotalMs += calc(s1, s2, 'am', false);
+              dayTotalMs += calc(s3, s4, 'pm', false);
+              let otVal = calc(s5, s6, 'ot', false);
+              dayTotalMs += otVal;
+              const ledgerHrs = [s2, s4, s6].reduce((acc, out) => {
+                  const v = out ? (out as any).validated_hours : undefined;
+                  const num = v !== undefined && v !== null ? Number(v) : NaN;
+                  return acc + (isNaN(num) ? 0 : num * 3600000);
+              }, 0);
+              dayValidatedMs = ledgerHrs;
               
-              const overtimeMs = calculateSpecificShiftHours('ot', false);
+              const overtimeMs = otVal;
 
               totalMsAll += dayTotalMs;
               totalValidatedMsAll += dayValidatedMs;
 
-              // Map sessions to UI slots (No Visual Clamping)
-              const mapSessionToSlots = (shiftSessions: Session[]) => {
-                 if (shiftSessions.length === 0) return { in: null, out: null };
-                 
-                 const firstSession = shiftSessions[0];
-                 const lastSession = shiftSessions[shiftSessions.length - 1];
-                 
-                 return { in: firstSession.in, out: lastSession.out };
-              };
+              // Check for Lates
+              if (s1 && isLate((s1 as any).timestamp, schedule.amIn)) { (s1 as any).is_late = true; (s1 as any).late_minutes = Math.floor(((s1 as any).timestamp - schedule.amIn)/60000); }
+              if (s3 && isLate((s3 as any).timestamp, schedule.pmIn)) { (s3 as any).is_late = true; (s3 as any).late_minutes = Math.floor(((s3 as any).timestamp - schedule.pmIn)/60000); }
 
-              const amSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'am'));
-              const pmSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'pm'));
-              const otSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'ot'));
-
-              return { date: day.date, s1: amSlots.in, s2: amSlots.out, s3: pmSlots.in, s4: pmSlots.out, s5: otSlots.in, s6: otSlots.out, dayTotalMs, overtimeMs, otAuthLog };
+              return { date: day.date, s1, s2, s3, s4, s5, s6, dayTotalMs, dayValidatedMs, overtimeMs, otAuthLog, schedule };
           });
 
       return { days: processedDays, overallTotal: totalMsAll, overallValidated: totalValidatedMsAll };
@@ -1507,15 +1670,15 @@ export function StudentAttendanceDetailView({
     let count = 0;
     days.forEach(day => {
         // Morning Pair
-        if ((day.s1?.id && selectedIds.has(Number(day.s1.id))) || (day.s2?.id && selectedIds.has(Number(day.s2.id)))) {
+        if (((day.s1 as any)?.id && selectedIds.has(Number((day.s1 as any).id))) || ((day.s2 as any)?.id && selectedIds.has(Number((day.s2 as any).id)))) {
             count++;
         }
         // Afternoon Pair
-        if ((day.s3?.id && selectedIds.has(Number(day.s3.id))) || (day.s4?.id && selectedIds.has(Number(day.s4.id)))) {
+        if (((day.s3 as any)?.id && selectedIds.has(Number((day.s3 as any).id))) || ((day.s4 as any)?.id && selectedIds.has(Number((day.s4 as any).id)))) {
             count++;
         }
         // Overtime Pair
-        if ((day.s5?.id && selectedIds.has(Number(day.s5.id))) || (day.s6?.id && selectedIds.has(Number(day.s6.id)))) {
+        if (((day.s5 as any)?.id && selectedIds.has(Number((day.s5 as any).id))) || ((day.s6 as any)?.id && selectedIds.has(Number((day.s6 as any).id)))) {
             count++;
         }
     });
@@ -1527,50 +1690,14 @@ export function StudentAttendanceDetailView({
 
     let overallTotal = 0;
     let overallValidated = 0;
-
     days.forEach(day => {
         overallTotal += day.dayTotalMs;
-        
-        // Rebuild schedule for this day to ensure accurate calculation
-        const dateStr = day.date.toLocaleDateString('en-CA');
-        const dynamicOt = (overtimeShifts || []).find((ot: any) => ot.effective_date === dateStr);
-        
-        const effSchedule = studentDbSchedule || scheduleConfig || {
-            amIn: "08:00", amOut: "12:00",
-            pmIn: "13:00", pmOut: "17:00",
-            otIn: "17:00", otOut: "18:00"
-        };
-
-        const override = dateOverrides[dateStr];
-        const scheduleToUse = override ? {
-            amIn: override.am?.start || effSchedule.amIn,
-            amOut: override.am?.end || effSchedule.amOut,
-            pmIn: override.pm?.start || effSchedule.pmIn,
-            pmOut: override.pm?.end || effSchedule.pmOut,
-            otIn: effSchedule.otIn,
-            otOut: effSchedule.otOut
-        } : effSchedule;
-
-        const daySchedule = buildSchedule(
-            day.date,
-            {
-                amIn: scheduleToUse.amIn || "08:00",
-                amOut: scheduleToUse.amOut || "12:00",
-                pmIn: scheduleToUse.pmIn || "13:00",
-                pmOut: scheduleToUse.pmOut || "17:00",
-                otIn: scheduleToUse.otIn,
-                otOut: scheduleToUse.otOut
-            },
-            dynamicOt ? { start: dynamicOt.overtime_start, end: dynamicOt.overtime_end } : undefined
-        );
-
-        const isAmValidated = (day.s1?.status === 'Approved' || day.s2?.status === 'Approved');
-        const isPmValidated = (day.s3?.status === 'Approved' || day.s4?.status === 'Approved');
-        const isOtValidated = (day.s5?.status === 'Approved' || day.s6?.status === 'Approved');
-
-        if (isAmValidated) overallValidated += calculateSessionDuration(day.s1?.timestamp || 0, day.s2?.timestamp || 0, 'am', daySchedule);
-        if (isPmValidated) overallValidated += calculateSessionDuration(day.s3?.timestamp || 0, day.s4?.timestamp || 0, 'pm', daySchedule);
-        if (isOtValidated) overallValidated += calculateSessionDuration(day.s5?.timestamp || 0, day.s6?.timestamp || 0, 'ot', daySchedule);
+        const v = [day.s2, day.s4, day.s6].reduce((acc, out) => {
+            const val = out ? (out as any).validated_hours : undefined;
+            const num = val !== undefined && val !== null ? Number(val) : NaN;
+            return acc + (isNaN(num) ? 0 : num * 3600000);
+        }, 0);
+        overallValidated += v;
     });
 
     // Helper for formatting time
@@ -1592,7 +1719,7 @@ export function StudentAttendanceDetailView({
       const fmtOut = (slot: AttendanceEntry | null | undefined) => {
         if (!slot) return "-";
         if (slot.validated_by === "SYSTEM_AUTO_CLOSE" || slot.validated_by === "AUTO TIME OUT") {
-            return "AUTO TIME OUT";
+            return "";
         }
         return fmtTime(slot.timestamp);
       };
@@ -1635,7 +1762,7 @@ export function StudentAttendanceDetailView({
       }
       
       return [
-        day.date.toLocaleDateString(), // DATE
+        toDateKey(day.date), // DATE
         fmt(day.s1),                   // MORNING IN
         fmtOut(day.s2),                // MORNING OUT
         amStatus,                      // STATUS (AM)
@@ -1720,67 +1847,67 @@ export function StudentAttendanceDetailView({
   };
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
-        <div className="flex items-center gap-4">
+    <div className="space-y-3 animate-in fade-in slide-in-from-right-4 duration-300">
+        <div className="flex items-center gap-2">
              <button 
                 onClick={onBack}
-                className="p-2 hover:bg-gray-100 rounded-xl transition-colors text-gray-500 hover:text-gray-900"
+                className="p-1 hover:bg-gray-100 rounded-lg transition-colors text-gray-500 hover:text-gray-900"
              >
-                <ChevronLeft size={24} />
+                <ChevronLeft size={18} />
              </button>
              <div>
-                <h2 className="text-2xl font-bold text-gray-900">{student.firstname} {student.lastname}</h2>
-                <p className="text-gray-500 text-sm">Attendance History & Performance</p>
+                <h2 className="text-lg font-bold text-gray-900">{student.firstname} {student.lastname}</h2>
+                <p className="text-gray-500 text-[10px]">Attendance History & Performance</p>
              </div>
         </div>
         
         {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-blue-50 p-6 rounded-2xl border border-blue-100 flex items-center justify-between shadow-sm">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
+            <div className="bg-blue-50 p-1.5 rounded-lg border border-blue-100 flex items-center justify-between shadow-sm">
                 <div>
-                    <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">Total Tracked</p>
-                    <p className="text-3xl font-bold text-blue-900">{formatHours(overallTotal)}</p>
-                    <p className="text-[11px] text-gray-600 mt-1">Pending + Validated</p>
+                    <p className="text-[9px] font-bold text-blue-600 uppercase tracking-wider mb-0.5">Total Tracked</p>
+                    <p className="text-base font-bold text-blue-900">{formatHours(overallTotal)}</p>
+                    <p className="text-[9px] text-gray-600 mt-0.5">Pending + Validated</p>
                 </div>
-                <div className="p-3 bg-blue-100 rounded-xl">
-                     <Clock className="text-blue-600" size={24} />
+                <div className="p-1 bg-blue-100 rounded-md">
+                    <Clock className="text-blue-600" size={12} />
                 </div>
             </div>
 
-            <div className="bg-green-50 p-6 rounded-2xl border border-green-100 flex items-center justify-between shadow-sm">
+            <div className="bg-green-50 p-1.5 rounded-lg border border-green-100 flex items-center justify-between shadow-sm">
                 <div>
-                    <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-1">Total Validated</p>
-                    <p className="text-3xl font-bold text-green-900">{formatHours(overallValidated)}</p>
-                    <p className="text-[11px] text-gray-600 mt-1">Approved Hours</p>
+                    <p className="text-[9px] font-bold text-green-600 uppercase tracking-wider mb-0.5">Total Validated</p>
+                    <p className="text-base font-bold text-green-900">{formatHours(overallValidated)}</p>
+                    <p className="text-[9px] text-gray-600 mt-0.5">Approved Hours</p>
                 </div>
-                <div className="p-3 bg-green-100 rounded-xl">
-                    <ClipboardCheck className="text-green-600" size={24} />
+                <div className="p-1 bg-green-100 rounded-md">
+                    <ClipboardCheck className="text-green-600" size={12} />
                 </div>
             </div>
         </div>
 
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3 border-b border-gray-100 bg-gray-50">
-                <div className="flex flex-col gap-1">
-                  <div className="text-sm font-semibold text-gray-800">Account Monitoring</div>
-                  <div className="flex flex-wrap gap-2 text-[11px]">
-                    <span className="px-3 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-700 font-medium">
+        <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-1.5 px-2 py-1 border-b border-gray-100 bg-gray-50">
+                <div className="flex flex-col gap-0.5">
+                  <div className="text-[10px] font-bold text-gray-800">Account Monitoring</div>
+                  <div className="flex flex-wrap gap-1 text-[9px]">
+                    <span className="px-1.5 py-0.5 rounded-full border border-gray-200 bg-gray-50 text-gray-700 font-medium">
                       Pending: {statusCounts.Pending}
                     </span>
-                    <span className="px-3 py-1 rounded-full border border-green-100 bg-green-50 text-green-700 font-medium">
+                    <span className="px-1.5 py-0.5 rounded-full border border-green-100 bg-green-50 text-green-700 font-medium">
                       Validated: {statusCounts.Approved}
                     </span>
-                    <span className="px-3 py-1 rounded-full border border-red-100 bg-red-50 text-red-700 font-medium">
+                    <span className="px-1.5 py-0.5 rounded-full border border-red-100 bg-red-50 text-red-700 font-medium">
                       Unvalidated: {statusCounts.Rejected}
                     </span>
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="w-full sm:w-40">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="w-full sm:w-32">
                     <select
                       value={monthFilter}
                       onChange={e => setMonthFilter(e.target.value)}
-                      className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-900 bg-white focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                      className="w-full rounded border border-gray-300 px-2 py-1 text-[10px] font-medium text-gray-900 bg-white focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all h-7"
                     >
                       <option value="">All months</option>
                       {monthOptions.map(opt => (
@@ -1794,28 +1921,28 @@ export function StudentAttendanceDetailView({
                       type="button"
                       onClick={handleDownloadExcel}
                       disabled={days.length === 0}
-                      className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-green-700 hover:bg-green-50 hover:border-green-200 transition-colors flex items-center gap-2"
+                      className="px-2 py-1 text-[10px] font-semibold rounded border border-gray-200 bg-white text-green-700 hover:bg-green-50 hover:border-green-200 transition-colors flex items-center gap-1.5 h-7"
                   >
-                      <Download size={14} />
-                      Export Attendance
+                      <Download size={10} />
+                      Export
                   </button>
                   <button
                       type="button"
                       onClick={selectAllPending}
                       disabled={statusCounts.Pending === 0}
                       title={statusCounts.Pending === 0 ? "No pending logs to select" : "Select all pending logs"}
-                      className="px-2.5 py-1 text-[11px] font-semibold rounded-md border border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100 hover:border-orange-400 whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="px-2 py-1 text-[10px] font-semibold rounded border border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100 hover:border-orange-400 whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed h-7"
                   >
-                      Select all pending
+                      Select pending
                   </button>
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
                       {selectedIds.size > 0 && (
                           <>
                               <button
                                   type="button"
                                   onClick={() => bulkValidate("approve")}
                                   disabled={isBulkValidating}
-                                  className="px-3 py-1.5 text-xs font-bold rounded-lg bg-green-600 text-white hover:bg-green-700 disabled:opacity-60 whitespace-nowrap"
+                                  className="px-2 py-1 text-[10px] font-bold rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-60 whitespace-nowrap h-7"
                               >
                                   Approve {selectedPairCount}
                               </button>
@@ -1823,7 +1950,7 @@ export function StudentAttendanceDetailView({
                                   type="button"
                                   onClick={() => bulkValidate("reject")}
                                   disabled={isBulkValidating}
-                                  className="px-3 py-1.5 text-xs font-bold rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-60 whitespace-nowrap"
+                                  className="px-2 py-1 text-[10px] font-bold rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-60 whitespace-nowrap h-7"
                               >
                                   Reject {selectedPairCount}
                               </button>
@@ -1833,7 +1960,7 @@ export function StudentAttendanceDetailView({
                           type="button"
                           onClick={clearSelection}
                           disabled={selectedIds.size === 0}
-                          className="px-2 py-1 text-[11px] font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-md whitespace-nowrap disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-gray-500"
+                          className="px-2 py-1 text-[10px] font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded whitespace-nowrap disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-gray-500 h-7"
                       >
                           Clear
                       </button>
@@ -1841,29 +1968,29 @@ export function StudentAttendanceDetailView({
                 </div>
             </div>
             <div className="overflow-x-auto hidden md:block">
-                <table className="w-full text-[11px] text-left">
-                    <thead className="bg-gray-50 text-xs uppercase text-gray-500 font-bold">
+                <table className="w-full text-[10px] text-left">
+                    <thead className="bg-gray-50 text-[9px] uppercase text-gray-500 font-bold">
                         <tr>
-                            <th rowSpan={2} className="px-4 py-3 border-r border-gray-100 min-w-[110px] text-left align-bottom pb-4">Date</th>
-                            <th colSpan={2} className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50">Morning</th>
-                            <th colSpan={2} className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50">Afternoon</th>
-                            <th colSpan={2} className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50">Overtime</th>
-                            <th rowSpan={2} className="px-4 py-3 text-right align-bottom pb-4">Total Hours</th>
+                            <th rowSpan={2} className="px-1.5 py-1 border-r border-gray-100 min-w-[80px] text-left align-bottom pb-1">Date</th>
+                            <th colSpan={2} className="px-1 py-0.5 text-center border-r border-gray-100 border-b bg-gray-100/50">Morning</th>
+                            <th colSpan={2} className="px-1 py-0.5 text-center border-r border-gray-100 border-b bg-gray-100/50">Afternoon</th>
+                            <th colSpan={2} className="px-1 py-0.5 text-center border-r border-gray-100 border-b bg-gray-100/50">Overtime</th>
+                            <th rowSpan={2} className="px-2 py-1 text-right align-bottom pb-1">Total Hours</th>
                         </tr>
                         <tr>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time In</th>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time Out</th>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time In</th>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time Out</th>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time In</th>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time Out</th>
+                            <th className="px-1 py-0.5 text-center border-r border-gray-100 min-w-[60px] text-[9px] tracking-wider">Time In</th>
+                            <th className="px-1 py-0.5 text-center border-r border-gray-100 min-w-[60px] text-[9px] tracking-wider">Time Out</th>
+                            <th className="px-1 py-0.5 text-center border-r border-gray-100 min-w-[60px] text-[9px] tracking-wider">Time In</th>
+                            <th className="px-1 py-1 text-center border-r border-gray-100 min-w-[70px] text-[9px] tracking-wider">Time Out</th>
+                            <th className="px-1 py-1 text-center border-r border-gray-100 min-w-[70px] text-[9px] tracking-wider">Time In</th>
+                            <th className="px-1 py-1 text-center border-r border-gray-100 min-w-[70px] text-[9px] tracking-wider">Time Out</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                         {days.map((day, i) => (
                             <tr key={i} className="hover:bg-gray-50 transition-colors">
-                                <td className="px-4 py-3 font-medium text-gray-900 whitespace-nowrap border-r border-gray-100">
-                                    {day.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+                                <td className="px-1.5 py-1 font-medium text-gray-900 whitespace-nowrap border-r border-gray-100">
+                                    {day.date.toLocaleDateString('en-US', { timeZone: 'Asia/Manila', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
                                 </td>
                                 {/* Slot Cells */}
                                 {[day.s1, day.s2, day.s3, day.s4, day.s5, day.s6].map((slot, idx) => {
@@ -1892,32 +2019,46 @@ export function StudentAttendanceDetailView({
                                     const isAutoTimeOut = slot?.type === 'out' && (slot?.validated_by === 'SYSTEM_AUTO_CLOSE' || slot?.validated_by === 'AUTO TIME OUT');
                                    const pairSelected = isSlotPairSelected(pairIn, pairOut);
 
+                                   let isLateTime = false;
+                                   if (slot && slot.type === 'in' && day.schedule) {
+                                       if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.amIn);
+                                       if (idx === 2) isLateTime = isLate(slot.timestamp, day.schedule.pmIn);
+                                       if (idx === 4) isLateTime = isLate(slot.timestamp, day.schedule.otStart);
+                                   }
+
                                    return (
-                                       <td key={idx} className={`px-1.5 py-2 border-r border-gray-100 text-center min-w-[100px] ${isAutoTimeOut ? 'align-middle' : 'align-top'}`}>
+                                       <td key={idx} className={`px-0.5 py-0.5 border-r border-gray-100 text-center min-w-[80px] ${isAutoTimeOut ? 'align-middle' : 'align-top'}`}>
                                            {slot ? (
-                                                <div className={`flex flex-col items-center gap-2 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
-                                                    <div className="flex items-center gap-2">
+                                                <div className={`flex flex-col items-center gap-1 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
+                                                    <div className="flex items-center gap-1">
                                                         {isInCell && pairIn && (
-                                                            (!pairIn.status || pairIn.status === 'Pending' || (pairOut && pairOut.status === 'Pending'))
+                                                            (!((pairIn as any).status) || (pairIn as any).status === 'Pending' || (pairOut && (pairOut as any).status === 'Pending'))
                                                         ) && (
                                                             <input
                                                                 type="checkbox"
                                                                 checked={pairSelected}
                                                                 onChange={() => toggleSlotPairSelection(pairIn, pairOut)}
-                                                                className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
+                                                                className="w-2.5 h-2.5 rounded border-gray-300 text-green-600 focus:ring-green-500"
                                                             />
                                                         )}
                                                         {isAutoTimeOut ? (
-                                                            <span className="text-[11px] font-bold text-red-500 whitespace-nowrap">AUTO TIME OUT</span>
+                                                            <span className="text-[9px] font-bold text-red-500 whitespace-nowrap"></span>
                                                         ) : (
-                                                            <span className="text-xs font-semibold text-gray-900">
-                                                                {formatTime(slot.timestamp)}
-                                                            </span>
+                                                            <div className="flex flex-col items-center justify-center w-full">
+                                                                <div className={`text-[9px] font-semibold whitespace-nowrap text-center ${isLateTime ? 'text-red-600 font-bold' : 'text-gray-900'}`}>
+                                                                    {formatTime(slot.timestamp)}
+                                                                </div>
+                                                                {isLateTime ? (
+                                                                    <div className="text-[7px] font-bold text-red-500 leading-none mt-0.5 text-center">LATE</div>
+                                                                ) : (
+                                                                    <div className="text-[7px] font-bold text-transparent leading-none mt-0.5 invisible text-center">LATE</div>
+                                                                )}
+                                                            </div>
                                                         )}
                                                     </div>
                                 {getEntryPhoto(slot) && !isAutoTimeOut && (
                                     <div 
-                                        className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm group cursor-zoom-in bg-gray-100" 
+                                        className="relative w-8 h-8 rounded overflow-hidden border border-gray-200 shadow-sm group cursor-zoom-in bg-gray-100" 
                                         onClick={() => setSelectedImage({ url: getEntryPhoto(slot)!, timestamp: slot.timestamp })}
                                     >
                                         <img 
@@ -1931,19 +2072,20 @@ export function StudentAttendanceDetailView({
                                         />
                                     </div>
                                 )}
-                                <div className="flex gap-1.5 mt-1 justify-center h-8 items-center text-[11px] font-semibold">
+                                {!isAutoTimeOut && (
+                                <div className="flex gap-0.5 mt-0.5 justify-center h-3 items-center text-[9px] font-semibold">
                                                     {(() => {
                                                         const isAfternoonPairCell = idx === 2 || idx === 3;
                                                         const afternoonIn = day.s3;
                                                         const afternoonOut = day.s4;
 
                                                         if (isAfternoonPairCell && afternoonIn && afternoonOut) {
-                                                            const bothApproved = afternoonIn.status === 'Approved' && afternoonOut.status === 'Approved';
-                                                            const bothRejected = afternoonIn.status === 'Rejected' && afternoonOut.status === 'Rejected';
+                                                            const bothApproved = (afternoonIn as any).status === 'Approved' && (afternoonOut as any).status === 'Approved';
+                                                            const bothRejected = (afternoonIn as any).status === 'Rejected' && (afternoonOut as any).status === 'Rejected';
 
                                                             if (bothApproved) {
                                                                 return (
-                                                                    <span className="text-[11px] font-semibold text-green-600">
+                                                                    <span className="text-[9px] font-semibold text-green-600">
                                                                         Validated
                                                                     </span>
                                                                 );
@@ -1951,58 +2093,59 @@ export function StudentAttendanceDetailView({
 
                                                             if (bothRejected) {
                                                                 return (
-                                                                    <span className="text-[11px] font-semibold text-red-600">
+                                                                    <span className="text-[9px] font-semibold text-red-600">
                                                                         Unvalidated
                                                                     </span>
                                                                 );
                                                             }
                                                         }
 
-                                                        if (slot.status === 'Approved') {
+                                                        if ((slot as any).status === 'Approved') {
                                                             return (
-                                                                <span className="text-[11px] font-semibold text-green-600">
+                                                                <span className="text-[9px] font-semibold text-green-600">
                                                                     Validated
                                                                 </span>
                                                             );
                                                         }
 
-                                                        if (slot.status === 'Rejected') {
+                                                        if ((slot as any).status === 'Rejected') {
                                                             return (
-                                                                <span className="text-[11px] font-semibold text-red-600">
+                                                                <span className="text-[9px] font-semibold text-red-600">
                                                                     Unvalidated
                                                                 </span>
                                                             );
                                                         }
 
                                                         return (
-                                                            <span className="text-[11px] font-semibold text-yellow-500">
+                                                            <span className="text-[9px] font-semibold text-yellow-500">
                                                                 Pending
                                                             </span>
                                                         );
                                                     })()}
                                                 </div>
+                                )}
                                             </div>
                                         ) : (
                                             idx === 4 ? (
                                                 day.otAuthLog ? (
-                                                    <span className="text-blue-500 text-[10px] font-bold uppercase tracking-wider block py-4">OT Open</span>
+                                                    <span className="text-blue-500 text-[9px] font-bold uppercase tracking-wider block py-3">OT Open</span>
                                                 ) : (
-                                                    <span className="text-gray-300 block py-4">-</span>
+                                                    <span className="text-gray-300 block py-3">-</span>
                                                 )
                                             ) : (
-                                                <span className="text-gray-300 block py-4">-</span>
+                                                <span className="text-gray-300 block py-3">-</span>
                                             )
                                             )}
                                         </td>
                                     );
                                 })}
-                                <td className="px-4 py-3 text-right font-bold text-gray-900 whitespace-nowrap">
-                                    {formatHours(day.dayTotalMs)}
+                <td className="px-1.5 py-1 text-right font-bold text-gray-900 whitespace-nowrap">
+                                    {formatHours(day.dayValidatedMs || day.dayTotalMs)}
                                 </td>
                             </tr>
                         ))}
                         {days.length === 0 && (
-                            <tr><td colSpan={7} className="px-6 py-12 text-center text-gray-500">No attendance records found.</td></tr>
+                            <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-500">No attendance records found.</td></tr>
                         )}
                     </tbody>
                 </table>
@@ -2010,19 +2153,19 @@ export function StudentAttendanceDetailView({
             <div className="md:hidden">
                 <div className="divide-y divide-gray-100">
                     {days.length === 0 ? (
-                        <div className="px-4 py-8 text-center text-gray-500 text-sm">
+                        <div className="px-3 py-6 text-center text-gray-500 text-sm">
                             No attendance records found.
                         </div>
                     ) : (
                         days.map((day, i) => (
-                            <div key={i} className="p-4">
-                                <div className="text-sm font-semibold text-gray-900">
-                                    {day.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+                            <div key={i} className="p-1.5">
+                                <div className="text-[10px] font-semibold text-gray-900">
+                                    {day.date.toLocaleDateString('en-US', { timeZone: 'Asia/Manila', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
                                 </div>
-                                <div className="mt-3 grid grid-cols-1 gap-3">
-                                    <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
-                                        <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Morning</div>
-                                        <div className="grid grid-cols-2 gap-3">
+                                <div className="mt-1 grid grid-cols-1 gap-1.5">
+                                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-1">
+                                        <div className="text-[9px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Morning</div>
+                                        <div className="grid grid-cols-2 gap-1.5">
                                             {[day.s1, day.s2].map((slot, idx) => {
                                                 const pairIn = day.s1;
                                                 const pairOut = day.s2;
@@ -2032,52 +2175,66 @@ export function StudentAttendanceDetailView({
                                                 const valBy = (slot?.validated_by || "").trim();
                                                 const isAutoTimeOut = slot?.type === 'out' && (valBy === 'SYSTEM_AUTO_CLOSE' || valBy === 'AUTO TIME OUT');
 
+                                                let isLateTime = false;
+                                                if (slot && slot.type === 'in' && day.schedule) {
+                                                    if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.amIn);
+                                                }
+
                                                 return (
-                                                <div key={idx} className={`flex flex-col items-center gap-2 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
+                                                <div key={idx} className={`flex flex-col items-center gap-1 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
                                                     {slot ? (
                                                         <>
-                                                            <div className="flex items-center gap-2">
-                                                                {isInCell && pairIn && (!pairIn.status || pairIn.status === 'Pending') && (
+                                                            <div className="flex items-center gap-1">
+                                                                {isInCell && pairIn && (!((pairIn as any).status) || (pairIn as any).status === 'Pending') && (
                                                                     <input
                                                                         type="checkbox"
                                                                         checked={pairSelected}
                                                                         onChange={() => toggleSlotPairSelection(pairIn, pairOut)}
-                                                                        className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
+                                                                        className="w-2.5 h-2.5 rounded border-gray-300 text-green-600 focus:ring-green-500"
                                                                     />
                                                                 )}
                                                                 {isAutoTimeOut ? (
-                                                                    <span className="text-[11px] font-bold text-red-500 whitespace-nowrap">AUTO TIME OUT</span>
+                                                                    <span className="text-[9px] font-bold text-red-500 whitespace-nowrap"></span>
                                                                 ) : (
-                                                                <span className={`text-xs font-bold px-2 py-1 rounded-md ${slot.type === 'in' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                                                                    {formatTime(slot.timestamp)}
-                                                                </span>
+                                                                <div className="flex flex-col items-center justify-center w-full">
+                                                                    <div className={`text-[9px] font-bold whitespace-nowrap text-center ${isLateTime ? 'text-red-600' : 'text-gray-900'}`}>
+                                                                        {formatTime(slot.timestamp)}
+                                                                    </div>
+                                                                    {isLateTime ? (
+                                                                        <div className="text-[7px] font-bold text-red-500 leading-none mt-0.5 text-center">LATE</div>
+                                                                    ) : (
+                                                                        <div className="text-[7px] font-bold text-transparent leading-none mt-0.5 invisible text-center">LATE</div>
+                                                                    )}
+                                                                </div>
                                                                 )}
                                                             </div>
                                                             {slot.photoDataUrl && !isAutoTimeOut && (
                                                                 <div 
-                                                                    className="relative w-20 h-20 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100"
+                                                                    className="relative w-8 h-8 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100"
                                                                     onClick={() => setSelectedImage({ url: slot.photoDataUrl!, timestamp: slot.timestamp })}
                                                                 >
                                                                     <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
                                                                 </div>
                                                             )}
-                                                            <div className="flex gap-1.5 mt-1 justify-center h-8 items-center">
+                                                            {!isAutoTimeOut && (
+                                                            <div className="flex gap-1 mt-0.5 justify-center h-3 items-center">
                                                                 {(() => {
-                                                                    return slot.status === 'Approved' ? (
-                                                                        <span className="text-[11px] font-semibold text-green-600">
-                                                                            Validated
-                                                                        </span>
-                                                                    ) : slot.status === 'Rejected' ? (
-                                                                        <span className="text-[11px] font-semibold text-red-600">
-                                                                            Unvalidated
-                                                                        </span>
+                                                                    return (slot as any).status === 'Approved' ? (
+                                                                    <span className="text-[9px] font-semibold text-green-600">
+                                                                        Validated
+                                                                    </span>
+                                                                    ) : (slot as any).status === 'Rejected' ? (
+                                                                    <span className="text-[10px] font-semibold text-red-600">
+                                                                        Unvalidated
+                                                                    </span>
                                                                     ) : (
-                                                                        <span className="text-[11px] font-semibold text-yellow-500">
+                                                                        <span className="text-[10px] font-semibold text-yellow-500">
                                                                             Pending
                                                                         </span>
                                                                     );
                                                                 })()}
                                                             </div>
+                                                            )}
                                                         </>
                                                     ) : (
                                                         <span className="text-gray-300">-</span>
@@ -2086,9 +2243,9 @@ export function StudentAttendanceDetailView({
                                             )})}
                                         </div>
                                     </div>
-                                    <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
-                                        <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Afternoon</div>
-                                        <div className="grid grid-cols-2 gap-3">
+                                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-1">
+                                        <div className="text-[9px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Afternoon</div>
+                                        <div className="grid grid-cols-2 gap-1.5">
                                             {[day.s3, day.s4].map((slot, idx) => {
                                                 const pairIn = day.s3;
                                                 const pairOut = day.s4;
@@ -2098,47 +2255,60 @@ export function StudentAttendanceDetailView({
                                                 const valBy = (slot?.validated_by || "").trim();
                                                 const isAutoTimeOut = slot?.type === 'out' && (valBy === 'SYSTEM_AUTO_CLOSE' || valBy === 'AUTO TIME OUT');
 
+                                                let isLateTime = false;
+                                                if (slot && slot.type === 'in' && day.schedule) {
+                                                    if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.pmIn);
+                                                }
+
                                                 return (
-                                                <div key={idx} className={`flex flex-col items-center gap-2 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
+                                                <div key={idx} className={`flex flex-col items-center gap-1 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
                                                     {slot ? (
                                                         <>
-                                                            <div className="flex items-center gap-2">
-                                                                {isInCell && pairIn && (!pairIn.status || pairIn.status === 'Pending') && (
+                                                            <div className="flex items-center gap-1">
+                                                                {isInCell && pairIn && (!((pairIn as any).status) || (pairIn as any).status === 'Pending') && (
                                                                     <input
                                                                         type="checkbox"
                                                                         checked={pairSelected}
                                                                         onChange={() => toggleSlotPairSelection(pairIn, pairOut)}
-                                                                        className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
+                                                                        className="w-2.5 h-2.5 rounded border-gray-300 text-green-600 focus:ring-green-500"
                                                                     />
                                                                 )}
                                                                 {isAutoTimeOut ? (
-                                                                    <span className="text-[11px] font-bold text-red-500 whitespace-nowrap">AUTO TIME OUT</span>
+                                                                    <span className="text-[9px] font-bold text-red-500 whitespace-nowrap"></span>
                                                                 ) : (
-                                                                <span className={`text-xs font-bold px-2 py-1 rounded-md ${slot.type === 'in' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                                                                    {formatTime(slot.timestamp)}
-                                                                </span>
+                                                                <div className="flex flex-col items-center justify-center w-full">
+                                                                    <div className={`text-[9px] font-bold whitespace-nowrap text-center ${isLateTime ? 'text-red-600' : 'text-gray-900'}`}>
+                                                                        {formatTime(slot.timestamp)}
+                                                                    </div>
+                                                                    {isLateTime ? (
+                                                                        <div className="text-[7px] font-bold text-red-500 leading-none mt-0.5 text-center">LATE</div>
+                                                                    ) : (
+                                                                        <div className="text-[7px] font-bold text-transparent leading-none mt-0.5 invisible text-center">LATE</div>
+                                                                    )}
+                                                                </div>
                                                                 )}
                                                             </div>
                                                             {slot.photoDataUrl && !isAutoTimeOut && (
                                                                 <div 
-                                                                    className="relative w-20 h-20 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100"
+                                                                    className="relative w-8 h-8 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100"
                                                                     onClick={() => setSelectedImage({ url: slot.photoDataUrl!, timestamp: slot.timestamp })}
                                                                 >
                                                                     <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
                                                                 </div>
                                                             )}
-                                                            <div className="flex gap-1.5 mt-1 justify-center h-8 items-center">
+                                                            {!isAutoTimeOut && (
+                                                            <div className="flex gap-1 mt-0.5 justify-center h-3 items-center">
                                                                 {(() => {
                                                                     const afternoonIn = day.s3;
                                                                     const afternoonOut = day.s4;
 
                                                                     if (afternoonIn && afternoonOut) {
-                                                                        const bothApproved = afternoonIn.status === 'Approved' && afternoonOut.status === 'Approved';
-                                                                        const bothRejected = afternoonIn.status === 'Rejected' && afternoonOut.status === 'Rejected';
+                                                                        const bothApproved = (afternoonIn as any).status === 'Approved' && (afternoonOut as any).status === 'Approved';
+                                                                        const bothRejected = (afternoonIn as any).status === 'Rejected' && (afternoonOut as any).status === 'Rejected';
 
                                                                         if (bothApproved) {
                                                                             return (
-                                                                                <span className="text-[11px] font-semibold text-green-600">
+                                                                                <span className="text-[9px] font-semibold text-green-600">
                                                                                     Validated
                                                                                 </span>
                                                                             );
@@ -2146,36 +2316,37 @@ export function StudentAttendanceDetailView({
 
                                                                         if (bothRejected) {
                                                                             return (
-                                                                                <span className="text-[11px] font-semibold text-red-600">
+                                                                                <span className="text-[10px] font-semibold text-red-600">
                                                                                     Unvalidated
                                                                                 </span>
                                                                             );
                                                                         }
                                                                     }
 
-                                                                    if (slot.status === 'Approved') {
+                                                                    if ((slot as any).status === 'Approved') {
                                                                         return (
-                                                                            <span className="text-[11px] font-semibold text-green-600">
+                                                                            <span className="text-[10px] font-semibold text-green-600">
                                                                                 Validated
                                                                             </span>
                                                                         );
                                                                     }
 
-                                                                    if (slot.status === 'Rejected') {
+                                                                    if ((slot as any).status === 'Rejected') {
                                                                         return (
-                                                                            <span className="text-[11px] font-semibold text-red-600">
+                                                                            <span className="text-[10px] font-semibold text-red-600">
                                                                                 Unvalidated
                                                                             </span>
                                                                         );
                                                                     }
 
                                                                     return (
-                                                                        <span className="text-[11px] font-semibold text-yellow-500">
+                                                                        <span className="text-[10px] font-semibold text-yellow-500">
                                                                             Pending
                                                                         </span>
                                                                     );
                                                                 })()}
                                                             </div>
+                                                            )}
                                                         </>
                                                     ) : (
                                                         <span className="text-gray-300">-</span>
@@ -2184,12 +2355,12 @@ export function StudentAttendanceDetailView({
                                             )})}
                                         </div>
                                     </div>
-                                    <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
-                                        <div className="flex items-center justify-between mb-2">
-                                            <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Overtime</div>
+                                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-1">
+                                        <div className="flex items-center justify-between mb-1">
+                                            <div className="text-[9px] font-semibold text-gray-500 uppercase tracking-wide">Overtime</div>
                                             {!day.s5 && (
                                                 (day as any).otAuthLog ? (
-                                                    <span className="text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded">Authorized</span>
+                                                    <span className="text-[9px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded">Authorized</span>
                                                 ) : (
                                                 <button
                                                     onClick={() => {
@@ -2201,56 +2372,72 @@ export function StudentAttendanceDetailView({
                                                         setOtHours(1);
                                                         setOtMinutes(0);
                                                     }}
-                                                    className="w-8 h-8 rounded-full bg-orange-50 text-orange-600 hover:bg-orange-100 hover:text-orange-700 flex items-center justify-center transition-colors"
+                                                    className="w-4 h-4 rounded-full bg-orange-50 text-orange-600 hover:bg-orange-100 hover:text-orange-700 flex items-center justify-center transition-colors"
                                                     title="Add Overtime"
                                                 >
-                                                    <Plus size={16} />
+                                                    <Plus size={10} />
                                                 </button>
                                                 )
                                             )}
                                         </div>
-                                        <div className="grid grid-cols-2 gap-3">
+                                        <div className="grid grid-cols-2 gap-1.5">
                                             {[day.s5, day.s6].map((slot, idx) => {
                                                 const pairOut = day.s6;
                                                 const valBy = (slot?.validated_by || "").trim();
                                                 const isAutoTimeOut = slot?.type === 'out' && (valBy === 'SYSTEM_AUTO_CLOSE' || valBy === 'AUTO TIME OUT');
 
+                                                let isLateTime = false;
+                                                if (slot && slot.type === 'in' && day.schedule) {
+                                                    if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.otStart);
+                                                }
+
                                                 return (
-                                                <div key={idx} className={`flex flex-col items-center gap-2 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
+                                                <div key={idx} className={`flex flex-col items-center gap-1 ${isAutoTimeOut ? 'justify-center h-full' : ''}`}>
                                                     {slot ? (
                                                         <>
-                                                            {isAutoTimeOut ? (
-                                                                <span className="text-[11px] font-bold text-red-500 whitespace-nowrap">AUTO TIME OUT</span>
-                                                            ) : (
-                                                            <span className={`text-xs font-bold px-2 py-1 rounded-md ${slot.type === 'in' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                                                                {formatTime(slot.timestamp)}
-                                                            </span>
-                                                            )}
+                                                            <div className="flex items-center gap-1">
+                                                                {isAutoTimeOut ? (
+                                                                    <span className="text-[9px] font-bold text-red-500 whitespace-nowrap"></span>
+                                                                ) : (
+                                                                <div className="flex flex-col items-center justify-center w-full">
+                                                                    <div className={`text-[9px] font-bold whitespace-nowrap text-center ${isLateTime ? 'text-red-600' : 'text-gray-900'}`}>
+                                                                        {formatTime(slot.timestamp)}
+                                                                    </div>
+                                                                    {isLateTime ? (
+                                                                        <div className="text-[7px] font-bold text-red-500 leading-none mt-0.5 text-center">LATE</div>
+                                                                    ) : (
+                                                                        <div className="text-[7px] font-bold text-transparent leading-none mt-0.5 invisible text-center">LATE</div>
+                                                                    )}
+                                                                </div>
+                                                                )}
+                                                            </div>
                                                             {slot.photoDataUrl && !isAutoTimeOut && (
                                                                 <div 
-                                                                    className="relative w-20 h-20 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100"
+                                                                    className="relative w-8 h-8 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100"
                                                                     onClick={() => setSelectedImage({ url: slot.photoDataUrl!, timestamp: slot.timestamp })}
                                                                 >
                                                                     <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
                                                                 </div>
                                                             )}
-                                                            <div className="flex gap-1.5 mt-1 justify-center h-8 items-center">
+                                                            {!isAutoTimeOut && (
+                                                            <div className="flex gap-1 mt-0.5 justify-center h-3 items-center">
                                                                 {(() => {
-                                                                    return slot.status === 'Approved' ? (
-                                                                    <span className="text-[11px] font-semibold text-green-600">
+                                                                    return (slot as any).status === 'Approved' ? (
+                                                                    <span className="text-[9px] font-semibold text-green-600">
                                                                         Validated
                                                                     </span>
-                                                                ) : slot.status === 'Rejected' ? (
-                                                                    <span className="text-[11px] font-semibold text-red-600">
+                                                                    ) : (slot as any).status === 'Rejected' ? (
+                                                                    <span className="text-[10px] font-semibold text-red-600">
                                                                         Unvalidated
                                                                     </span>
-                                                                ) : (
-                                                                    <span className="text-[11px] font-semibold text-yellow-500">
+                                                                    ) : (
+                                                                    <span className="text-[10px] font-semibold text-yellow-500">
                                                                         Pending
                                                                     </span>
                                                                 );
                                                                 })()}
                                                             </div>
+                                                            )}
                                                         </>
                                                     ) : (
                                                         <span className="text-gray-300">-</span>
@@ -2259,9 +2446,9 @@ export function StudentAttendanceDetailView({
                                             ); })}
                                         </div>
                                     </div>
-                                    <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
-                                        <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Total Hours</div>
-                                        <div className="text-sm font-bold text-gray-900 mt-1 text-right">
+                                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-1">
+                                        <div className="text-[9px] font-semibold text-gray-500 uppercase tracking-wide">Total Hours</div>
+                                        <div className="text-[10px] font-bold text-gray-900 mt-1 text-right">
                                             {formatHours(day.dayTotalMs)}
                                         </div>
                                     </div>
@@ -2277,9 +2464,9 @@ export function StudentAttendanceDetailView({
             <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setSelectedImage(null)}>
                 <button 
                     onClick={() => setSelectedImage(null)}
-                    className="absolute top-4 right-4 p-2 text-white/70 hover:text-white transition-colors z-[110]"
+                    className="absolute top-2 right-2 p-2 text-white/70 hover:text-white transition-colors z-[110]"
                 >
-                    <X size={32} />
+                    <X size={24} />
                 </button>
                 <div className="relative max-w-4xl max-h-[90vh] w-full flex flex-col items-center justify-center" onClick={e => e.stopPropagation()}>
                     <div className="relative rounded-2xl overflow-hidden shadow-2xl bg-black w-auto h-auto flex flex-col">
@@ -2296,31 +2483,31 @@ export function StudentAttendanceDetailView({
     {/* Overtime Modal */}
         {overtimeModal.isOpen && (
             <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
-                <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
-                    <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
-                        <h3 className="font-bold text-gray-900">Set Overtime</h3>
-                        <button onClick={() => setOvertimeModal({ isOpen: false, date: null })} className="p-2 hover:bg-gray-200 rounded-full text-gray-500">
-                            <X size={20} />
+                <div className="bg-white rounded-lg shadow-xl w-full max-w-sm overflow-hidden">
+                    <div className="px-3 py-1.5 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+                        <h3 className="font-bold text-gray-900 text-sm">Set Overtime</h3>
+                        <button onClick={() => setOvertimeModal({ isOpen: false, date: null })} className="p-1 hover:bg-gray-200 rounded-full text-gray-500">
+                            <X size={16} />
                         </button>
                     </div>
-                    <div className="p-6 space-y-4">
-                        <p className="text-sm text-gray-500">
+                    <div className="p-2.5 space-y-2.5">
+                        <p className="text-[10px] text-gray-500">
                             Set overtime for <span className="font-bold text-gray-900">{overtimeModal.date?.toLocaleDateString()}</span>.
                             This will manually add validated entries.
                         </p>
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Time In</label>
+                            <label className="block text-[10px] font-medium text-gray-700 mb-1">Time In</label>
                             <input 
                                 type="time" 
                                 value={otInTime}
                                 min={overtimeModal.defaultStart}
                                 onClick={(e) => e.currentTarget.showPicker()}
                                 onChange={(e) => setOtInTime(e.target.value)}
-                                className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
+                                className="w-full rounded-lg border border-gray-300 px-2 py-1 text-xs focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
                             />
                         </div>
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Duration</label>
+                            <label className="block text-[10px] font-medium text-gray-700 mb-1">Duration</label>
                             <div className="flex gap-2">
                                 <div className="flex-1">
                                     <div className="relative">
@@ -2329,9 +2516,9 @@ export function StudentAttendanceDetailView({
                                             min="0" 
                                             value={otHours}
                                             onChange={(e) => setOtHours(Math.max(0, parseInt(e.target.value) || 0))}
-                                            className="w-full rounded-xl border border-gray-300 pl-3 pr-12 py-2 text-sm focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
+                                            className="w-full rounded-lg border border-gray-300 pl-2 pr-10 py-1 text-xs focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
                                         />
-                                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">hrs</span>
+                                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-gray-400 font-medium">hrs</span>
                                     </div>
                                 </div>
                                 <div className="flex-1">
@@ -2342,13 +2529,13 @@ export function StudentAttendanceDetailView({
                                             max="59"
                                             value={otMinutes}
                                             onChange={(e) => setOtMinutes(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))}
-                                            className="w-full rounded-xl border border-gray-300 pl-3 pr-12 py-2 text-sm focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
+                                            className="w-full rounded-xl border border-gray-300 pl-3 pr-12 py-1.5 text-xs focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none"
                                         />
-                                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium">mins</span>
+                                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-gray-400 font-medium">mins</span>
                                     </div>
                                 </div>
                             </div>
-                            <p className="text-xs text-gray-500 mt-2 text-right">
+                            <p className="text-[10px] text-gray-500 mt-2 text-right">
                                 Ends at: <span className="font-bold text-gray-900">
                                     {(() => {
                                         if (!otInTime) return "--:--";
@@ -2547,7 +2734,7 @@ export function EvaluationView({
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+        <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
           <h3 className="font-bold text-gray-900">All Students</h3>
           <span className="bg-gray-100 text-gray-600 text-xs font-bold px-2.5 py-0.5 rounded-full">{filteredStudents.length} Students</span>
         </div>
@@ -2562,98 +2749,189 @@ export function EvaluationView({
                <p className="text-gray-500 text-sm mt-1">Try adjusting your search query.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {filteredStudents.map(student => {
-                const id = String(student.idnumber || "").trim();
-                const isCompleted = completedIds.has(id);
-                const isAllowed = evalPermissions[id] || false;
-                
-                // Determine button state
-                // Red if toggle is off (and not completed)
-                // Green if toggle is on (and not completed)
-                // If completed, show specific state
-                
-                let buttonClass = "bg-gray-100 text-gray-400 cursor-not-allowed";
-                let buttonText = "Evaluation Locked";
-                let isDisabled = true;
-                
-                if (isCompleted) {
-                  buttonClass = "bg-blue-50 text-blue-600 border border-blue-100 cursor-default";
-                  buttonText = "Submitted";
-                  isDisabled = true;
-                } else if (isAllowed) {
-                  // Green & Clickable
-                  buttonClass = "bg-green-600 text-white hover:bg-green-700 shadow-lg shadow-green-200 cursor-pointer active:scale-[0.98]";
-                  buttonText = "Evaluate";
-                  isDisabled = false;
-                } else {
-                  // Red & Not Clickable
-                  buttonClass = "bg-red-500 text-white opacity-90 cursor-not-allowed shadow-red-100";
-                  buttonText = "Locked";
-                  isDisabled = true;
-                }
+            <>
+              {/* Desktop Table View */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-gray-100 text-xs font-semibold text-gray-500 uppercase tracking-wider bg-gray-50/30">
+                      <th className="px-6 py-4 rounded-tl-xl">Student</th>
+                      <th className="px-6 py-4">Course & Section</th>
+                      <th className="px-6 py-4">Status</th>
+                      <th className="px-6 py-4 text-right rounded-tr-xl">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {filteredStudents.map(student => {
+                      const id = String(student.idnumber || "").trim();
+                      const isCompleted = completedIds.has(id);
+                      const isAllowed = evalPermissions[id] || false;
+                      
+                      let buttonClass = "bg-gray-100 text-gray-400 cursor-not-allowed";
+                      let buttonText = "Locked";
+                      let isDisabled = true;
+                      
+                      if (isCompleted) {
+                        buttonClass = "bg-blue-50 text-blue-600 border border-blue-100 cursor-default";
+                        buttonText = "Submitted";
+                        isDisabled = true;
+                      } else if (isAllowed) {
+                        buttonClass = "bg-green-600 text-white hover:bg-green-700 shadow-lg shadow-green-200 cursor-pointer active:scale-[0.98]";
+                        buttonText = "Evaluate";
+                        isDisabled = false;
+                      }
 
-                return (
-                  <div 
-                    key={student.idnumber} 
-                    className="group bg-white rounded-xl p-5 border border-gray-100 shadow-sm hover:shadow-md transition-all duration-200 flex flex-col justify-between"
-                  >
-                    <div className="flex items-start justify-between mb-4">
-                      <div className="flex items-center gap-3">
-                        <div className={`h-12 w-12 rounded-xl flex items-center justify-center font-bold text-lg shadow-sm ${
-                          isCompleted ? "bg-blue-100 text-blue-600" :
-                          isAllowed ? "bg-green-100 text-green-600" :
-                          "bg-gray-100 text-gray-500"
-                        }`}>
-                           {(student.firstname?.[0] || student.lastname?.[0] || "S").toUpperCase()}
-                        </div>
-                        <div>
-                          <h3 className="font-bold text-gray-900 text-sm line-clamp-1">
-                            {student.firstname} {student.lastname}
-                          </h3>
-                          <p className="text-xs text-gray-500 font-mono mt-0.5">{student.idnumber}</p>
+                      return (
+                        <tr key={student.idnumber} className="group hover:bg-gray-50/50 transition-colors">
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-4">
+                              <div className={`relative h-10 w-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold text-sm overflow-hidden border border-gray-100 ${
+                                isCompleted ? "bg-blue-100 text-blue-600" :
+                                isAllowed ? "bg-green-100 text-green-600" :
+                                "bg-gray-100 text-gray-500"
+                              }`}>
+                                {student.avatar_url ? (
+                                  <Image
+                                    src={student.avatar_url}
+                                    alt="Avatar"
+                                    fill
+                                    className="object-cover"
+                                  />
+                                ) : (
+                                  (student.firstname?.[0] || student.lastname?.[0] || "S").toUpperCase()
+                                )}
+                              </div>
+                              <div>
+                                <h4 className="font-bold text-gray-900 text-sm">{student.firstname} {student.lastname}</h4>
+                                <p className="text-xs text-gray-500 font-mono">{student.idnumber}</p>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex flex-col">
+                              <span className="text-sm font-medium text-gray-900">{student.course || "N/A"}</span>
+                              <span className="text-xs text-gray-500">{student.section || "N/A"}</span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                             <span className={`text-xs font-bold px-2.5 py-1 rounded-full border ${
+                                isCompleted ? "bg-blue-50 text-blue-600 border-blue-100" :
+                                isAllowed ? "bg-green-50 text-green-600 border-green-100" :
+                                "bg-gray-50 text-gray-500 border-gray-100"
+                             }`}>
+                                {isCompleted ? "Done" : isAllowed ? "Open" : "Closed"}
+                             </span>
+                          </td>
+                          <td className="px-6 py-4 text-right">
+                            <button
+                              onClick={() => !isDisabled && onOpenModal(student)}
+                              disabled={isDisabled}
+                              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${buttonClass}`}
+                            >
+                              {buttonText}
+                              {isCompleted && <CheckCircle2 className="w-3.5 h-3.5" />}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile Card View */}
+              <div className="block md:hidden grid grid-cols-1 gap-4">
+                {filteredStudents.map(student => {
+                  const id = String(student.idnumber || "").trim();
+                  const isCompleted = completedIds.has(id);
+                  const isAllowed = evalPermissions[id] || false;
+                  
+                  // Determine button state
+                  let buttonClass = "bg-gray-100 text-gray-400 cursor-not-allowed";
+                  let isDisabled = true;
+                  
+                  if (isCompleted) {
+                    buttonClass = "bg-blue-50 text-blue-600 border border-blue-100 cursor-default";
+                    isDisabled = true;
+                  } else if (isAllowed) {
+                    buttonClass = "bg-green-600 text-white hover:bg-green-700 shadow-lg shadow-green-200 cursor-pointer active:scale-[0.98]";
+                    isDisabled = false;
+                  } else {
+                    buttonClass = "bg-red-500 text-white opacity-90 cursor-not-allowed shadow-red-100";
+                    isDisabled = true;
+                  }
+
+                  return (
+                    <div 
+                      key={student.idnumber} 
+                      className="group bg-white rounded-xl p-5 border border-gray-100 shadow-sm hover:shadow-md transition-all duration-200 flex flex-col justify-between"
+                    >
+                      <div className="flex items-start justify-between mb-4">
+                        <div className="flex items-center gap-3">
+                          <div className={`relative h-12 w-12 rounded-xl flex-shrink-0 flex items-center justify-center font-bold text-lg shadow-sm overflow-hidden ${
+                            isCompleted ? "bg-blue-100 text-blue-600" :
+                            isAllowed ? "bg-green-100 text-green-600" :
+                            "bg-gray-100 text-gray-500"
+                          }`}>
+                            {student.avatar_url ? (
+                              <Image
+                                src={student.avatar_url}
+                                alt="Avatar"
+                                fill
+                                className="object-cover"
+                              />
+                            ) : (
+                              (student.firstname?.[0] || student.lastname?.[0] || "S").toUpperCase()
+                            )}
+                          </div>
+                          <div>
+                            <h3 className="font-bold text-gray-900 text-sm line-clamp-1">
+                              {student.firstname} {student.lastname}
+                            </h3>
+                            <p className="text-xs text-gray-500 font-mono mt-0.5">{student.idnumber}</p>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    
-                    <div className="mt-auto pt-4 border-t border-gray-50">
-                      <div className="mb-3 flex items-center justify-between">
-                         <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Status</span>
-                         <span className={`text-xs font-bold px-2 py-0.5 rounded ${
-                            isCompleted ? "bg-blue-50 text-blue-600" :
-                            isAllowed ? "bg-green-50 text-green-600" :
-                            "bg-red-50 text-red-600"
-                         }`}>
-                            {isCompleted ? "Done" : isAllowed ? "Open" : "Closed"}
-                         </span>
+                      
+                      <div className="mt-auto pt-4 border-t border-gray-50">
+                        <div className="mb-3 flex items-center justify-between">
+                           <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Status</span>
+                           <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                              isCompleted ? "bg-blue-50 text-blue-600" :
+                              isAllowed ? "bg-green-50 text-green-600" :
+                              "bg-red-50 text-red-600"
+                           }`}>
+                              {isCompleted ? "Done" : isAllowed ? "Open" : "Closed"}
+                           </span>
+                        </div>
+                        <button
+                          onClick={() => !isDisabled && onOpenModal(student)}
+                          disabled={isDisabled}
+                          className={`w-full py-2.5 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-2 ${buttonClass}`}
+                        >
+                          {isCompleted ? (
+                            <>
+                              <span>Submitted</span>
+                              <svg className="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                            </>
+                          ) : isAllowed ? (
+                            <>
+                              <span>Evaluate</span>
+                              <svg className="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+                            </>
+                          ) : (
+                            <>
+                              <span>Evaluation Locked</span>
+                              <svg className="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                            </>
+                          )}
+                        </button>
                       </div>
-                      <button
-                        onClick={() => !isDisabled && onOpenModal(student)}
-                        disabled={isDisabled}
-                        className={`w-full py-2.5 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-2 ${buttonClass}`}
-                      >
-                        {isCompleted ? (
-                          <>
-                            <span>Submitted</span>
-                            <svg className="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                          </>
-                        ) : isAllowed ? (
-                          <>
-                            <span>Evaluate</span>
-                            <svg className="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
-                          </>
-                        ) : (
-                          <>
-                            <span>Evaluation Locked</span>
-                            <svg className="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-                          </>
-                        )}
-                      </button>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -2686,7 +2964,7 @@ function CalendarModal({
     const dates = new Set<string>();
     attendanceData.forEach(entry => {
       const d = new Date(entry.timestamp);
-      dates.add(d.toDateString());
+      dates.add(toDateKey(d));
     });
     return dates;
   }, [attendanceData]);
@@ -2742,10 +3020,10 @@ function CalendarModal({
 
             <div className="grid grid-cols-7 gap-2">
                {days.map((date, i) => {
-                 if (!date) return <div key={`empty-${i}`} />;
-                 const hasData = dataDates.has(date.toDateString());
+                if (!date) return <div key={`empty-${i}`} />;
+                const hasData = dataDates.has(toDateKey(date));
 
-                 return (
+                return (
                    <button
                      key={date.toISOString()}
                      disabled={!hasData}
@@ -2794,6 +3072,7 @@ export function DashboardView({
   refreshKey?: number
 }) {
   const [attendanceData, setAttendanceData] = useState<AttendanceEntry[]>([]);
+  const [rawAttendanceData, setRawAttendanceData] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedModalData, setSelectedModalData] = useState<{ student: User; attendance: AttendanceEntry[] } | null>(null);
   const [isFetchingModalData, setIsFetchingModalData] = useState(false);
@@ -2808,6 +3087,24 @@ export function DashboardView({
   const [dateOverrides, setDateOverrides] = useState<DateOverride[]>([]);
   const [daysToShow, setDaysToShow] = useState(1);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [internalRefresh, setInternalRefresh] = useState(0);
+
+  // Realtime Subscription
+  useEffect(() => {
+    if (!supabase) return;
+    const channel = supabase
+      .channel('supervisor_attendance_updates')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance' },
+        (payload: RealtimePostgresChangesPayload<any>) => {
+           console.log("Realtime attendance update:", payload);
+           setInternalRefresh(prev => prev + 1);
+        }
+      )
+      .subscribe();
+    return () => { supabase?.removeChannel(channel); };
+  }, []);
 
   useEffect(() => {
     const fetchOverrides = async () => {
@@ -2844,7 +3141,7 @@ export function DashboardView({
     // Refresh every minute to keep in sync
     const interval = setInterval(fetchOvertime, 60000);
     return () => clearInterval(interval);
-  }, [myIdnumber, refreshKey]);
+  }, [myIdnumber, refreshKey, internalRefresh]);
 
   useEffect(() => {
     const fetchStudentSchedules = async () => {
@@ -2859,7 +3156,7 @@ export function DashboardView({
         }
     };
     fetchStudentSchedules();
-  }, [refreshKey]);
+  }, [refreshKey, internalRefresh]);
 
   useEffect(() => {
     const fetchSchedule = async () => {
@@ -2902,9 +3199,14 @@ export function DashboardView({
   const [filterSection, setFilterSection] = useState("");
 
   const [selectedDate, setSelectedDate] = useState(() => {
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    return d;
+    // Initialize to Manila's current date, represented as a local Date object
+    const now = new Date();
+    const manilaDateStr = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+    const [y, m, d] = manilaDateStr.split('-').map(Number);
+    const date = new Date();
+    date.setFullYear(y, m - 1, d);
+    date.setHours(0, 0, 0, 0);
+    return date;
   });
 
   const handleViewStudentAttendance = async (student: User) => {
@@ -2925,12 +3227,14 @@ export function DashboardView({
         const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
         return {
           id: e.id,
+          studentId: e.student_id,
           type: e.type,
           timestamp: Number(e.ts),
           photoDataUrl: e.photourl,
           status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
           validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
           validated_by: e.validated_by,
+          rendered_hours: e.rendered_hours,
         };
       });
 
@@ -2976,13 +3280,6 @@ export function DashboardView({
   
   // Helpers
   const formatTime = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  const formatHours = (ms: number) => {
-    if (!ms) return "-";
-    const totalSeconds = Math.floor(ms / 1000);
-    const h = Math.floor(totalSeconds / 3600);
-    const m = Math.floor((totalSeconds % 3600) / 60);
-    return `${h}h ${m}m`;
-  };
 
   const displayDateLabel = useMemo(
     () =>
@@ -3136,18 +3433,39 @@ export function DashboardView({
   };
 
   const studentSummaries = useMemo(() => {
-    const byStudent: Record<string, AttendanceEntry[]> = {};
-    attendanceData.forEach((e: any) => {
-      const id = (e as any).idnumber;
-      if (!id) return;
-      if (!byStudent[id]) byStudent[id] = [];
-      byStudent[id].push(e as any);
+    const byStudentId: Record<string, AttendanceEntry[]> = {};
+    const byStudentIdNumber: Record<string, AttendanceEntry[]> = {};
+
+    attendanceData.forEach((e: AttendanceEntry) => {
+      if (e.studentId) {
+          const sid = String(e.studentId);
+          if (!byStudentId[sid]) byStudentId[sid] = [];
+          byStudentId[sid].push(e);
+      }
+      if (e.idnumber) {
+          if (!byStudentIdNumber[e.idnumber]) byStudentIdNumber[e.idnumber] = [];
+          byStudentIdNumber[e.idnumber].push(e);
+      }
+    });
+    
+    const targetDateStr = toLocalDateKey(selectedDate);
+
+    // Optimize Overtime/Override lookups
+    const overtimeLookup: Record<string, any> = {};
+    overtimeShifts.forEach((s: any) => {
+        const key = `${s.student_id}_${s.effective_date}`;
+        overtimeLookup[key] = s;
     });
 
-    const targetDateStr = selectedDate.toLocaleDateString();
+    const overrideLookup: Record<string, DateOverride> = {};
+    dateOverrides.forEach(o => {
+        overrideLookup[o.date] = o;
+    });
 
     return filteredStudents.map(student => {
-      const logs = (byStudent[student.idnumber] || []).slice().sort((a, b) => a.timestamp - b.timestamp);
+      // Prefer matching by studentId, fallback to idnumber
+      // Logs are already sorted by timestamp from useEffect
+      const logs = (byStudentId[String(student.id)] || byStudentIdNumber[student.idnumber] || []);
       
       // Load Schedule
       let totalValidatedMs = 0;
@@ -3159,7 +3477,7 @@ export function DashboardView({
       const grouped = new Map<string, { date: Date, logs: AttendanceEntry[] }>();
       logs.forEach(log => {
           const date = new Date(log.timestamp);
-          const key = date.toLocaleDateString();
+          const key = toDateKey(date);
           if (!grouped.has(key)) grouped.set(key, { date, logs: [] });
           grouped.get(key)!.logs.push(log);
       });
@@ -3167,7 +3485,7 @@ export function DashboardView({
       grouped.forEach(({ date, logs: dayLogs }) => {
           // Pending Days Count
           if (dayLogs.some(l => l.status === "Pending")) {
-             pendingDates.add(date.toLocaleDateString());
+             pendingDates.add(toDateKey(date));
           }
 
           // Calculate Validated Hours
@@ -3175,17 +3493,10 @@ export function DashboardView({
           baseDate.setHours(0, 0, 0, 0);
 
           // Dynamic OT check: Apply authorized overtime window if exists for this student/date
-          const y = date.getFullYear();
-          const m = String(date.getMonth() + 1).padStart(2, '0');
-          const d = String(date.getDate()).padStart(2, '0');
-          const dateStr = `${y}-${m}-${d}`;
+          const dateStr = toDateKey(date);
 
-          const dynamicOt = overtimeShifts.find((s: any) => 
-              String(s.student_id) === String(student.idnumber) && 
-              s.effective_date === dateStr
-          );
-
-          const override = dateOverrides.find(o => o.date === dateStr);
+          const dynamicOt = overtimeLookup[`${student.idnumber}_${dateStr}`];
+          const override = overrideLookup[dateStr];
           const studentSched = studentSchedules[student.idnumber];
 
           const schedule = buildSchedule(
@@ -3204,126 +3515,158 @@ export function DashboardView({
           // Sort logs strictly by time
           const sortedLogs = [...dayLogs].sort((a, b) => a.timestamp - b.timestamp);
 
-          // Build Sessions (Strict Session Logic)
-          // A student can only have ONE open session at a time.
-          type Session = { in: AttendanceEntry; out: AttendanceEntry | null; shift: 'am' | 'pm' | 'ot' };
-          const sessions: Session[] = [];
-          let currentIn: AttendanceEntry | null = null;
+          // --- SMART PAIRING LOGIC ---
+          const usedIds = new Set<string>();
+          let s1: AttendanceEntry | null = null;
+          let s2: AttendanceEntry | null = null;
+          let s3: AttendanceEntry | null = null;
+          let s4: AttendanceEntry | null = null;
+          let s5: AttendanceEntry | null = null;
+          let s6: AttendanceEntry | null = null;
 
+          const isInWindow = (ts: number, start: number | undefined, end: number | undefined) => {
+               if (!start || !end) return false;
+               // 30 min buffer before start, up to end
+               return ts >= (start - 30 * 60000) && ts <= end;
+          };
+
+          // 1. Assign INs to Slots (Greedy by Window)
+          sortedLogs.filter(l => (l.type || "").toLowerCase() === 'in' && !usedIds.has(String(l.id || l.timestamp))).forEach(l => {
+               const id = String(l.id || l.timestamp);
+               if (!s1 && isInWindow(l.timestamp, schedule.amIn, schedule.amOut)) {
+                   s1 = l; usedIds.add(id); return;
+               }
+               if (!s3 && isInWindow(l.timestamp, schedule.pmIn, schedule.pmOut)) {
+                   s3 = l; usedIds.add(id); return;
+               }
+               if (!s5 && isInWindow(l.timestamp, schedule.otStart, schedule.otEnd)) {
+                   s5 = l; usedIds.add(id); return;
+               }
+          });
+
+          // 2. Fallback Assignment for Remaining INs (Sequential Fill)
+          // This captures off-schedule INs that didn't match strict windows
+          sortedLogs.filter(l => (l.type || "").toLowerCase() === 'in' && !usedIds.has(String(l.id || l.timestamp))).forEach(l => {
+               const id = String(l.id || l.timestamp);
+               if (!s1) { s1 = l; usedIds.add(id); }
+               else if (!s3) { s3 = l; usedIds.add(id); }
+               else if (!s5) { s5 = l; usedIds.add(id); }
+          });
+
+          // 3. Pair OUTs to INs (Sequential Pairing)
+          // We prioritize pairing an OUT with an existing IN over strict window matching
+          const findAndMarkOut = (startTs: number) => {
+              const match = sortedLogs.find(l => 
+                  (l.type || "").toLowerCase() === 'out' && 
+                  !usedIds.has(String(l.id || l.timestamp)) && 
+                  l.timestamp > startTs
+              );
+              if (match) {
+                  usedIds.add(String(match.id || match.timestamp));
+                  return match;
+              }
+              return null;
+          };
+
+          if (s1 && !s2) s2 = findAndMarkOut((s1 as any).timestamp) || null;
+          if (s3 && !s4) s4 = findAndMarkOut((s3 as any).timestamp) || null;
+          if (s5 && !s6) s6 = findAndMarkOut((s5 as any).timestamp) || null;
+
+          // 4. Assign Remaining OUTs (Orphans)
+          // Only assign to empty slots where the IN is also empty (true orphans)
+          sortedLogs.filter(l => (l.type || "").toLowerCase() === 'out' && !usedIds.has(String(l.id || l.timestamp))).forEach(l => {
+               const id = String(l.id || l.timestamp);
+               if (!s2 && !s1 && isInWindow(l.timestamp, schedule.amIn, schedule.amOut)) { // AM OUT Orphan
+                   s2 = l; usedIds.add(id); return;
+               }
+               if (!s4 && !s3 && isInWindow(l.timestamp, schedule.pmIn, schedule.pmOut)) { // PM OUT Orphan
+                   s4 = l; usedIds.add(id); return;
+               }
+               if (!s6 && !s5 && isInWindow(l.timestamp, schedule.otStart, schedule.otEnd)) { // OT OUT Orphan
+                   s6 = l; usedIds.add(id); return;
+               }
+          });
+
+          // 4. Virtual Auto-Out for Past Dates
           const today = new Date();
           today.setHours(0,0,0,0);
           const isPastDate = date < today;
 
-          for (const log of sortedLogs) {
-              if (log.status === "Rejected") continue;
-
-              if (log.type === "in") {
-                  if (currentIn) {
-                      // Previous session incomplete (forgot to time out).
-                      const shift = determineShift(currentIn.timestamp, schedule);
-                      let outEntry: AttendanceEntry | null = null;
-                      
-                      if (isPastDate) {
-                              const outTs = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
-                              outEntry = {
-                                  id: currentIn.id ? -currentIn.id : -Math.floor(Math.random() * 1000000),
-                                  idnumber: currentIn.idnumber,
-                                  type: 'out',
-                                  timestamp: outTs,
-                                  photoDataUrl: '',
-                                  status: 'Pending',
-                                  validated_by: 'AUTO TIME OUT'
-                              };
-                          }
-                      sessions.push({ in: currentIn, out: outEntry, shift });
-                  }
-                  currentIn = log;
-              } else if (log.type === "out") {
-                  if (currentIn) {
-                      // Close session
-                      sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.timestamp, schedule) });
-                      currentIn = null;
-                  }
-                  // Orphaned OUTs are ignored
+          if (isPastDate) {
+              if (s1 && !s2) {
+                   s2 = {
+                        id: (s1 as any).id ? -Math.abs(Number((s1 as any).id)) : -Math.floor(Math.random() * 1000000),
+                        idnumber: (s1 as any).idnumber,
+                        type: 'out',
+                        timestamp: schedule.amOut!,
+                        photoDataUrl: '',
+                        status: 'Pending',
+                        validated_by: 'AUTO TIME OUT'
+                   };
+              }
+              if (s3 && !s4) {
+                   s4 = {
+                        id: (s3 as any).id ? -Math.abs(Number((s3 as any).id)) : -Math.floor(Math.random() * 1000000),
+                        idnumber: (s3 as any).idnumber,
+                        type: 'out',
+                        timestamp: schedule.pmOut!,
+                        photoDataUrl: '',
+                        status: 'Pending',
+                        validated_by: 'AUTO TIME OUT'
+                   };
+              }
+              if (s5 && !s6 && schedule.otEnd) {
+                   s6 = {
+                        id: (s5 as any).id ? -Math.abs(Number((s5 as any).id)) : -Math.floor(Math.random() * 1000000),
+                        idnumber: (s5 as any).idnumber,
+                        type: 'out',
+                        timestamp: schedule.otEnd,
+                        photoDataUrl: '',
+                        status: 'Pending',
+                        validated_by: 'AUTO TIME OUT'
+                   };
               }
           }
-          if (currentIn) {
-              const shift = determineShift(currentIn.timestamp, schedule);
-              let outEntry: AttendanceEntry | null = null;
-              
-              if (isPastDate) {
-                  const outTs = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
-                  outEntry = {
-                      id: currentIn.id ? -currentIn.id : -Math.floor(Math.random() * 1000000),
-                      idnumber: currentIn.idnumber,
-                      type: 'out',
-                      timestamp: outTs,
-                      photoDataUrl: '',
-                      status: 'Pending',
-                      validated_by: 'AUTO TIME OUT'
-                  };
-              }
-              sessions.push({ in: currentIn, out: outEntry, shift });
-          }
 
-          // Calculate Hours (Shift Window Intersection - All Windows)
-          const calculateHours = (requireApproved: boolean) => {
+          const calcTracked = () => {
               let total = 0;
-              sessions.forEach(session => {
-                  const isInValid = !requireApproved || session.in.status === "Approved";
-                  const isOutValid = !session.out || !requireApproved || session.out.status === "Approved";
-                  if (!isInValid || !isOutValid) return;
-                  
-                  if (!session.out) return;
-
-                  // Use shared utility for uniform calculation
-                  const { am, pm, ot } = calculateShiftDurations(session.in.timestamp, session.out.timestamp, schedule);
-                  total += am + pm + ot;
-              });
-              
+              const add = (inLog: AttendanceEntry | null, outLog: AttendanceEntry | null, shift: 'am' | 'pm' | 'ot') => {
+                  if (!inLog || !outLog) return;
+                  if (inLog.status === 'Rejected' || outLog.status === 'Rejected') return;
+                  total += calculateSessionDuration(inLog.timestamp, outLog.timestamp, shift, schedule);
+              };
+              add(s1, s2, 'am');
+              add(s3, s4, 'pm');
+              add(s5, s6, 'ot');
               return total;
           };
 
-          const dayVal = calculateHours(true);
-          const dayRaw = calculateHours(false);
+          const dayRaw = calcTracked();
+          const dayVal = [s2, s4, s6].reduce((acc, out) => {
+              const v = out ? (out as any).validated_hours : undefined;
+              const num = v !== undefined && v !== null ? Number(v) : NaN;
+              return acc + (isNaN(num) ? 0 : num * 3600000);
+          }, 0);
           
           totalValidatedMs += dayVal;
           totalRawMs += dayRaw;
           
           // Capture Selected Date's Slots
-          if (date.toLocaleDateString() === targetDateStr) {
+          const targetDateKey = toLocalDateKey(selectedDate);
+          const manilaKey = toDateKey(date);
+          
+          if (manilaKey === targetDateKey) {
              const otAuthLog = dayLogs.find(l => l.photoDataUrl && l.photoDataUrl.startsWith("OT_AUTH:"));
              
              // Use selectedDate for matching overtime shifts visually if needed (though we matched above via dateStr)
-             const yT = selectedDate.getFullYear();
-             const mT = String(selectedDate.getMonth() + 1).padStart(2, '0');
-             const dT = String(selectedDate.getDate()).padStart(2, '0');
-             const targetDateISO = `${yT}-${mT}-${dT}`;
+             const targetDateISO = toLocalDateKey(selectedDate);
 
-             const isOvertimeAuthorized = overtimeShifts.some((s: any) => 
-                 String(s.student_id) === String(student.idnumber) && 
-                 s.effective_date === targetDateISO
-             );
-
-             // Map sessions to UI slots (No Visual Clamping)
-             const mapSessionToSlots = (shiftSessions: Session[]) => {
-                 if (shiftSessions.length === 0) return { in: null, out: null };
-                 
-                 const firstSession = shiftSessions[0];
-                 const lastSession = shiftSessions[shiftSessions.length - 1];
-                 
-                 return { in: firstSession.in, out: lastSession.out };
-             };
-
-             const amSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'am'));
-             const pmSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'pm'));
-             const otSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'ot'));
+             const isOvertimeAuthorized = !!overtimeLookup[`${student.idnumber}_${targetDateISO}`];
 
              todaySlots = { 
-                 s1: amSlots.in, s2: amSlots.out, 
-                 s3: pmSlots.in, s4: pmSlots.out, 
-                 s5: otSlots.in, s6: otSlots.out, 
-                 todayTotalMs: dayRaw, otAuthLog, isOvertimeAuthorized 
+                 s1, s2, s3, s4, s5, s6, 
+                 todayTotalMs: dayRaw, otAuthLog, isOvertimeAuthorized,
+                 schedule
              };
           }
       });
@@ -3333,7 +3676,8 @@ export function DashboardView({
         totalMs: totalValidatedMs,
         totalRawMs,
         pendingDays: pendingDates.size,
-        todaySlots
+        todaySlots,
+        logsCount: logs.length
       };
     });
   }, [filteredStudents, attendanceData, scheduleConfig, overtimeShifts, selectedDate, studentSchedules, dateOverrides]);
@@ -3341,39 +3685,28 @@ export function DashboardView({
   // Fetch Attendance
   useEffect(() => {
     let mounted = true;
+    const supervisorId = myIdnumber || localStorage.getItem("idnumber");
+    
     (async () => {
-      if (filteredStudents.length === 0) {
-        setAttendanceData([]);
-        return;
-      }
+      if (!supervisorId) return;
+
       setLoading(true);
       try {
-        const ids = filteredStudents.map(s => s.idnumber);
-        // Chunking ids if too many
-        if (!supabase) return;
-        const { data, error } = await supabase
-          .from('attendance')
-          .select('id, type, ts, photourl, status, validated_by, validated_at, idnumber')
-          .in('idnumber', ids)
-          .order('ts', { ascending: false })
-          .limit(100000);
+        console.log("Fetching attendance for supervisor:", supervisorId);
         
-        if (!error && data && mounted) {
-           const mapped: AttendanceEntry[] = data.map((e: AttendanceQueryResult) => {
-             const sStr = String(e.status || "").trim().toLowerCase();
-             const isRejected = sStr === "rejected";
-             const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
-             return {
-             id: e.id,
-             idnumber: e.idnumber,
-             type: e.type,
-             timestamp: Number(e.ts),
-             photoDataUrl: e.photourl,
-            status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
-             validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
-             validated_by: e.validated_by
-           }});
-           setAttendanceData(mapped);
+        const res = await fetch(`/api/attendance?supervisor_id=${encodeURIComponent(supervisorId)}&limit=100000`);
+        const json = await res.json();
+        
+        if (!res.ok) {
+             console.error("Attendance fetch error:", json);
+             throw new Error(json.error || "Failed to fetch attendance");
+        }
+        
+        const data = json.entries || [];
+
+        if (mounted) {
+           console.log(`Fetched ${data.length} attendance records`);
+           setRawAttendanceData(data);
         }
       } catch (e) {
         console.error(e);
@@ -3382,7 +3715,42 @@ export function DashboardView({
       }
     })();
     return () => { mounted = false; };
-  }, [filteredStudents, refreshKey]);
+  }, [myIdnumber, refreshKey, internalRefresh]);
+
+  // Map Attendance Data
+  useEffect(() => {
+     if (!rawAttendanceData) return;
+     
+     const mapped: AttendanceEntry[] = rawAttendanceData.map((e: any) => {
+       const sStr = String(e.status || "").trim().toLowerCase();
+       const isRejected = sStr === "rejected";
+       const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
+       
+       // API returns users_students object
+       const joinedIdNumber = e.users_students?.idnumber;
+
+       const student = students.find(s => String(s.id) === String(e.student_id));
+       
+       return {
+       id: e.id,
+       studentId: e.student_id,
+       idnumber: joinedIdNumber || (student ? student.idnumber : 'UNKNOWN'),
+       type: e.type,
+       timestamp: new Date(e.logged_at).getTime(),
+       photoDataUrl: e.photourl,
+       status: isRejected ? "Rejected" : isApproved ? "Approved" : "Pending",
+       validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
+       validated_by: e.validated_by,
+       is_overtime: e.is_overtime,
+       rendered_hours: e.rendered_hours,
+       validated_hours: e.validated_hours
+     }});
+     
+     // Sort by timestamp to optimize downstream processing
+     mapped.sort((a, b) => a.timestamp - b.timestamp);
+     
+     setAttendanceData(mapped);
+  }, [rawAttendanceData, students]);
 
   // Validate Function
   const handleValidation = async (entry: AttendanceEntry, action: 'approve' | 'reject' | 'reset') => {
@@ -3493,7 +3861,7 @@ export function DashboardView({
       {/* Header */}
       <div>
          <h1 className="text-2xl font-bold text-gray-900">Attendance Monitoring</h1>
-         <p className="text-gray-500">Overview of total hours and pending days per student.</p>
+         <p className="text-gray-500">Overview of total hours per student.</p>
       </div>
 
       {/* Toolbar */}
@@ -3549,7 +3917,40 @@ export function DashboardView({
                className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-orange-500 bg-orange-500 text-white hover:bg-orange-600 hover:border-orange-600 transition-colors"
              >
                Authorize Overtime
-             </button>
+            </button>
+            <button
+              onClick={async () => {
+                try {
+                  const res = await fetch("/api/push/test", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ idnumber: myIdnumber || localStorage.getItem("idnumber") })
+                  });
+                  const json = await res.json();
+                if (json.success) {
+                  alert(`Test notification sent! (Found ${json.subs_found} devices)`);
+                } else {
+                  let msg = "Failed: " + (json.error || "Unknown error");
+                  if (json.env && (!json.env.has_public || !json.env.has_private)) {
+                    msg += "\n[Server Error] Missing VAPID Keys in .env";
+                  }
+                  if (json.subs_found === 0) {
+                    msg += "\n[Error] No subscribed devices found for this account. Try refreshing the page and clicking 'Allow' on the prompt.";
+                  }
+                  if (json.push_attempts && json.push_attempts.length > 0) {
+                     const errs = json.push_attempts.filter((a: any) => a.status === 'failed').map((a: any) => `${a.code}: ${a.error}`).join('\n');
+                     if (errs) msg += `\n[Push Errors]:\n${errs}`;
+                  }
+                  alert(msg);
+                }
+              } catch (e: any) {
+                  alert("Error: " + e.message);
+                }
+              }}
+              className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 transition-colors"
+            >
+              Test Notification
+            </button>
              <button
                onClick={selectAllPending}
                className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100 hover:border-orange-400 transition-colors"
@@ -3700,16 +4101,16 @@ export function DashboardView({
                   </td>
                 </tr>
               ) : (
-                studentSummaries.map(({ student, totalMs, totalRawMs, todaySlots }) => {
+                studentSummaries.map(({ student, totalMs, totalRawMs, todaySlots, logsCount }) => {
                   const todayMs = todaySlots?.todayTotalMs || 0;
-                  // Use todayMs for the Total Hours column (Daily View)
-                  const displayTotal = todayMs;
+                  const displayTotal = totalMs > 0 ? totalMs : todayMs;
                   const renderSlot = (
                     slot: AttendanceEntry | null,
                     pairIn?: AttendanceEntry | null,
                     pairOut?: AttendanceEntry | null,
                     isInCell?: boolean,
-                    isOvertime?: boolean
+                    isOvertime?: boolean,
+                    officialStart?: number
                   ) => {
                     if (!slot) {
                       if (isOvertime && isInCell) {
@@ -3752,15 +4153,20 @@ export function DashboardView({
                       );
                     }
 
+                    const isLateTime = isInCell && slot.type === 'in' && officialStart ? isLate(slot.timestamp, officialStart) : false;
+
                     const status = slot.status as "Pending" | "Approved" | "Rejected" | undefined;
                     let statusLabel = "Pending";
                     let statusClass = "text-yellow-600";
 
                     const valBy = (slot.validated_by || "").trim();
                     if (valBy === "SYSTEM_AUTO_CLOSE" || valBy === "AUTO TIME OUT") {
-            statusLabel = "AUTO TIME OUT";
-            statusClass = "text-orange-600 font-bold";
-          } else if (status === "Approved") {
+                        // Completely blank for auto time-outs
+                        return (
+                            <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-gray-700">
+                            </td>
+                        );
+                    } else if (status === "Approved") {
                       statusLabel = "Validated";
                       statusClass = "text-green-600";
                     } else if (status === "Rejected") {
@@ -3791,9 +4197,16 @@ export function DashboardView({
                                 />
                               );
                             })()}
-                            <span className="font-medium">
-                              {formatTime(slot.timestamp)}
-                            </span>
+                            <div className="flex flex-col items-center justify-center">
+                              <div className={`font-medium whitespace-nowrap text-center ${isLateTime ? "text-red-600 font-bold" : ""}`}>
+                                {formatTime(slot.timestamp)}
+                              </div>
+                              {isLateTime ? (
+                                  <div className="text-[7px] font-bold text-red-500 leading-none mt-0.5 text-center">LATE</div>
+                              ) : (
+                                  <div className="text-[7px] font-bold text-transparent leading-none mt-0.5 invisible text-center">LATE</div>
+                              )}
+                            </div>
                           </div>
                           {slot.photoDataUrl ? (
                             <div
@@ -3852,14 +4265,18 @@ export function DashboardView({
                           </div>
                         </button>
                       </td>
-                      {renderSlot(todaySlots?.s1, todaySlots?.s1, todaySlots?.s2, true, false)}
+                      {renderSlot(todaySlots?.s1, todaySlots?.s1, todaySlots?.s2, true, false, todaySlots?.schedule?.amIn)}
                       {renderSlot(todaySlots?.s2, todaySlots?.s1, todaySlots?.s2, false, false)}
-                      {renderSlot(todaySlots?.s3, todaySlots?.s3, todaySlots?.s4, true, false)}
+                      {renderSlot(todaySlots?.s3, todaySlots?.s3, todaySlots?.s4, true, false, todaySlots?.schedule?.pmIn)}
                       {renderSlot(todaySlots?.s4, todaySlots?.s3, todaySlots?.s4, false, false)}
-                      {renderSlot(todaySlots?.s5, todaySlots?.s5, todaySlots?.s6, true, true)}
+                      {renderSlot(todaySlots?.s5, todaySlots?.s5, todaySlots?.s6, true, true, todaySlots?.schedule?.otStart)}
                       {renderSlot(todaySlots?.s6, todaySlots?.s5, todaySlots?.s6, false, true)}
-                      <td className="px-4 py-3 text-center font-bold text-gray-900">
-                        {displayTotal > 0 ? formatHours(displayTotal) : "-"}
+                      <td className="px-4 py-3 text-center">
+                        <div className="flex flex-col items-center">
+                          <span className="font-bold text-gray-900">
+                            {formatHours(displayTotal)}
+                          </span>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -3875,9 +4292,9 @@ export function DashboardView({
               No students found.
             </div>
           ) : (
-            studentSummaries.map(({ student, totalMs, totalRawMs, pendingDays, todaySlots }) => {
+            studentSummaries.map(({ student, totalMs, totalRawMs, todaySlots }) => {
               const todayMs = todaySlots?.todayTotalMs || 0;
-              const displayTotal = totalMs;
+              const displayTotal = totalMs > 0 ? totalMs : todayMs;
               const courseSection = [
                 student.course || "",
                 student.section || ""
@@ -3921,29 +4338,13 @@ export function DashboardView({
                       View details
                     </span>
                   </button>
-                  <div className="mt-3 grid grid-cols-2 gap-3">
+                  <div className="mt-3">
                     <div className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2">
                       <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">
                         Total Hours
                       </div>
                       <div className="text-sm font-bold text-gray-900 mt-1">
-                        {displayTotal > 0 ? formatHours(displayTotal) : (
-                          <span className="text-gray-300">-</span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2">
-                      <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">
-                        Pending Days
-                      </div>
-                      <div className="mt-1">
-                        {pendingDays > 0 ? (
-                          <span className="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-bold bg-red-50 text-red-700 border border-red-100">
-                            {pendingDays}
-                          </span>
-                        ) : (
-                          <span className="text-sm text-gray-300">0</span>
-                        )}
+                        {formatHours(displayTotal)}
                       </div>
                     </div>
                   </div>
@@ -3981,22 +4382,22 @@ export function DashboardView({
 
         {bulkOvertimeModal.isOpen && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
-              <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
-                <h3 className="font-bold text-gray-900">Authorize Overtime</h3>
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-sm overflow-hidden flex flex-col max-h-[90vh]">
+              <div className="px-3 py-1.5 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+                <h3 className="font-bold text-gray-900 text-sm">Authorize Overtime</h3>
                 <button
                   onClick={() => setBulkOvertimeModal(prev => ({ ...prev, isOpen: false }))}
-                  className="p-2 hover:bg-gray-200 rounded-full text-gray-500"
+                  className="p-1 hover:bg-gray-200 rounded-full text-gray-500"
                 >
-                  <X size={20} />
+                  <X size={16} />
                 </button>
               </div>
 
-              <div className="p-6 space-y-4 overflow-y-auto custom-scrollbar">
+              <div className="p-3 space-y-3 overflow-y-auto custom-scrollbar">
                 {/* Date & Time Controls */}
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1">
-                    <label className="text-xs font-bold text-gray-700 uppercase">Date</label>
+                    <label className="text-[10px] font-bold text-gray-700 uppercase">Date</label>
                     <input 
                       type="date" 
                       value={bulkOvertimeModal.date ? (() => {
@@ -4015,44 +4416,44 @@ export function DashboardView({
                               setBulkOvertimeModal(prev => ({ ...prev, date: new Date(y, m - 1, d) }));
                           }
                       }}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
+                      className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
                     />
                   </div>
                   <div className="space-y-1">
-                     <label className="text-xs font-bold text-gray-700 uppercase">Start Time</label>
+                     <label className="text-[10px] font-bold text-gray-700 uppercase">Start Time</label>
                      <input 
                        type="time" 
                        value={otInTime}
                        onChange={(e) => setOtInTime(e.target.value)}
-                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
+                       className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
                      />
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-2 gap-3">
                    <div className="space-y-1">
-                     <label className="text-xs font-bold text-gray-700 uppercase">Hours</label>
+                     <label className="text-[10px] font-bold text-gray-700 uppercase">Hours</label>
                      <input 
                        type="number" 
                        min="0" max="12"
                        value={otHours}
                        onChange={(e) => setOtHours(Math.max(0, parseInt(e.target.value) || 0))}
-                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
+                       className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
                      />
                    </div>
                    <div className="space-y-1">
-                     <label className="text-xs font-bold text-gray-700 uppercase">Minutes</label>
+                     <label className="text-[10px] font-bold text-gray-700 uppercase">Minutes</label>
                      <input 
                        type="number" 
                        min="0" max="59" step="15"
                        value={otMinutes}
                        onChange={(e) => setOtMinutes(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))}
-                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
+                       className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs font-medium text-gray-900 focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
                      />
                    </div>
                 </div>
 
-                <p className="text-sm font-medium text-gray-700 text-right">
+                <p className="text-xs font-medium text-gray-700 text-right">
                   Ends at:{" "}
                   <span className="font-bold text-orange-600">
                     {(() => {
@@ -4072,7 +4473,7 @@ export function DashboardView({
                 {/* Student Selection */}
                 <div className="space-y-2 pt-2 border-t border-gray-100">
                    <div className="flex items-center justify-between">
-                      <label className="text-xs font-medium text-gray-500 uppercase">Select Students</label>
+                      <label className="text-[10px] font-medium text-gray-500 uppercase">Select Students</label>
                       <button 
                         onClick={() => {
                             const allIds = filteredStudents.map(s => String(s.idnumber));
@@ -4088,20 +4489,20 @@ export function DashboardView({
                                 return { ...prev, selectedStudentIds: next };
                             });
                         }}
-                        className="text-xs text-orange-600 font-medium hover:underline"
+                        className="text-[10px] text-orange-600 font-medium hover:underline"
                       >
                         {filteredStudents.length > 0 && filteredStudents.every(s => bulkOvertimeModal.selectedStudentIds.has(String(s.idnumber))) ? "Deselect All" : "Select All"}
                       </button>
                    </div>
-                   <div className="border border-gray-200 rounded-lg h-48 overflow-y-auto divide-y divide-gray-100 custom-scrollbar bg-gray-50">
+                   <div className="border border-gray-200 rounded-lg h-40 overflow-y-auto divide-y divide-gray-100 custom-scrollbar bg-gray-50">
                       {filteredStudents.length === 0 ? (
-                          <div className="p-4 text-center text-sm text-gray-500">No students found.</div>
+                          <div className="p-4 text-center text-xs text-gray-500">No students found.</div>
                       ) : (
                           filteredStudents.map(student => {
                               const sid = String(student.idnumber);
                               const isSelected = bulkOvertimeModal.selectedStudentIds.has(sid);
                               return (
-                                  <label key={sid} className="flex items-center gap-3 p-3 hover:bg-white cursor-pointer transition-colors">
+                                  <label key={sid} className="flex items-center gap-2 p-2 hover:bg-white cursor-pointer transition-colors">
                                       <input 
                                         type="checkbox"
                                         checked={isSelected}
@@ -4113,38 +4514,38 @@ export function DashboardView({
                                                 return { ...prev, selectedStudentIds: next };
                                             });
                                         }}
-                                        className="w-4 h-4 rounded text-orange-600 focus:ring-orange-500 border-gray-300"
+                                        className="w-3.5 h-3.5 rounded text-orange-600 focus:ring-orange-500 border-gray-300"
                                       />
-                                      <div className="text-sm">
+                                      <div className="text-xs">
                                           <div className="font-medium text-gray-900">{student.lastname}, {student.firstname}</div>
-                                          <div className="text-xs text-gray-500">{student.course} • {student.section}</div>
+                                          <div className="text-[10px] text-gray-500">{student.course} • {student.section}</div>
                                       </div>
                                   </label>
                               );
                           })
                       )}
                    </div>
-                   <p className="text-xs text-gray-400 text-right">
+                   <p className="text-[10px] text-gray-400 text-right">
                       {bulkOvertimeModal.selectedStudentIds.size} student(s) selected
                    </p>
                 </div>
               </div>
 
-              <div className="p-4 border-t border-gray-100 bg-gray-50 flex justify-end gap-3">
+              <div className="p-3 border-t border-gray-100 bg-gray-50 flex justify-end gap-2">
                 <button 
                   onClick={() => setBulkOvertimeModal(prev => ({ ...prev, isOpen: false }))}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                  className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                 >
                   Cancel
                 </button>
                 <button 
                   onClick={handleBulkSaveOvertime}
                   disabled={isSavingOt || bulkOvertimeModal.selectedStudentIds.size === 0 || !otInTime || (otHours === 0 && otMinutes === 0)}
-                  className="px-4 py-2 text-sm font-bold text-white bg-orange-600 rounded-lg hover:bg-orange-700 shadow-md shadow-orange-200 transition-all disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                  className="px-3 py-1.5 text-xs font-bold text-white bg-orange-600 rounded-lg hover:bg-orange-700 shadow-md shadow-orange-200 transition-all disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                 >
                   {isSavingOt ? (
                      <>
-                       <RefreshCw size={14} className="animate-spin" />
+                       <RefreshCw size={12} className="animate-spin" />
                        <span>Saving...</span>
                      </>
                   ) : (
@@ -4218,8 +4619,8 @@ export function AttendanceView({ students, myIdnumber, onPendingChange, refreshK
                 idnumber: s.idnumber,
                 name: `${s.firstname || ""} ${s.lastname || ""}`.trim() || s.idnumber,
                 type: e.type,
-                dateLabel: d.toLocaleDateString(undefined, { month: "short", day: "2-digit", year: "numeric" }),
-                timeLabel: d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                dateLabel: d.toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: "short", day: "2-digit", year: "numeric" }),
+                timeLabel: d.toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: "2-digit", minute: "2-digit" }),
                 approved: String(e.status || "").trim().toLowerCase() === "approved" || !!e.validated_by,
                 photourl: e.photourl,
                 ts: e.ts,
@@ -4253,8 +4654,8 @@ export function AttendanceView({ students, myIdnumber, onPendingChange, refreshK
             idnumber: s.idnumber,
             name: `${s.firstname || ""} ${s.lastname || ""}`.trim() || s.idnumber,
             type: e.type,
-            dateLabel: d.toLocaleDateString(undefined, { month: "short", day: "2-digit", year: "numeric" }),
-            timeLabel: d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            dateLabel: d.toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: "short", day: "2-digit", year: "numeric" }),
+            timeLabel: d.toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: "2-digit", minute: "2-digit" }),
             approved: String(e.status || "").trim().toLowerCase() === "approved" || !!e.validated_by,
             photourl: e.photourl,
             ts: Number(e.ts),
@@ -4292,8 +4693,8 @@ export function AttendanceView({ students, myIdnumber, onPendingChange, refreshK
                 idnumber: s.idnumber,
                 name: `${s.firstname || ""} ${s.lastname || ""}`.trim() || s.idnumber,
                 type: e.type,
-                dateLabel: d.toLocaleDateString(undefined, { month: "short", day: "2-digit", year: "numeric" }),
-                timeLabel: d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                dateLabel: d.toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: "short", day: "2-digit", year: "numeric" }),
+                timeLabel: d.toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: "2-digit", minute: "2-digit" }),
                 approved: true,
                 photourl: e.photourl,
                 ts: tsNum,
@@ -4311,8 +4712,8 @@ export function AttendanceView({ students, myIdnumber, onPendingChange, refreshK
                 idnumber: s.idnumber,
                 name: `${s.firstname || ""} ${s.lastname || ""}`.trim() || s.idnumber,
                 type: e.type,
-                dateLabel: d.toLocaleDateString(undefined, { month: "short", day: "2-digit", year: "numeric" }),
-                timeLabel: d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                dateLabel: d.toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: "short", day: "2-digit", year: "numeric" }),
+                timeLabel: d.toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: "2-digit", minute: "2-digit" }),
                 approved: false,
                 photourl: e.photourl,
                 ts: tsNum,
@@ -4395,8 +4796,8 @@ export function AttendanceView({ students, myIdnumber, onPendingChange, refreshK
     <>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Pending Approvals */}
-      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
-        <div className="flex flex-col gap-4 mb-6">
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+        <div className="flex flex-col gap-4 mb-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="w-2 h-6 bg-orange-500 rounded-full" />
@@ -4561,7 +4962,7 @@ export function AttendanceView({ students, myIdnumber, onPendingChange, refreshK
 }
 
 // --- Profile View ---
-export function ProfileView({ user }: { user: User | null }) {
+export function ProfileView({ user, isLoading }: { user: User | null; isLoading?: boolean }) {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
@@ -4601,6 +5002,18 @@ export function ProfileView({ user }: { user: User | null }) {
     }
   };
 
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center p-12 text-gray-500 animate-pulse">
+        <svg className="w-8 h-8 mr-3 animate-spin text-[#F97316]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <span>Loading profile...</span>
+      </div>
+    );
+  }
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-in fade-in duration-500">
       {/* Main Profile Section */}
@@ -4609,7 +5022,7 @@ export function ProfileView({ user }: { user: User | null }) {
           <div className="h-40 bg-gradient-to-r from-orange-400 to-orange-600 relative">
              <div className="absolute inset-0 bg-black/10"></div>
           </div>
-          <div className="px-8 pb-8 relative">
+          <div className="px-6 pb-6 relative">
             <div className="flex flex-col sm:flex-row items-center sm:items-end gap-6 -mt-16 mb-6">
               <div className="h-32 w-32 rounded-2xl border-4 border-white bg-white shadow-md flex items-center justify-center text-4xl font-bold text-gray-800 shrink-0">
                 {(fullname?.[0] || user?.firstname?.[0] || user?.lastname?.[0] || "?").toUpperCase()}
@@ -4641,7 +5054,7 @@ export function ProfileView({ user }: { user: User | null }) {
               </div>
             </div>
             
-             <div className="border-t border-gray-100 pt-8 mt-8">
+             <div className="border-t border-gray-100 pt-6 mt-6">
               <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide mb-6 flex items-center gap-2">
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
                 Employment Details

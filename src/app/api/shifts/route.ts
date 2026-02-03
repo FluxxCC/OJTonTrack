@@ -35,7 +35,26 @@ export async function POST(req: Request) {
     const pmOut = normalizeTime(body.pmOut);
     const overtimeIn = normalizeTime(body.overtimeIn);
     const overtimeOut = normalizeTime(body.overtimeOut);
-    const supervisorId = body.supervisor_id;
+    const supervisorIdParam = body.supervisor_id;
+
+    // Resolve supervisor_id (string idnumber) to internal integer ID
+    let internalSupervisorId: number | null = null;
+    if (supervisorIdParam) {
+        const { data: supervisorData, error: supervisorError } = await admin
+            .from("users_supervisors")
+            .select("id")
+            .eq("idnumber", supervisorIdParam)
+            .maybeSingle();
+        
+        if (supervisorError) {
+             console.error("Error looking up supervisor:", supervisorError);
+             return NextResponse.json({ error: "Error validating supervisor" }, { status: 500 });
+        }
+        if (!supervisorData) {
+             return NextResponse.json({ error: "Supervisor not found" }, { status: 404 });
+        }
+        internalSupervisorId = supervisorData.id;
+    }
 
     if (!amIn || !amOut || !pmIn || !pmOut) {
       return NextResponse.json({ error: "Invalid or incomplete schedule times" }, { status: 400 });
@@ -47,13 +66,13 @@ export async function POST(req: Request) {
         shift_name: "Morning Shift",
         official_start: amIn,
         official_end: amOut,
-        supervisor_id: supervisorId || null,
+        supervisor_id: internalSupervisorId,
       },
       {
         shift_name: "Afternoon Shift",
         official_start: pmIn,
         official_end: pmOut,
-        supervisor_id: supervisorId || null,
+        supervisor_id: internalSupervisorId,
       },
     ];
 
@@ -62,28 +81,83 @@ export async function POST(req: Request) {
         shift_name: "Overtime Shift",
         official_start: overtimeIn,
         official_end: overtimeOut,
-        supervisor_id: supervisorId || null,
+        supervisor_id: internalSupervisorId,
       });
-    } else {
-      // If overtime is not provided, remove it from the database for this supervisor
-      let query = admin.from("shifts").delete().eq("shift_name", "Overtime Shift");
-      if (supervisorId) {
-        query = query.eq("supervisor_id", supervisorId);
-      } else {
-        query = query.is("supervisor_id", null);
-      }
-      await query;
     }
 
-    // Use a composite key for onConflict if supervisor_id is provided, otherwise fallback to shift_name
-    // Note: The unique constraint in DB must match this. 
-    // We assume the constraint is (shift_name, supervisor_id).
-    const { error } = await admin
+    // Update existing rows if present; insert otherwise.
+    // This avoids deleting rows referenced by foreign keys (validated_hours, overtime_shifts, student_shifts).
+    const { data: existing } = await admin
       .from("shifts")
-      .upsert(rows, { onConflict: "shift_name,supervisor_id" });
+      .select("id, shift_name, supervisor_id")
+      .in("shift_name", ["Morning Shift", "Afternoon Shift", "Overtime Shift"])
+      .order("id", { ascending: true });
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    // Helper to find an existing row by name and supervisor_id (or null for global)
+    const findExisting = (name: string) => {
+      return (existing || []).find((r: any) => {
+        const supOk =
+          internalSupervisorId != null
+            ? r.supervisor_id === internalSupervisorId
+            : r.supervisor_id == null;
+        return r.shift_name === name && supOk;
+      });
+    };
+
+    // Morning
+    const morning = rows.find(r => r.shift_name === "Morning Shift")!;
+    const exMorning = findExisting("Morning Shift");
+    if (exMorning) {
+      const { error: updErr } = await admin
+        .from("shifts")
+        .update({ official_start: morning.official_start, official_end: morning.official_end })
+        .eq("id", exMorning.id);
+      if (updErr) {
+        return NextResponse.json({ error: updErr.message }, { status: 500 });
+      }
+    } else {
+      const { error: insErr } = await admin.from("shifts").insert(morning as any);
+      if (insErr) {
+        return NextResponse.json({ error: insErr.message }, { status: 500 });
+      }
+    }
+
+    // Afternoon
+    const afternoon = rows.find(r => r.shift_name === "Afternoon Shift")!;
+    const exAfternoon = findExisting("Afternoon Shift");
+    if (exAfternoon) {
+      const { error: updErr } = await admin
+        .from("shifts")
+        .update({ official_start: afternoon.official_start, official_end: afternoon.official_end })
+        .eq("id", exAfternoon.id);
+      if (updErr) {
+        return NextResponse.json({ error: updErr.message }, { status: 500 });
+      }
+    } else {
+      const { error: insErr } = await admin.from("shifts").insert(afternoon as any);
+      if (insErr) {
+        return NextResponse.json({ error: insErr.message }, { status: 500 });
+      }
+    }
+
+    // Overtime (only if provided; do not delete or override existing OT if not provided)
+    const otRow = rows.find(r => r.shift_name === "Overtime Shift");
+    if (otRow) {
+      const exOt = findExisting("Overtime Shift");
+      if (exOt) {
+        const { error: updErr } = await admin
+          .from("shifts")
+          .update({ official_start: (otRow as any).official_start, official_end: (otRow as any).official_end })
+          .eq("id", exOt.id);
+        if (updErr) {
+          return NextResponse.json({ error: updErr.message }, { status: 500 });
+        }
+      } else {
+        const { error: insErr } = await admin.from("shifts").insert(otRow as any);
+        if (insErr) {
+          return NextResponse.json({ error: insErr.message }, { status: 500 });
+        }
+      }
     }
 
     return NextResponse.json({ ok: true });
@@ -99,8 +173,26 @@ export async function GET(req: Request) {
     if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
 
     const { searchParams } = new URL(req.url);
-    const supervisorId = searchParams.get("supervisor_id");
+    const supervisorIdParam = searchParams.get("supervisor_id");
     const includeAll = searchParams.get("all") === "true";
+
+    // Resolve supervisor_id (string idnumber) to internal integer ID
+    let internalSupervisorId: number | null = null;
+    if (supervisorIdParam) {
+         const { data: supervisorData } = await admin
+             .from("users_supervisors")
+             .select("id")
+             .eq("idnumber", supervisorIdParam)
+             .maybeSingle();
+         
+         if (supervisorData) {
+             internalSupervisorId = supervisorData.id;
+         } else {
+             // If ID number provided but not found, return empty or default?
+             // Returning empty seems safer than global shifts if specific ID was requested.
+             return NextResponse.json({ shifts: [] });
+         }
+    }
 
     let query = admin
       .from("shifts")
@@ -109,8 +201,11 @@ export async function GET(req: Request) {
 
     if (includeAll) {
       // Return all shifts (no filter)
-    } else if (supervisorId) {
-      query = query.eq("supervisor_id", supervisorId);
+    } else if (internalSupervisorId) {
+      query = query.eq("supervisor_id", internalSupervisorId);
+    } else if (supervisorIdParam) { 
+       // supervisorIdParam provided but not found (already handled above, but for safety)
+       return NextResponse.json({ shifts: [] });
     } else {
       // If no supervisor_id is provided, return global shifts (where supervisor_id is null)
       query = query.is("supervisor_id", null);
@@ -125,4 +220,3 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
-

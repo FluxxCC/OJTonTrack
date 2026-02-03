@@ -22,7 +22,8 @@ import {
   ShieldCheck
 } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
-import { calculateSessionDuration, determineShift, ShiftSchedule as LibShiftSchedule, buildSchedule, normalizeTimeString, timeStringToMinutes, formatHours, calculateShiftDurations } from "@/lib/attendance";
+import { calculateSessionDuration, determineShift, ShiftSchedule as LibShiftSchedule, buildSchedule, normalizeTimeString, timeStringToMinutes, formatHours, calculateShiftDurations, calculateHoursWithinOfficialTime, isLate } from "@/lib/attendance";
+import { supabase } from "@/lib/supabaseClient";
 
 // --- Types ---
 
@@ -68,17 +69,23 @@ type AdminAttendanceLog = {
   photourl?: string | null;
   status?: string | null;
   validated_by?: string | null;
+  rendered_hours?: number | null;
+  validated_hours?: number | null;
+  is_late?: boolean;
+  late_minutes?: number;
+  official_time_in?: string | null;
+  official_time_out?: string | null;
 };
 
 function getLogStatus(entry?: { status?: string | null } | null): "Pending" | "Approved" | "Rejected" {
-  if (!entry || !entry.status) return "Pending";
-  if (entry.status === "Approved") return "Approved";
-  if (entry.status === "Rejected") return "Rejected";
+  if (!entry || !entry.status || entry.status === "RAW") return "Pending";
+  if (entry.status === "Approved" || entry.status === "VALIDATED" || entry.status === "OFFICIAL" || entry.status === "ADJUSTED") return "Approved";
+  if (entry.status === "Rejected" || entry.status === "REJECTED") return "Rejected";
   return "Pending";
 }
 
 function formatLogStatusLabel(entry: { status?: string | null; validated_by?: string | null }): string {
-  if (entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") return "AUTO TIME OUT";
+  if (entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") return "No Time-Out";
   const status = getLogStatus(entry);
   if (status === "Approved") return "Validated";
   if (status === "Rejected") return "Unvalidated";
@@ -144,6 +151,22 @@ export function SuperAdminHeader() {
             >
               Log Out
             </button>
+            <button
+              onClick={async () => {
+                if (!confirm("This will freeze all historical attendance hours based on the schedule at the time of log. This is a one-time operation to prevent past records from changing when schedules are updated. Continue?")) return;
+                try {
+                  const res = await fetch("/api/admin/backfill-hours");
+                  const json = await res.json();
+                  alert(json.message || "Process started. Check console for details.");
+                } catch (e) {
+                  alert("Error: " + (e instanceof Error ? e.message : "Unknown error"));
+                }
+              }}
+              className="hidden sm:inline-flex items-center justify-center rounded-full bg-red-500/20 hover:bg-red-500/30 text-white font-semibold px-3 py-1 md:px-4 md:py-1.5 text-sm transition-colors border border-white/20"
+              title="Run this once to freeze historical attendance hours"
+            >
+              Fix History
+            </button>
           </div>
         </div>
         <div className="mt-4 md:mt-8 hidden md:flex justify-center gap-6 overflow-x-auto pb-2">
@@ -173,7 +196,14 @@ export function SuperAdminHeader() {
 export function EditTimeEntryModal({ entry, studentName, onClose, onSave }: { entry: any, studentName?: string, onClose: () => void, onSave: () => void }) {
   const [ts, setTs] = useState<string>(entry.ts ? new Date(entry.ts).toISOString().slice(0, 16) : "");
   const [type, setType] = useState<string>(entry.type);
-  const [status, setStatus] = useState<string>(entry.status || "Pending");
+  const [status, setStatus] = useState<string>(() => {
+      if (entry.status) return entry.status;
+      // Auto-select 'Official' for system auto-timeouts to ensure they show up as "Official Time-Out" for students
+      if (entry.validated_by === 'SYSTEM_AUTO_CLOSE' || entry.validated_by === 'AUTO TIME OUT') {
+          return 'Official';
+      }
+      return "Pending";
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -280,6 +310,7 @@ export function EditTimeEntryModal({ entry, studentName, onClose, onSave }: { en
                         <option value="Pending">Pending</option>
                         <option value="Approved">Validated</option>
                         <option value="Rejected">Unvalidated</option>
+                        <option value="Official">Official (System Adjustment)</option>
                     </select>
                 </div>
                 <div className="flex justify-end gap-3 mt-8">
@@ -322,6 +353,19 @@ export function TimeEntryView() {
   const [sectionFilter, setSectionFilter] = useState("");
   const [availableCourses, setAvailableCourses] = useState<Course[]>([]);
   const [availableSections, setAvailableSections] = useState<Section[]>([]);
+  const [studentSchedules, setStudentSchedules] = useState<Record<string, any>>({});
+
+  // Fetch student schedules
+  useEffect(() => {
+    fetch("/api/student-schedules")
+      .then(res => res.json())
+      .then(data => {
+        if (data.schedules) {
+          setStudentSchedules(data.schedules);
+        }
+      })
+      .catch(console.error);
+  }, []);
 
   // Fetch metadata for filters
   useEffect(() => {
@@ -438,16 +482,13 @@ export function TimeEntryView() {
     setLoading(true);
     setError(null);
     try {
-      console.log("Fetching logs for:", student.idnumber);
       const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(student.idnumber.trim())}&limit=200`, {
         cache: "no-store",
         headers: { "Pragma": "no-cache" }
       });
       const json = await res.json();
-      console.log("Logs response:", json);
       if (!res.ok) throw new Error(json.error || "Failed to fetch attendance");
       const entries = Array.isArray(json.entries) ? json.entries : [];
-      console.log("Entries count:", entries.length);
       setLogs(
         entries.map((e: any) => ({
           id: e.id,
@@ -457,6 +498,8 @@ export function TimeEntryView() {
           photourl: e.photourl,
           status: e.status,
           validated_by: e.validated_by,
+          official_time_in: e.official_time_in,
+          official_time_out: e.official_time_out,
         }))
       );
     } catch (e) {
@@ -466,6 +509,28 @@ export function TimeEntryView() {
       setLoading(false);
     }
   }, []);
+
+  // Real-time subscription for attendance changes
+  useEffect(() => {
+    if (!selectedStudent || !supabase) return;
+
+    const channel = supabase
+      .channel(`superadmin-attendance-${selectedStudent.idnumber}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance' },
+        () => {
+             fetchStudentLogs(selectedStudent);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      if (supabase) {
+        supabase.removeChannel(channel);
+      }
+    };
+  }, [selectedStudent, fetchStudentLogs]);
 
   const onSelectStudent = (student: User) => {
     setSelectedStudent(student);
@@ -486,7 +551,6 @@ export function TimeEntryView() {
 
   const processedDays = useMemo(() => {
     if (!selectedStudent) return [];
-    console.log("Processing days for logs:", logs.length);
     const grouped = new Map<string, { date: Date; logs: AdminAttendanceLog[] }>();
     logs.forEach((log) => {
       const d = new Date(Number(log.ts));
@@ -495,10 +559,13 @@ export function TimeEntryView() {
       grouped.get(key)!.logs.push(log);
     });
 
-    return Array.from(grouped.values())
+    let totalMsAll = 0;
+    let totalValidatedMsAll = 0;
+
+    const results = Array.from(grouped.values())
       .sort((a, b) => b.date.getTime() - a.date.getTime())
       .map((day) => {
-        // Deduplicate logs to prevent double-counting
+        // Deduplicate logs
         const uniqueMap = new Map<string, AdminAttendanceLog>();
         day.logs.forEach(l => {
             const key = l.id ? String(l.id) : `${l.ts}-${l.type}`;
@@ -507,27 +574,63 @@ export function TimeEntryView() {
         
         const sorted = Array.from(uniqueMap.values()).sort((a, b) => a.ts - b.ts);
         
-        // Filter out OT Auth logs if present (though usually separate table)
+        // Filter out OT Auth logs if present
         const processingLogs = sorted.filter(l => !l.photourl?.startsWith("OT_AUTH:") && l.status !== "Rejected");
 
         const baseDate = new Date(day.date);
         baseDate.setHours(0, 0, 0, 0);
 
-        const src = schedule;
+        // Determine schedule source: specific student schedule > global schedule
+        let src = schedule;
+        const studentId = selectedStudent?.idnumber.trim();
+        
+        // DEBUG: Capture schedule info for UI display
+        let debugInfo: any = {
+            studentId,
+            hasSpecificSchedule: false,
+            globalSchedule: schedule,
+            specificSchedule: null as any,
+            appliedSrc: null as any,
+            availableKeysCount: Object.keys(studentSchedules).length,
+            availableKeysSample: Object.keys(studentSchedules).slice(0, 5)
+        };
+
+        // Case-insensitive lookup
+        const scheduleKey = Object.keys(studentSchedules).find(k => k.toLowerCase() === studentId?.toLowerCase());
+
+        if (selectedStudent && studentId && scheduleKey) {
+            const s = studentSchedules[scheduleKey];
+            debugInfo.hasSpecificSchedule = true;
+            debugInfo.specificSchedule = s;
+            
+            // Override if specific AM or PM schedule exists
+            if (s.am_in || s.pm_in) {
+                 src = {
+                    amIn: s.am_in || (schedule?.amIn || "08:00"),
+                    amOut: s.am_out || (schedule?.amOut || "12:00"),
+                    pmIn: s.pm_in || (schedule?.pmIn || "13:00"),
+                    pmOut: s.pm_out || (schedule?.pmOut || "17:00"),
+                    otIn: s.ot_in || schedule?.otIn,
+                    otOut: s.ot_out || schedule?.otOut
+                 };
+            }
+        }
+        
+        debugInfo.appliedSrc = src;
         
         // Use centralized buildSchedule
         let dailySchedule: LibShiftSchedule;
 
-        if (src && typeof src.amIn === "string") {
+        if (src && (src.amIn || src.pmIn)) {
             dailySchedule = buildSchedule(
                 day.date,
                 {
-                    amIn: src.amIn,
-                    amOut: src.amOut,
-                    pmIn: src.pmIn,
-                    pmOut: src.pmOut,
-                    otIn: src.otIn,
-                    otOut: src.otOut
+                    amIn: src.amIn || "08:00",
+                    amOut: src.amOut || "12:00",
+                    pmIn: src.pmIn || "13:00",
+                    pmOut: src.pmOut || "17:00",
+                    otIn: src.otIn || "17:00",
+                    otOut: src.otOut || "18:00"
                 }
             );
         } else {
@@ -535,117 +638,242 @@ export function TimeEntryView() {
              dailySchedule = buildSchedule(
                 day.date,
                 {
-                    amIn: "09:00",
+                    amIn: "08:00",
                     amOut: "12:00",
                     pmIn: "13:00",
                     pmOut: "17:00",
                     otIn: "",
                     otOut: ""
                 }
-             );
+            );
         }
 
-        type Session = { in: AdminAttendanceLog; out: AdminAttendanceLog | null; shift: 'am' | 'pm' | 'ot' };
-        const sessions: Session[] = [];
-        let currentIn: AdminAttendanceLog | null = null;
+        // DEBUG: Capture computed schedule details
+        if (dailySchedule) {
+            debugInfo['amWindow'] = `${new Date(dailySchedule.amIn).toLocaleTimeString()} - ${new Date(dailySchedule.amOut).toLocaleTimeString()}`;
+            debugInfo['pmWindow'] = `${new Date(dailySchedule.pmIn).toLocaleTimeString()} - ${new Date(dailySchedule.pmOut).toLocaleTimeString()}`;
+            debugInfo['computedSchedule'] = {
+                amIn: new Date(dailySchedule.amIn).toLocaleTimeString(),
+                amOut: new Date(dailySchedule.amOut).toLocaleTimeString(),
+                pmIn: new Date(dailySchedule.pmIn).toLocaleTimeString(),
+                pmOut: new Date(dailySchedule.pmOut).toLocaleTimeString()
+            };
+        } else {
+             debugInfo['amWindow'] = 'N/A (Schedule Null)';
+             debugInfo['pmWindow'] = 'N/A';
+        }
+
+        // --- SMART PAIRING LOGIC (COPIED FROM STUDENT PORTAL) ---
+        const usedIds = new Set<string>();
+        const isAvailable = (l: AdminAttendanceLog) => {
+             const key = l.id ? String(l.id) : `${l.ts}-${l.type}`;
+             return !usedIds.has(key);
+        };
+        const markUsed = (l: AdminAttendanceLog) => {
+             const key = l.id ? String(l.id) : `${l.ts}-${l.type}`;
+             usedIds.add(key);
+        };
+
+        const sortedLogs = [...processingLogs].sort((a, b) => a.ts - b.ts);
+
+        let s1: AdminAttendanceLog | null = null;
+        let s3: AdminAttendanceLog | null = null;
+        let s5: AdminAttendanceLog | null = null;
+
+        const isInWindow = (ts: number, start: number | undefined, end: number | undefined) => {
+             if (!start || !end) return false;
+             // 30 min buffer before start, up to end
+             return ts >= (start - 30 * 60000) && ts <= end;
+        };
+
+        // 1. Assign INs to Slots (Greedy by Window)
+        sortedLogs.filter(l => (l.type || "").toLowerCase() === 'in' && isAvailable(l)).forEach(l => {
+             if (!s1 && isInWindow(l.ts, dailySchedule.amIn, dailySchedule.amOut)) {
+                 s1 = l; markUsed(l); return;
+             }
+             if (!s3 && isInWindow(l.ts, dailySchedule.pmIn, dailySchedule.pmOut)) {
+                 s3 = l; markUsed(l); return;
+             }
+             if (!s5 && isInWindow(l.ts, dailySchedule.otStart, dailySchedule.otEnd)) {
+                 s5 = l; markUsed(l); return;
+             }
+        });
 
         const today = new Date();
         today.setHours(0,0,0,0);
-        const isPastDate = day.date < today;
+        const isPastDate = baseDate < today;
 
         const createVirtualOut = (inEntry: AdminAttendanceLog, shift: 'am' | 'pm' | 'ot'): AdminAttendanceLog => {
-            const outTs = shift === 'am' ? dailySchedule.amOut : (shift === 'pm' ? dailySchedule.pmOut : dailySchedule.otEnd);
-            // Ensure outTs > inEntry.ts
-            const finalOutTs = outTs > inEntry.ts ? outTs : inEntry.ts + 60000;
-            
-            return {
-                id: inEntry.id ? -inEntry.id : -Math.floor(Math.random() * 1000000),
-                idnumber: inEntry.idnumber,
-                type: 'out',
-                ts: finalOutTs,
-                photourl: '',
-                validated_by: 'AUTO TIME OUT',
-                status: 'Pending'
-            } as AdminAttendanceLog;
+             const outTs = shift === 'am' ? dailySchedule.amOut : (shift === 'pm' ? dailySchedule.pmOut : dailySchedule.otEnd);
+             const finalOutTs = outTs > inEntry.ts ? outTs : inEntry.ts + 60000;
+             
+             return {
+                  id: inEntry.id ? -Math.abs(Number(inEntry.id)) : -Math.floor(Math.random() * 1000000),
+                  idnumber: inEntry.idnumber,
+                  type: 'out',
+                  ts: finalOutTs,
+                  photourl: '',
+                  validated_by: 'AUTO TIME OUT',
+                  status: 'Pending'
+             } as AdminAttendanceLog;
         };
 
-        for (const log of processingLogs) {
-            if (log.type === "in") {
-                if (currentIn) {
-                    // Previous session incomplete
-                    const shift = determineShift(currentIn.ts, dailySchedule);
-                    let outEntry: AdminAttendanceLog | null = null;
-                    if (isPastDate) {
-                        outEntry = createVirtualOut(currentIn, shift);
-                    }
-                    sessions.push({ in: currentIn, out: outEntry, shift });
-                }
-                currentIn = log;
-            } else if (log.type === "out") {
-                if (currentIn) {
-                    // Normal Session
-                    sessions.push({ in: currentIn, out: log, shift: determineShift(currentIn.ts, dailySchedule) });
-                    currentIn = null;
-                }
+        // 2. Find OUTs for each IN
+        let s2: AdminAttendanceLog | null = null;
+        if (s1) {
+            const searchEnd = s3 ? (s3 as AdminAttendanceLog).ts : (new Date(baseDate).setHours(23, 59, 59, 999));
+            const candidates = sortedLogs.filter(l => (l.type || "").toLowerCase() === "out" && l.ts > (s1 as AdminAttendanceLog).ts && l.ts < searchEnd && isAvailable(l));
+            const candidate = candidates.pop() || null; // Take the latest valid out
+            if (candidate) {
+                s2 = candidate;
+                markUsed(s2);
+            } else if (isPastDate) {
+                s2 = createVirtualOut(s1 as AdminAttendanceLog, 'am');
             }
         }
-        if (currentIn) {
-            const shift = determineShift(currentIn.ts, dailySchedule);
-            let outEntry: AdminAttendanceLog | null = null;
-            if (isPastDate) {
-                outEntry = createVirtualOut(currentIn, shift);
+
+        let s4: AdminAttendanceLog | null = null;
+        if (s3) {
+            const searchEnd = s5 ? (s5 as AdminAttendanceLog).ts : (new Date(baseDate).setHours(23, 59, 59, 999));
+            const candidates = sortedLogs.filter(l => (l.type || "").toLowerCase() === "out" && l.ts > (s3 as AdminAttendanceLog).ts && l.ts < searchEnd && isAvailable(l));
+            s4 = candidates.pop() || null;
+            if (s4) {
+                markUsed(s4);
+            } else if (isPastDate) {
+                s4 = createVirtualOut(s3 as AdminAttendanceLog, 'pm');
             }
-            sessions.push({ in: currentIn, out: outEntry, shift });
         }
 
-        // Calculate Hours (Strict Shift Isolation)
-        const calculateHours = (filterStatus?: 'Approved' | 'Pending' | 'Rejected') => {
-            let total = 0;
-            sessions.forEach(session => {
-                if (!session.out) return;
+        let s6: AdminAttendanceLog | null = null;
+        if (s5) {
+            const candidates = sortedLogs.filter(l => (l.type || "").toLowerCase() === "out" && l.ts > (s5 as AdminAttendanceLog).ts && isAvailable(l));
+            s6 = candidates.pop() || null;
+            if (s6) {
+                markUsed(s6);
+            } else if (isPastDate) {
+                s6 = createVirtualOut(s5 as AdminAttendanceLog, 'ot');
+            }
+        }
 
-                const inStatus = getLogStatus(session.in);
-                const outStatus = getLogStatus(session.out);
-                const isApproved = inStatus === "Approved" && outStatus === "Approved";
+        // 3. Calculate Hours (Golden Rule)
+        const calc = (inLog: AdminAttendanceLog | null, outLog: AdminAttendanceLog | null, shift: 'am' | 'pm' | 'ot', requireApproved: boolean) => {
+            if (!inLog || !outLog) return 0;
+            if (requireApproved) {
+                const inStatus = getLogStatus(inLog);
+                const outStatus = getLogStatus(outLog);
+                // In Admin view, we calculate validated hours based on approval
+                const inOk = inStatus === "Approved";
+                const outOk = outStatus === "Approved";
+                if (!inOk || !outOk) return 0;
+            }
 
-                if (filterStatus === "Approved" && !isApproved) return;
-                if (filterStatus === "Pending" && isApproved) return;
-                if (filterStatus === "Rejected") return; 
+            // Priority: Validated Hours (Ledger - Source of Truth)
+            if (outLog.validated_hours !== undefined && outLog.validated_hours !== null && Number(outLog.validated_hours) >= 0) {
+                if (shift === 'pm' && outLog.id === s2?.id) return 0;
+                if (shift === 'ot' && (outLog.id === s2?.id || outLog.id === s4?.id)) return 0;
+                return Number(outLog.validated_hours) * 3600000;
+            }
 
-                // Calculate duration against all shifts (Strict Shift Isolation)
-                const { am, pm, ot } = calculateShiftDurations(session.in.ts, session.out.ts, dailySchedule);
+            // Priority: Frozen rendered_hours (History)
+            if (outLog.rendered_hours !== undefined && outLog.rendered_hours !== null && Number(outLog.rendered_hours) >= 0) {
+                // Avoid double counting if s4/s6 is same as s2/s4 (though unlikely with smart pairing)
+                if (shift === 'pm' && outLog.id === s2?.id) return 0;
+                if (shift === 'ot' && (outLog.id === s2?.id || outLog.id === s4?.id)) return 0;
+                return Number(outLog.rendered_hours) * 3600000;
+            }
 
-                total += am + pm + ot;
-            });
-            return total;
+            // Priority: Use Snapshot Rules if available (Ledger Logic)
+            // This ensures historical calculations remain consistent even if global schedule changes.
+            if (outLog.official_time_in && outLog.official_time_out) {
+                 try {
+                     const dateBase = new Date(inLog.ts);
+                     
+                     const parseTime = (t: string) => {
+                         const [h, m, s] = t.split(':').map(Number);
+                         const d = new Date(dateBase);
+                         d.setHours(h, m, s || 0, 0);
+                         return d;
+                     };
+
+                     const offIn = parseTime(outLog.official_time_in);
+                     const offOut = parseTime(outLog.official_time_out);
+
+                     // Handle cross-day shifts (e.g. night shift)
+                     if (offOut.getTime() < offIn.getTime()) {
+                         offOut.setDate(offOut.getDate() + 1);
+                     }
+
+                     return calculateHoursWithinOfficialTime(
+                         new Date(inLog.ts), 
+                         new Date(outLog.ts), 
+                         offIn, 
+                         offOut
+                     );
+                 } catch (e) {
+                     console.error("Error calculating from snapshot", e);
+                 }
+            }
+
+            // Fallback: Live Schedule
+            let oInTs: number = 0;
+            let oOutTs: number = 0;
+
+            if (shift === 'am') {
+                oInTs = dailySchedule.amIn;
+                oOutTs = dailySchedule.amOut;
+            } else if (shift === 'pm') {
+                oInTs = dailySchedule.pmIn;
+                oOutTs = dailySchedule.pmOut;
+            } else { // ot
+                oInTs = dailySchedule.otStart;
+                oOutTs = dailySchedule.otEnd;
+            }
+
+            // Safety check
+            if (!oInTs || !oOutTs) return 0;
+
+            return calculateHoursWithinOfficialTime(
+                new Date(inLog.ts), 
+                new Date(outLog.ts), 
+                new Date(oInTs), 
+                new Date(oOutTs)
+            );
         };
 
-        const total = calculateHours();
-        const validatedTotal = calculateHours('Approved');
-        const pendingTotal = calculateHours('Pending');
+        let total = 0;
+        let validatedTotal = 0;
+        
+        total += calc(s1, s2, 'am', false);
+        total += calc(s3, s4, 'pm', false);
+        total += calc(s5, s6, 'ot', false);
 
-        const mapSessionToSlots = (shiftSessions: Session[]) => {
-            if (shiftSessions.length === 0) return { in: null, out: null };
-            const firstSession = shiftSessions[0];
-            const lastSession = shiftSessions[shiftSessions.length - 1];
-            return { in: firstSession.in, out: lastSession.out };
-        };
+        validatedTotal += calc(s1, s2, 'am', true);
+        validatedTotal += calc(s3, s4, 'pm', true);
+        validatedTotal += calc(s5, s6, 'ot', true);
+        
+        const pendingTotal = total - validatedTotal;
 
-        const amSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'am'));
-        const pmSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'pm'));
-        const otSlots = mapSessionToSlots(sessions.filter(s => s.shift === 'ot'));
+        totalMsAll += total;
+        totalValidatedMsAll += validatedTotal;
+
+        // Check for Lates
+        if (s1 && isLate((s1 as AdminAttendanceLog).ts, dailySchedule.amIn)) { (s1 as AdminAttendanceLog).is_late = true; (s1 as AdminAttendanceLog).late_minutes = Math.floor(((s1 as AdminAttendanceLog).ts - dailySchedule.amIn)/60000); }
+        if (s3 && isLate((s3 as AdminAttendanceLog).ts, dailySchedule.pmIn)) { (s3 as AdminAttendanceLog).is_late = true; (s3 as AdminAttendanceLog).late_minutes = Math.floor(((s3 as AdminAttendanceLog).ts - dailySchedule.pmIn)/60000); }
 
         return { 
             date: day.date, 
-            s1: amSlots.in, s2: amSlots.out, 
-            s3: pmSlots.in, s4: pmSlots.out, 
-            s5: otSlots.in, s6: otSlots.out, 
+            s1, s2, 
+            s3, s4, 
+            s5, s6, 
             total, 
             validatedTotal,
-            pendingTotal
+            pendingTotal,
+            debugInfo
         };
       });
-  }, [logs, schedule, selectedStudent]);
+      
+      return results;
+  }, [logs, schedule, selectedStudent, studentSchedules]);
 
   const totalHoursMs = useMemo(
     () => processedDays.reduce((sum, day) => sum + day.total, 0),
@@ -661,7 +889,7 @@ export function TimeEntryView() {
     () => processedDays.reduce((sum, day) => sum + (day.pendingTotal || 0), 0),
     [processedDays]
   );
-
+  
   const statusCounts = useMemo(() => {
     const counts = { Pending: 0, Approved: 0, Rejected: 0 };
     logs.forEach(log => {
@@ -671,19 +899,22 @@ export function TimeEntryView() {
     return counts;
   }, [logs]);
 
+  // Debug Info Display
+  const debugData = processedDays.length > 0 ? (processedDays[0] as any).debugInfo : null;
+
   if (!selectedStudent) {
     return (
       <div className="space-y-6 animate-in fade-in duration-500">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-[#1F2937]">Time Entry Management</h1>
-            <p className="text-sm text-gray-500">
-              Select a student to view and edit detailed attendance logs.
-            </p>
+             <p className="text-sm text-gray-500">
+               Select a student to view and edit detailed attendance logs.
+             </p>
           </div>
         </div>
 
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 sm:p-6 space-y-4">
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 space-y-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <div className="relative flex-1">
               <input
@@ -851,6 +1082,7 @@ export function TimeEntryView() {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
+
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <button
@@ -919,7 +1151,7 @@ export function TimeEntryView() {
       )}
 
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+        <div className="px-3 py-1 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
           <div>
             <h2 className="text-base sm:text-lg font-bold text-gray-900">
               Attendance History
@@ -936,7 +1168,7 @@ export function TimeEntryView() {
           </div>
         </div>
 
-        <div className="p-4 sm:p-6">
+        <div className="p-2">
           {loading && processedDays.length === 0 ? (
             <div className="flex items-center justify-center h-40 text-gray-500 text-sm">
               Loading attendance logs...
@@ -962,56 +1194,27 @@ export function TimeEntryView() {
             </div>
           ) : (
             <>
-              {/* Account Monitoring */}
-              <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3 border-b border-gray-100 bg-gray-50 mb-6 rounded-xl">
-                <div className="flex flex-col gap-1">
-                  <div className="text-sm font-semibold text-gray-800">Account Monitoring</div>
-                  <div className="flex flex-wrap gap-2 text-[11px]">
-                    <span className="px-3 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-700 font-medium">
-                      Pending: {statusCounts.Pending}
-                    </span>
-                    <span className="px-3 py-1 rounded-full border border-green-100 bg-green-50 text-green-700 font-medium">
-                      Validated: {statusCounts.Approved}
-                    </span>
-                    <span className="px-3 py-1 rounded-full border border-red-100 bg-red-50 text-red-700 font-medium">
-                      Unvalidated: {statusCounts.Rejected}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
               {/* Summary Cards */}
-              <div className="mb-6 grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="bg-blue-50 p-4 rounded-2xl border border-blue-100 flex items-center justify-between shadow-sm">
+              <div className="mb-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="bg-blue-50 p-3 rounded-2xl border border-blue-100 flex items-center justify-between shadow-sm">
                     <div>
                         <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">Total Tracked</p>
-                        <p className="text-2xl font-bold text-blue-900">{formatHours(totalHoursMs)}</p>
-                        <p className="text-[11px] text-gray-600 mt-1">Pending + Validated</p>
+                        <p className="text-xl font-bold text-blue-900">{formatHours(totalHoursMs)}</p>
+                        <p className="text-[10px] text-gray-600 mt-1">Pending + Validated</p>
                     </div>
-                    <div className="p-2 bg-blue-100 rounded-xl">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-600"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                    </div>
-                </div>
-
-                <div className="bg-orange-50 p-4 rounded-2xl border border-orange-100 flex items-center justify-between shadow-sm">
-                    <div>
-                        <p className="text-xs font-bold text-orange-600 uppercase tracking-wider mb-1">Pending Validation</p>
-                        <p className="text-2xl font-bold text-orange-900">{formatHours(totalPendingHoursMs)}</p>
-                        <p className="text-[11px] text-gray-600 mt-1">Requires Approval</p>
-                    </div>
-                    <div className="p-2 bg-orange-100 rounded-xl">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-orange-600"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+                    <div className="p-1.5 bg-blue-100 rounded-xl">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-600"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                     </div>
                 </div>
 
-                <div className="bg-green-50 p-4 rounded-2xl border border-green-100 flex items-center justify-between shadow-sm">
+                <div className="bg-green-50 p-3 rounded-2xl border border-green-100 flex items-center justify-between shadow-sm">
                     <div>
                         <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-1">Total Validated</p>
-                        <p className="text-2xl font-bold text-green-900">{formatHours(totalValidatedHoursMs)}</p>
-                        <p className="text-[11px] text-gray-600 mt-1">Approved Hours</p>
+                        <p className="text-xl font-bold text-green-900">{formatHours(totalValidatedHoursMs)}</p>
+                        <p className="text-[10px] text-gray-600 mt-1">Approved Hours</p>
                     </div>
-                    <div className="p-2 bg-green-100 rounded-xl">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-600"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m9 15 2 2 4-4"/></svg>
+                    <div className="p-1.5 bg-green-100 rounded-xl">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-600"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m9 15 2 2 4-4"/></svg>
                     </div>
                 </div>
               </div>
@@ -1022,52 +1225,52 @@ export function TimeEntryView() {
                     <tr>
                       <th
                         rowSpan={2}
-                        className="px-4 py-3 border-r border-gray-100 min-w-[130px] text-left align-bottom pb-4"
+                        className="px-2 py-1 border-r border-gray-100 min-w-[130px] text-left align-bottom pb-2"
                       >
                         Date
                       </th>
                       <th
                         colSpan={2}
-                        className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50"
+                        className="px-1 py-1 text-center border-r border-gray-100 border-b bg-gray-100/50"
                       >
                         Morning
                       </th>
                       <th
                         colSpan={2}
-                        className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50"
+                        className="px-1 py-1 text-center border-r border-gray-100 border-b bg-gray-100/50"
                       >
                         Afternoon
                       </th>
                       <th
                         colSpan={2}
-                        className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50"
+                        className="px-1 py-1 text-center border-r border-gray-100 border-b bg-gray-100/50"
                       >
                         Overtime
                       </th>
                       <th
                         rowSpan={2}
-                        className="px-4 py-3 text-right align-bottom pb-4"
+                        className="px-2 py-1 text-right align-bottom pb-2"
                       >
                         Total Hours
                       </th>
                     </tr>
                     <tr>
-                      <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
+                      <th className="px-1 py-1 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
                         Time In
                       </th>
-                      <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
+                      <th className="px-1 py-1 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
                         Time Out
                       </th>
-                      <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
+                      <th className="px-1 py-1 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
                         Time In
                       </th>
-                      <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
+                      <th className="px-1 py-1 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
                         Time Out
                       </th>
-                      <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
+                      <th className="px-1 py-1 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
                         Time In
                       </th>
-                      <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
+                      <th className="px-1 py-1 text-center border-r border-gray-100 min-w-[90px] text-[10px] tracking-wider">
                         Time Out
                       </th>
                     </tr>
@@ -1075,7 +1278,7 @@ export function TimeEntryView() {
                   <tbody className="divide-y divide-gray-100">
                     {processedDays.map((day, i) => (
                       <tr key={i} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-4 py-3 font-medium text-gray-900 whitespace-nowrap border-r border-gray-100">
+                        <td className="px-2 py-1 font-medium text-gray-900 whitespace-nowrap border-r border-gray-100">
                           {day.date.toLocaleDateString(undefined, {
                             weekday: "short",
                             month: "short",
@@ -1089,19 +1292,26 @@ export function TimeEntryView() {
                             return (
                               <td
                                 key={idx}
-                                className={`px-1.5 py-2 border-r border-gray-100 text-center min-w-[110px] ${isAutoTimeOut ? 'align-middle' : 'align-top'}`}
+                                className={`px-1 py-1 border-r border-gray-100 text-center min-w-[110px] ${isAutoTimeOut ? 'align-middle' : 'align-top'}`}
                               >
                                 {slot ? (
-                                  <div className="flex flex-col items-center gap-1.5">
-                                    {isAutoTimeOut ? (
-                                      <span className="text-[10px] font-bold text-red-500 py-2">AUTO TIME OUT</span>
-                                    ) : (
-                                      <span className="text-[11px] font-medium text-gray-800">
-                                        {formatTime(slot.ts)}
-                                      </span>
-                                    )}
-                                    {slot.photourl && !isAutoTimeOut && (
-                                      <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100">
+                                      <div className="flex flex-col items-center gap-1">
+                                        {isAutoTimeOut ? (
+                                          <span className="text-[10px] font-bold text-orange-500 py-1">No Time-Out</span>
+                                        ) : (
+                                            <div className="flex flex-col items-center justify-center w-full">
+                                                <div className={`text-[11px] font-medium whitespace-nowrap text-center ${slot.is_late ? 'text-red-600 font-bold' : 'text-gray-900'}`}>
+                                                    {formatTime(slot.ts)}
+                                                </div>
+                                                {slot.is_late ? (
+                                                    <div className="text-[7px] font-bold text-red-500 leading-none mt-0.5 text-center">LATE</div>
+                                                ) : (
+                                                    <div className="text-[7px] font-bold text-transparent leading-none mt-0.5 invisible text-center">LATE</div>
+                                                )}
+                                            </div>
+                                        )}
+                                        {slot.photourl && !isAutoTimeOut && (
+                                      <div className="relative w-12 h-12 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100">
                                         <img
                                           src={slot.photourl}
                                           alt="Log"
@@ -1126,13 +1336,13 @@ export function TimeEntryView() {
                                     </button>
                                   </div>
                                 ) : (
-                                  <span className="text-gray-300 block py-4">-</span>
+                                  <span className="text-gray-300 block py-1">-</span>
                                 )}
                               </td>
                             );
                           }
                         )}
-                        <td className="px-6 py-4 text-right font-bold text-gray-900">
+                        <td className="px-2 py-1 text-right font-bold text-gray-900">
                           {formatHours(day.total)}
                         </td>
                       </tr>
@@ -1180,11 +1390,18 @@ export function TimeEntryView() {
                                     {slot ? (
                                       <>
                                         {isAutoTimeOut ? (
-                                          <span className="text-[10px] font-bold text-red-500 py-2">AUTO TIME OUT</span>
+                                          <span className="text-[10px] font-bold text-orange-500 py-2">No Time-Out</span>
                                         ) : (
-                                          <span className="text-[11px] font-medium text-gray-800">
-                                            {formatTime(slot.ts)}
-                                          </span>
+                                          <div className="flex flex-col items-center justify-center w-full">
+                                            <div className={`text-[11px] font-medium whitespace-nowrap text-center ${slot.is_late ? 'text-red-600 font-bold' : 'text-gray-900'}`}>
+                                              {formatTime(slot.ts)}
+                                            </div>
+                                            {slot.is_late ? (
+                                                <div className="text-[7px] font-bold text-red-500 leading-none mt-0.5 text-center">LATE</div>
+                                            ) : (
+                                                <div className="text-[7px] font-bold text-transparent leading-none mt-0.5 invisible text-center">LATE</div>
+                                            )}
+                                          </div>
                                         )}
                                         {slot.photourl && !isAutoTimeOut && (
                                           <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100">
@@ -1294,31 +1511,31 @@ export function SystemLogsView() {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Actor</th>
-                <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Action</th>
-                <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Target</th>
-                <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Details</th>
-                <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Time</th>
+                <th className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Actor</th>
+                <th className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Action</th>
+                <th className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Target</th>
+                <th className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Details</th>
+                <th className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Time</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
               {loading ? (
-                <tr><td colSpan={5} className="px-6 py-12 text-center text-gray-500">Loading logs...</td></tr>
+                <tr><td colSpan={5} className="px-2 py-4 text-center text-gray-500">Loading logs...</td></tr>
               ) : logs.length === 0 ? (
-                <tr><td colSpan={5} className="px-6 py-12 text-center text-gray-500">No system logs found</td></tr>
+                <tr><td colSpan={5} className="px-2 py-4 text-center text-gray-500">No system logs found</td></tr>
               ) : (
                 logs.map((log) => (
                   <tr key={log.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                    <td className="px-2 py-1 whitespace-nowrap text-sm font-medium text-gray-900">
                       {log.actor_idnumber}
                       <span className="block text-xs text-gray-500 font-normal">{log.actor_role}</span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{log.action}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{log.target_table} #{log.target_id}</td>
-                    <td className="px-6 py-4 text-sm text-gray-500 max-w-xs truncate" title={JSON.stringify(log.reason || { before: log.before_data, after: log.after_data })}>
+                    <td className="px-2 py-1 whitespace-nowrap text-sm text-gray-500">{log.action}</td>
+                    <td className="px-2 py-1 whitespace-nowrap text-sm text-gray-500">{log.target_table} #{log.target_id}</td>
+                    <td className="px-2 py-1 text-sm text-gray-500 max-w-xs truncate" title={JSON.stringify(log.reason || { before: log.before_data, after: log.after_data })}>
                        {log.reason || JSON.stringify(log.after_data)}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    <td className="px-2 py-1 whitespace-nowrap text-sm text-gray-500">
                       {new Date(log.created_at).toLocaleString()}
                     </td>
                   </tr>
@@ -1440,6 +1657,7 @@ export function AddUserForm({
 }) {
   const [form, setForm] = useState<{
     idnumber: string;
+    email: string;
     role: typeof roles[number];
     password: string;
     firstname?: string;
@@ -1454,6 +1672,7 @@ export function AddUserForm({
     supervisorid?: string;
   }>({
     idnumber: "",
+    email: "",
     role: "student",
     password: "",
     firstname: "",
@@ -1483,10 +1702,16 @@ export function AddUserForm({
   }, [availableCourses, availableSections]);
 
   const submit = async () => {
-    if (!form.idnumber || !form.password || !form.firstname || !form.lastname) {
-      setError("First Name, Last Name, ID Number, and Password are required");
+    if (!form.idnumber || !form.email || !form.password || !form.firstname || !form.lastname) {
+      setError("First Name, Last Name, ID Number, Email, and Password are required");
       return;
     }
+    
+    if (form.role === 'student' && (form.sectionIds.length === 0 || form.courseIds.length === 0)) {
+      setError("Please select a Course & Section.");
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -1545,6 +1770,18 @@ export function AddUserForm({
                />
             </div>
 
+            {/* Email */}
+            <div className="space-y-1">
+               <label className="block text-sm font-bold text-gray-700">Email</label>
+               <input
+                  type="email"
+                  value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })}
+                  className="w-full px-4 py-3 rounded-lg bg-gray-50 border border-gray-200 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                  placeholder="e.g. user@school.edu"
+               />
+            </div>
+
             {/* Password */}
             <div className="space-y-1">
                <label className="block text-sm font-bold text-gray-700">Password</label>
@@ -1578,8 +1815,8 @@ export function AddUserForm({
                />
             </div>
 
-            {/* Course & Section (Student, Instructor, Supervisor) */}
-            {["student", "instructor", "supervisor"].includes(form.role) && (
+            {/* Course & Section (Student) - Single Select */}
+            {form.role === "student" && (
                <div className="space-y-1">
                   <label className="block text-sm font-bold text-gray-700">Course & Section</label>
                   <div className="relative">
@@ -1592,7 +1829,7 @@ export function AddUserForm({
                               setForm({ 
                                  ...form, 
                                  sectionIds: [id], 
-                                 courseIds: [s.course_id],
+                                 courseIds: [Number(s.course_id)],
                                  section: s.name,
                                  course: availableCourses.find(c => c.id === s.course_id)?.name || ""
                               });
@@ -1609,6 +1846,48 @@ export function AddUserForm({
                      </select>
                      <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" size={16} />
                   </div>
+               </div>
+            )}
+
+            {/* Supervisor: Company & Location */}
+            {form.role === "supervisor" && (
+               <>
+                  <div className="space-y-1">
+                     <label className="block text-sm font-bold text-gray-700">Company</label>
+                     <input
+                        value={form.company}
+                        onChange={(e) => setForm({ ...form, company: e.target.value })}
+                        className="w-full px-4 py-3 rounded-lg bg-gray-50 border border-gray-200 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                        placeholder="Company name"
+                     />
+                  </div>
+                  <div className="space-y-1">
+                     <label className="block text-sm font-bold text-gray-700">Location</label>
+                     <input
+                        value={form.location}
+                        onChange={(e) => setForm({ ...form, location: e.target.value })}
+                        className="w-full px-4 py-3 rounded-lg bg-gray-50 border border-gray-200 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                        placeholder="Company location"
+                     />
+                  </div>
+               </>
+            )}
+
+            {/* Instructor: Multiple Sections */}
+            {form.role === "instructor" && (
+               <div className="space-y-1">
+                  <label className="block text-sm font-bold text-gray-700">Assigned Sections</label>
+                  <MultiSelect
+                     options={combinedCourseSections}
+                     value={form.sectionIds}
+                     onChange={(ids) => {
+                        // Derive courseIds from selected sectionIds
+                        const selectedSections = availableSections.filter(s => ids.includes(s.id));
+                        const derivedCourseIds = Array.from(new Set(selectedSections.map(s => Number(s.course_id))));
+                        setForm({ ...form, sectionIds: ids, courseIds: derivedCourseIds });
+                     }}
+                     placeholder="Select sections"
+                  />
                </div>
             )}
 
@@ -1726,14 +2005,19 @@ export function EditUserForm({
         firstname: form.firstname,
         middlename: form.middlename,
         lastname: form.lastname,
+        role: user.role, // Include role to ensure correct table update
       };
 
       if (form.password) payload.password = form.password;
 
       // Role specific fields
       if (user.role === "student") {
-        payload.course = form.course;
-        payload.section = form.section;
+        const courseObj = availableCourses.find(c => c.name === form.course);
+        const sectionObj = availableSections.find(s => s.name === form.section && (courseObj ? s.course_id === courseObj.id : true));
+
+        payload.course = courseObj ? courseObj.id : form.course;
+        payload.section = sectionObj ? sectionObj.id : form.section;
+
         // Deployment info for students
         if (form.company) payload.company = form.company;
         if (form.location) payload.location = form.location;
@@ -1746,8 +2030,8 @@ export function EditUserForm({
       }
 
       // Arrays for relationships
-      if (form.courseIds && form.courseIds.length > 0) payload.courseIds = form.courseIds;
-      if (form.sectionIds && form.sectionIds.length > 0) payload.sectionIds = form.sectionIds;
+      if (form.courseIds) payload.courseIds = form.courseIds;
+      if (form.sectionIds) payload.sectionIds = form.sectionIds;
 
       await onSuccess(user.id, payload);
       onClose();
@@ -1960,7 +2244,7 @@ export function UserManagementView({
   availableCourses, 
   availableSections 
 }: { 
-  onDelete: (id: number) => Promise<void>; 
+  onDelete: (id: number, role?: string) => Promise<void>; 
   onEdit: (id: number, updates: any) => Promise<void>; 
   onAdd: (data: any) => Promise<void>;
   availableCourses: Course[]; 
@@ -2031,7 +2315,7 @@ export function UserManagementView({
 
   const handleDelete = async () => {
     if (deletingUser) {
-      await onDelete(deletingUser.id);
+      await onDelete(deletingUser.id, deletingUser.role);
       fetchUsers();
       setDeletingUser(null);
     }
@@ -2039,16 +2323,16 @@ export function UserManagementView({
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div>
-           <h1 className="text-2xl font-bold text-[#1F2937]">Manage Users</h1>
-           <p className="text-sm text-gray-500">View and manage system users</p>
+           <h1 className="text-xl font-bold text-[#1F2937]">Manage Users</h1>
+           <p className="text-xs text-gray-500">View and manage system users</p>
         </div>
         <button 
           onClick={() => setShowAdd(true)}
-          className="flex items-center justify-center gap-2 bg-[#F97316] text-white px-5 py-2.5 rounded-xl hover:bg-[#EA580C] transition-colors font-semibold shadow-sm active:scale-95"
+          className="flex items-center justify-center gap-2 bg-[#F97316] text-white px-4 py-2 rounded-xl hover:bg-[#EA580C] transition-colors font-semibold shadow-sm active:scale-95 text-sm"
         >
-          <Users size={18} />
+          <Users size={16} />
           <span>Add User</span>
         </button>
       </div>
@@ -2066,7 +2350,7 @@ export function UserManagementView({
                            setCourseFilter("");
                            setSectionFilter("");
                        }}
-                       className={`px-6 py-4 text-sm font-bold uppercase tracking-wider whitespace-nowrap border-b-2 transition-colors ${isActive ? 'border-[#F97316] text-[#F97316]' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'}`}
+                       className={`px-4 py-2 text-xs font-bold uppercase tracking-wider whitespace-nowrap border-b-2 transition-colors ${isActive ? 'border-[#F97316] text-[#F97316]' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'}`}
                     >
                        {r === "student" ? "Students" : r.charAt(0).toUpperCase() + r.slice(1) + "s"}
                     </button>
@@ -2075,7 +2359,7 @@ export function UserManagementView({
            </div>
         </div>
 
-        <div className="p-4 bg-gray-50 border-b border-gray-200 flex flex-col md:flex-row gap-4">
+        <div className="p-3 bg-gray-50 border-b border-gray-200 flex flex-col md:flex-row gap-3">
            <div className="relative flex-1">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                  <Search className="text-gray-400" size={18} />
@@ -2115,39 +2399,61 @@ export function UserManagementView({
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">User</th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Details</th>
-                <th scope="col" className="relative px-6 py-3"><span className="sr-only">Actions</span></th>
+                <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">User</th>
+                {filter === 'supervisor' ? (
+                   <>
+                      <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Company</th>
+                      <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Location</th>
+                   </>
+                ) : (
+                   <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">
+                     {filter === 'coordinator' ? 'Assigned Courses' : 
+                      filter === 'instructor' ? 'Assigned Sections' :
+                      'Details'}
+                   </th>
+                )}
+                <th scope="col" className="px-2 py-1 text-right text-xs font-bold text-gray-500 uppercase tracking-wider">Action</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {loading ? (
-                 <tr><td colSpan={3} className="px-6 py-12 text-center text-gray-500">Loading users...</td></tr>
+                 <tr><td colSpan={filter === 'supervisor' ? 4 : 3} className="px-2 py-4 text-center text-gray-500">Loading users...</td></tr>
               ) : users.length === 0 ? (
-                 <tr><td colSpan={3} className="px-6 py-12 text-center text-gray-500">No users found matching your criteria</td></tr>
+                 <tr><td colSpan={filter === 'supervisor' ? 4 : 3} className="px-2 py-4 text-center text-gray-500">No users found matching your criteria</td></tr>
               ) : (
                 users.map((u) => {
                   return (
                     <tr key={u.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap">
+                      <td className="px-2 py-1 whitespace-nowrap">
                         <div className="flex items-center">
-                           <div className="flex-shrink-0 h-10 w-10 rounded-full bg-orange-100 flex items-center justify-center text-[#F97316] font-bold text-sm">
+                           <div className="flex-shrink-0 h-8 w-8 rounded-full bg-orange-100 flex items-center justify-center text-[#F97316] font-bold text-xs">
                               {(u.name || u.firstname || u.idnumber).charAt(0).toUpperCase()}
                            </div>
-                           <div className="ml-4">
-                              <div className="text-sm font-bold text-gray-900">
+                           <div className="ml-2">
+                              <div className="text-xs font-bold text-gray-900">
                                 {u.name || [u.firstname, u.lastname].filter(Boolean).join(" ") || "Unknown Name"}
                               </div>
-                              <div className="text-sm text-gray-500">{u.idnumber}</div>
+                              <div className="text-xs text-gray-500">{u.idnumber}</div>
                            </div>
                         </div>
                       </td>
-                      <td className="px-6 py-4">
-                         <div className="text-sm font-bold text-gray-900">
-                            {[u.course, u.section].filter(Boolean).join("-") || <span className="text-gray-400 font-normal italic">--</span>}
-                         </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                      {filter === 'supervisor' ? (
+                         <>
+                            <td className="px-2 py-1">
+                               <div className="text-xs font-bold text-gray-900">{u.company || <span className="text-gray-400 font-normal italic">--</span>}</div>
+                            </td>
+                            <td className="px-2 py-1">
+                               <div className="text-xs font-bold text-gray-900">{u.location || <span className="text-gray-400 font-normal italic">--</span>}</div>
+                            </td>
+                         </>
+                      ) : (
+                         <td className="px-2 py-1">
+                            <div className="text-xs font-bold text-gray-900">
+                               {[u.course, u.section].filter(Boolean).join("-") || <span className="text-gray-400 font-normal italic">--</span>}
+                            </div>
+                         </td>
+                      )}
+                      <td className="px-2 py-1 whitespace-nowrap text-right text-xs font-medium">
                         <div className="flex justify-end gap-3">
                            <button onClick={() => setEditingUser(u)} className="text-[#F97316] hover:text-[#EA580C] font-semibold transition-colors">Edit</button>
                            <button 

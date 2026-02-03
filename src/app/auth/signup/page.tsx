@@ -495,13 +495,25 @@ export default function SignupPage() {
         </form>
       </div>
       
-      {showTermsModal && <TermsModal onClose={() => setShowTermsModal(false)} />}
+      {showTermsModal && (
+        <TermsModal 
+            onClose={() => setShowTermsModal(false)} 
+            onAccept={() => {
+                setTermsAccepted(true);
+                setShowTermsModal(false);
+            }}
+            onDecline={() => {
+                setTermsAccepted(false);
+                setShowTermsModal(false);
+            }}
+        />
+      )}
     </div>
   );
 }
 
 // Terms and Conditions Modal Component
-function TermsModal({ onClose }: { onClose: () => void }) {
+function TermsModal({ onClose, onAccept, onDecline }: { onClose: () => void; onAccept: () => void; onDecline: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl scale-100 animate-in zoom-in-95 duration-200">
@@ -714,10 +726,16 @@ function TermsModal({ onClose }: { onClose: () => void }) {
 
         <div className="p-4 border-t bg-gray-50 rounded-b-2xl flex justify-end gap-3">
             <button 
-                onClick={onClose} 
+                onClick={onDecline} 
+                className="bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-2.5 px-8 rounded-xl transition-colors active:scale-95"
+            >
+                I Do Not Accept
+            </button>
+            <button 
+                onClick={onAccept} 
                 className="bg-[#F97316] hover:bg-[#EA580C] text-white font-bold py-2.5 px-8 rounded-xl transition-colors shadow-lg shadow-orange-500/20 active:scale-95"
             >
-                I Understand
+                I Accept
             </button>
         </div>
       </div>

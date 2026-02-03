@@ -34,19 +34,26 @@ export function calculateHoursWithinOfficialTime(
   officialIn: Date,
   officialOut: Date
 ): number {
-  // CLONE dates and ZERO OUT seconds/ms to ensure minute-level precision
-  // "Always calculate in MINUTES first"
-  const sIn = new Date(studentIn); sIn.setSeconds(0, 0);
-  const sOut = new Date(studentOut); sOut.setSeconds(0, 0);
-  const oIn = new Date(officialIn); oIn.setSeconds(0, 0);
-  const oOut = new Date(officialOut); oOut.setSeconds(0, 0);
-
-  const start = Math.max(sIn.getTime(), oIn.getTime());
-  const end = Math.min(sOut.getTime(), oOut.getTime());
+  const start = Math.max(studentIn.getTime(), officialIn.getTime());
+  const end = Math.min(studentOut.getTime(), officialOut.getTime());
 
   if (start >= end) return 0;
 
   return end - start;
+}
+
+/**
+ * Checks if a student is late.
+ * Rule: Late if timeIn > officialIn + 1 minute (grace period).
+ * Example: Official 8:00. Time In 8:01:00 -> Not Late. Time In 8:01:01 -> Late.
+ * @param timeIn Timestamp of student time in
+ * @param officialIn Timestamp of official time in
+ * @returns boolean
+ */
+export function isLate(timeIn: number, officialIn: number): boolean {
+    if (!timeIn || !officialIn) return false;
+    // 1 minute grace period (60000 ms)
+    return timeIn > officialIn + 60000;
 }
 
 export function calculateSessionDuration(
@@ -102,29 +109,13 @@ export function calculateShiftDurations(
   end: number,
   schedule: ShiftSchedule
 ): { am: number; pm: number; ot: number } {
-  const isAmStart = start < schedule.amOut;
-
-  if (isAmStart) {
-    return {
-      am: calculateSessionDuration(start, end, 'am', schedule),
-      pm: 0,
-      ot: 0
-    };
-  }
-
-  const isPmStart = start < schedule.pmOut;
-
-  if (isPmStart) {
-    return {
-      am: 0,
-      pm: calculateSessionDuration(start, end, 'pm', schedule),
-      ot: 0
-    };
-  }
-
+  // A single session can span multiple shifts (e.g. 8am to 5pm)
+  // We must calculate overlap for EACH shift independently.
+  // calculateSessionDuration handles the overlap/clamping logic (returns 0 if no overlap).
+  
   return {
-    am: 0,
-    pm: 0,
+    am: calculateSessionDuration(start, end, 'am', schedule),
+    pm: calculateSessionDuration(start, end, 'pm', schedule),
     ot: calculateSessionDuration(start, end, 'ot', schedule)
   };
 }
@@ -247,10 +238,72 @@ export function parseTime(timeStr: string): { h: number, m: number } {
   return { h: isNaN(h) ? 0 : h, m: isNaN(m) ? 0 : m };
 }
 
+export function getManilaDateParts(date: Date) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  });
+  const parts = formatter.formatToParts(date);
+  const get = (type: string) => parts.find(p => p.type === type)?.value;
+  return {
+    year: parseInt(get('year')!),
+    month: parseInt(get('month')!),
+    day: parseInt(get('day')!),
+    hour: parseInt(get('hour')!),
+    minute: parseInt(get('minute')!)
+  };
+}
+
+/**
+ * Constructs an absolute Date object for a given time string (HH:mm) interpreted in Manila Time.
+ * 
+ * @param referenceDate The base date (e.g. student clock-in timestamp)
+ * @param timeStr The official time string (e.g. "08:00" or "22:00")
+ * @param isNextDay Force the date to be the next day (relative to reference date's Manila date)
+ * @param isPrevDay Force the date to be the previous day (relative to reference date's Manila date)
+ */
+export function getOfficialTimeInManila(referenceDate: Date, timeStr: string, isNextDay: boolean = false, isPrevDay: boolean = false): Date {
+  const manila = getManilaDateParts(referenceDate);
+  
+  // Use parseTime to handle AM/PM and 12h/24h formats robustly
+  const { h, m } = parseTime(timeStr);
+
+  // Construct ISO string with Manila offset
+  // Note: Manila is strictly UTC+8 (no DST)
+  let year = manila.year;
+  let month = manila.month;
+  let day = manila.day;
+
+  // Handle Date Math properly using a temporary date object
+  // We create a date at 12:00 noon Manila time to safely add/sub days
+  // (Using strict ISO format for Manila timezone to avoid local env interference)
+  const tempDate = new Date(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T12:00:00+08:00`);
+  
+  if (isNextDay) {
+    tempDate.setDate(tempDate.getDate() + 1);
+  } else if (isPrevDay) {
+    tempDate.setDate(tempDate.getDate() - 1);
+  }
+
+  // Extract new YMD
+  const newManila = getManilaDateParts(tempDate);
+  year = newManila.year;
+  month = newManila.month;
+  day = newManila.day;
+
+  const isoString = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00+08:00`;
+  
+  return new Date(isoString);
+}
+
 export function buildDateTime(date: Date, h: number, m: number): Date {
-    const d = new Date(date);
-    d.setHours(h, m, 0, 0);
-    return d;
+    const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    return getOfficialTimeInManila(date, timeStr);
 }
 
 export function buildSchedule(
@@ -261,24 +314,29 @@ export function buildSchedule(
     
     // Helper to robustly parse hours with context
     const parseShiftTime = (timeStr: string, isPmContext: boolean): { h: number, m: number } => {
-        let { h, m } = parseTime(timeStr);
-        
-        // If it's a PM context (Afternoon/OT) and the hour is small (1-6), 
-        // and it didn't have an explicit AM/PM suffix (parseTime handles suffix),
-        // we might need to adjust.
-        // parseTime returns 0-23.
-        // If input was "1:00" (no suffix), parseTime returns 1.
-        // If input was "1:00 PM", parseTime returns 13.
-        // We only want to adjust if it looks like 12h format without suffix in a PM slot.
-        // How do we know if it had suffix? parseTime strips it.
-        // But we can check raw string or just assume:
-        // If isPmContext is true, and h is in [1, 6], assume PM (13-18).
-        if (isPmContext && h >= 1 && h <= 6) {
-             h += 12;
-        }
-        
-        return { h, m };
-    };
+    const lower = timeStr.toLowerCase();
+    const hasSuffix = lower.includes('am') || lower.includes('pm');
+    
+    // Strict 24-hour check:
+    // 1. Has seconds (e.g. 01:30:00) -> DB format
+    // 2. Starts with "0" (e.g. 01:30) -> Leading zero implies 24h/ISO
+    // 3. Hour > 12 -> Obviously 24h
+    const parts = timeStr.split(':');
+    const hPart = parseInt(parts[0], 10);
+    const isLikely24Hour = (parts.length === 3) || (timeStr.trim().startsWith('0')) || (hPart > 12);
+    
+    let { h, m } = parseTime(timeStr);
+    
+    // If it's a PM context (Afternoon/OT) and the hour is small (1-6), 
+    // and it didn't have an explicit AM/PM suffix (parseTime handles suffix),
+    // and it's NOT likely 24-hour (which we assume is correct as-is),
+    // we might need to adjust.
+    if (!hasSuffix && !isLikely24Hour && isPmContext && h >= 1 && h <= 6) {
+         h += 12;
+    }
+    
+    return { h, m };
+};
 
     const amInVal = parseShiftTime(config.amIn, false);
     const amOutVal = parseShiftTime(config.amOut, false);
@@ -314,7 +372,13 @@ export function buildSchedule(
         if (otEnd < otStart) otEnd += 12 * 3600 * 1000;
         
         // Basic OT adjustments
-        if (otStart < pmOut) otStart = pmOut; 
+        if (otStart < pmOut) {
+            otStart = pmOut; 
+            // Fix: Ensure OT End is not before OT Start (e.g. if OT was fully inside PM window)
+            if (otEnd < otStart) {
+                otEnd = otStart;
+            }
+        }
     } else {
         // No OT configured -> 0 duration
         otStart = pmOut;
@@ -325,7 +389,7 @@ export function buildSchedule(
 }
 
 export const formatHours = (ms: number) => {
-    if (!ms) return "";
+    if (!ms) return "0h 0m";
     // Round to nearest minute to avoid truncation errors
     const totalMinutes = Math.round(ms / 60000);
     const h = Math.floor(totalMinutes / 60);

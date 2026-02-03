@@ -1,6 +1,8 @@
 {
   "name": "OJTonTrack",
   "short_name": "OJTonTrack",
+  "description": "OJT Management System",
+  "gcm_sender_id": "103953800507",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#F6F7F9",

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { AttendanceDetailsModal } from "@/components/AttendanceDetailsModal";
 import { supabase } from "@/lib/supabaseClient";
-import { buildSchedule, calculateSessionDuration, checkSessionFlags, ShiftSchedule, formatHours, formatDisplayTime, normalizeTimeString, timeStringToMinutes, calculateShiftDurations } from "@/lib/attendance";
+import { buildSchedule, calculateSessionDuration, checkSessionFlags, ShiftSchedule, formatHours, formatDisplayTime, normalizeTimeString, timeStringToMinutes, calculateShiftDurations, isLate, calculateHoursWithinOfficialTime } from "@/lib/attendance";
 import Cropper from "react-easy-crop";
 import getCroppedImg from "@/lib/cropImage";
 import { Move, ZoomIn, ZoomOut, X } from "lucide-react";
@@ -16,12 +16,30 @@ export type AttendanceEntry = {
   type: "in" | "out"; 
   timestamp: number; 
   photoDataUrl: string; 
-  status?: "Pending" | "Approved" | "Rejected"; 
+  status?: "Pending" | "Approved" | "Rejected" | "Validated" | "VALIDATED" | "OFFICIAL" | "ADJUSTED" | "Official" | "REJECTED"; 
   approvedAt?: number;
   validated_by?: string | null;
   is_overtime?: boolean;
+  rendered_hours?: number;
+  validated_hours?: number;
+  official_time_in?: string;
+  official_time_out?: string;
 };
-export type ReportEntry = { id?: number; title: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string; isViewedByInstructor?: boolean; week?: number; };
+export type ReportEntry = { 
+  id?: number; 
+  title: string; 
+  body?: string; 
+  fileName?: string; 
+  fileType?: string; 
+  fileUrl?: string; 
+  photoName?: string;
+  photoUrl?: string;
+  photos?: { name: string; url: string; type?: string }[];
+  submittedAt: number; 
+  instructorComment?: string; 
+  isViewedByInstructor?: boolean; 
+  week?: number; 
+};
 type ServerAttendanceEntry = { 
   type: "in" | "out"; 
   ts: number; 
@@ -32,10 +50,11 @@ type ServerAttendanceEntry = {
 };
 const DUE_DATE_TEXT = new Date(Date.now() + 86400000).toLocaleDateString();
 
-function getAttendanceStatus(entry?: AttendanceEntry | null): "Pending" | "Approved" | "Rejected" {
+function getAttendanceStatus(entry?: AttendanceEntry | null): "Pending" | "Approved" | "Rejected" | "Official" {
   if (!entry || !entry.status) return "Pending";
   if (entry.status === "Approved") return "Approved";
   if (entry.status === "Rejected") return "Rejected";
+  if (entry.status === "Official") return "Official";
   return "Pending";
 }
 
@@ -43,6 +62,7 @@ function formatStatusLabel(entry: AttendanceEntry): string {
   const status = getAttendanceStatus(entry);
   if (status === "Approved") return "Validated";
   if (status === "Rejected") return "Unvalidated";
+  if (status === "Official") return "Official";
   return "Pending";
 }
 
@@ -50,14 +70,59 @@ function getStatusColorClass(entry?: AttendanceEntry | null): string {
   const status = getAttendanceStatus(entry);
   if (status === "Approved") return "text-green-600";
   if (status === "Rejected") return "text-red-600";
+  if (status === "Official") return "text-blue-600";
   return "text-yellow-600";
 }
 
 const toBase64 = (file: File) => new Promise((resolve, reject) => {
-  const reader = new FileReader();
-  reader.readAsDataURL(file);
-  reader.onload = () => resolve(reader.result);
-  reader.onerror = error => reject(error);
+  if (file.type.startsWith('image/')) {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = document.createElement("img");
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        // Resize to max 1280px width/height to save space
+        const MAX_SIZE = 1280;
+        let width = img.width;
+        let height = img.height;
+        
+        if (width > height) {
+          if (width > MAX_SIZE) {
+            height *= MAX_SIZE / width;
+            width = MAX_SIZE;
+          }
+        } else {
+          if (height > MAX_SIZE) {
+            width *= MAX_SIZE / height;
+            height = MAX_SIZE;
+          }
+        }
+        
+        canvas.width = width;
+        canvas.height = height;
+        
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height);
+            // Compress to JPEG quality 0.7
+            const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+            resolve(dataUrl);
+        } else {
+            // Fallback if canvas fails
+            resolve(event.target?.result);
+        }
+      };
+      img.onerror = (err) => reject(err);
+    };
+    reader.onerror = (err) => reject(err);
+  } else {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = error => reject(error);
+  }
 });
 
 export type User = {
@@ -77,6 +142,7 @@ export type User = {
   target_hours?: number;
   supervisor_name?: string;
   avatar_url?: string;
+  courseIds?: number[];
 };
 
 export function StudentHeader() {
@@ -174,50 +240,50 @@ function SubmittedReportsModal({ reports, onClose, onViewReport }: { reports: Re
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
-        <div className="flex items-center justify-between p-6 border-b border-gray-100 bg-white sticky top-0 z-10">
-          <h2 className="text-xl font-bold text-gray-900">Submitted Reports</h2>
-          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full transition-colors text-gray-400 hover:text-gray-600">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-white sticky top-0 z-10">
+          <h2 className="text-lg font-bold text-gray-900">Submitted Reports</h2>
+          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-full transition-colors text-gray-400 hover:text-gray-600">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
-        <div className="overflow-y-auto p-6 space-y-4">
+        <div className="overflow-y-auto p-4 space-y-2 custom-scrollbar">
           {reports.length === 0 ? (
-            <div className="text-center text-gray-500 py-8">No reports submitted yet.</div>
+            <div className="text-center text-gray-500 py-8 text-sm">No reports submitted yet.</div>
           ) : (
             reports.slice().sort((a, b) => b.submittedAt - a.submittedAt).map((report, idx) => (
               <button 
                 key={idx} 
                 onClick={() => onViewReport?.(report)}
                 disabled={!onViewReport}
-                className={`w-full text-left bg-gray-50 rounded-xl p-4 border border-gray-100 transition-colors ${onViewReport ? "hover:bg-gray-100 cursor-pointer" : "cursor-default"}`}
+                className={`w-full text-left bg-gray-50 rounded-xl p-3 border border-gray-100 transition-colors ${onViewReport ? "hover:bg-gray-100 cursor-pointer" : "cursor-default"}`}
               >
-                <div className="flex items-center justify-between mb-2">
-                   <div className="font-bold text-gray-900">{report.title}</div>
-                   <div className="text-xs text-gray-500">{new Date(report.submittedAt).toLocaleDateString()}</div>
+                <div className="flex items-center justify-between mb-1">
+                   <div className="font-bold text-gray-900 text-sm">{report.title}</div>
+                   <div className="text-[10px] text-gray-500">{new Date(report.submittedAt).toLocaleDateString()}</div>
                 </div>
-                {report.body && <p className="text-sm text-gray-600 line-clamp-2 mb-2">{report.body}</p>}
-                <div className="flex flex-col gap-2 mt-2">
+                {report.body && <p className="text-xs text-gray-600 line-clamp-2 mb-2">{report.body}</p>}
+                <div className="flex flex-col gap-2 mt-1">
                     <div className="flex items-center gap-2">
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${report.isViewedByInstructor || report.instructorComment ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"}`}>
-                            {report.isViewedByInstructor || report.instructorComment ? "Reviewed" : "Pending Review"}
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${report.isViewedByInstructor || report.instructorComment ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"}`}>
+                            {report.isViewedByInstructor || report.instructorComment ? "Reviewed" : "Under Review"}
                         </span>
                         {report.fileName && (
-                            <span className="text-[10px] font-bold bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full flex items-center gap-1">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16l4-4h8a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"/></svg>
+                            <span className="text-[9px] font-bold bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-full flex items-center gap-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16l4-4h8a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"/></svg>
                                 File
                             </span>
                         )}
                         {report.instructorComment && (
-                            <span className="text-[10px] font-bold bg-red-50 text-red-600 px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse" title="Instructor Comment">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                            <span className="text-[9px] font-bold bg-red-50 text-red-600 px-1.5 py-0.5 rounded-full flex items-center gap-1 animate-pulse" title="Instructor Comment">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
                                 Comment
                             </span>
                         )}
                     </div>
                     {report.instructorComment && (
-                         <div className="bg-red-50/50 border border-red-100 rounded-lg p-3 text-xs text-gray-700">
-                             <div className="font-bold text-red-700 mb-1 flex items-center gap-1">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                         <div className="bg-red-50/50 border border-red-100 rounded-lg p-2 text-[10px] text-gray-700">
+                             <div className="font-bold text-red-700 mb-0.5 flex items-center gap-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
                                 Instructor Comment
                              </div>
                              {report.instructorComment}
@@ -228,8 +294,8 @@ function SubmittedReportsModal({ reports, onClose, onViewReport }: { reports: Re
             ))
           )}
         </div>
-        <div className="p-6 border-t border-gray-100 bg-gray-50 sticky bottom-0 z-10">
-            <button onClick={onClose} className="w-full py-3 bg-white border border-gray-200 rounded-xl text-gray-700 font-bold hover:bg-gray-50 transition-colors">
+        <div className="p-3 border-t border-gray-100 bg-gray-50 sticky bottom-0 z-10">
+            <button onClick={onClose} className="w-full py-2 bg-white border border-gray-200 rounded-xl text-gray-700 font-bold hover:bg-gray-50 transition-colors text-sm shadow-sm">
                 Close
             </button>
         </div>
@@ -246,24 +312,31 @@ export function DashboardView({
   totalHours,
   totalValidatedHours,
   targetHours,
+  validatedProgress,
   onTimeIn,
   onTimeOut,
   onViewAttendance,
+  onViewReports,
   companyText,
   supervisorText,
   locationText,
   recentRows,
+  deadlines,
   nextDeadline,
   now,
+  schedule,
+  overtimeShifts = [],
 }: { 
   attendance: AttendanceEntry[]; 
   reports: ReportEntry[]; 
   totalHours: string; 
   totalValidatedHours: string;
   targetHours: number;
+  validatedProgress?: number;
   onTimeIn: () => void;
   onTimeOut: () => void;
   onViewAttendance: () => void;
+  onViewReports: () => void;
   companyText: string;
   supervisorText: string;
   locationText: string;
@@ -276,11 +349,15 @@ export function DashboardView({
     duration: string;
     status: "Pending" | "Approved";
   }[];
+  deadlines?: { week: number; date: string; status: "submitted" | "pending" }[];
   nextDeadline?: { week: number; date: string; status: "submitted" | "pending" };
   now?: number;
+  schedule?: { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null;
+  overtimeShifts?: { effective_date: string; overtime_start: number; overtime_end: number }[];
 }): React.ReactElement {
   const [selectedAttendanceEntry, setSelectedAttendanceEntry] = useState<AttendanceEntry | null>(null);
   const [showAllReportsModal, setShowAllReportsModal] = useState(false);
+  const [showAllDeadlinesModal, setShowAllDeadlinesModal] = useState(false);
 
   const [hoursText, remainingText, progressPct] = useMemo(() => {
     const parts = totalHours.split("h");
@@ -324,68 +401,69 @@ export function DashboardView({
       type: log.type,
       date: new Date(log.timestamp).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }),
       time: new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      validated_by: log.validated_by
+      validated_by: log.validated_by,
+      status: log.status
     }));
   }, [attendance]);
 
-  const isReportSubmitted = reports.length > 0;
+  const isReportSubmitted = nextDeadline?.status === "submitted";
 
 
 
   return (
     <div className="flex flex-col gap-6 animate-in fade-in duration-500">
       {/* Top Row: Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
          {/* Card 1: Total Hours (Orange) */}
-         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 relative overflow-hidden flex flex-col justify-between min-h-[160px]">
-            <div className="flex items-start gap-4">
+         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 relative overflow-hidden flex flex-col justify-between min-h-[120px]">
+            <div className="flex items-center gap-4">
                {/* Icon */}
-               <div className="w-14 h-14 rounded-2xl bg-[#F97316] flex items-center justify-center flex-shrink-0 text-white shadow-sm shadow-orange-200">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+               <div className="w-12 h-12 rounded-xl bg-[#F97316] flex items-center justify-center flex-shrink-0 text-white shadow-sm shadow-orange-200">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                </div>
                {/* Text Content */}
                <div className="flex flex-col">
                   <div className="text-sm font-bold text-gray-500">Total Hours</div>
-                  <div className="text-3xl font-bold text-gray-900 tracking-tight leading-none mt-1">{hoursText}</div>
-                  <div className="text-xs font-medium text-gray-400 mt-1">Target: {targetHours}h</div>
-               </div>
-            </div>
-            
-            {/* Progress Bar */}
-            <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden mt-6">
-               <div className="bg-[#F97316] h-full rounded-full transition-all duration-1000 ease-out relative" style={{ width: `${progressPct}%` }}>
-                  {/* Optional: Add a dot at the end if desired, but standard bar is clean */}
+                  <div className="text-2xl font-bold text-gray-900 tracking-tight leading-none mt-1">{hoursText}</div>
                </div>
             </div>
          </div>
 
          {/* Card 2: Validated Hours (Green) */}
-         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 relative overflow-hidden flex flex-col justify-center min-h-[160px]">
+         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 relative overflow-hidden flex flex-col justify-center min-h-[120px]">
             <div className="flex items-center gap-4">
                {/* Icon */}
-               <div className="w-14 h-14 rounded-2xl bg-[#16A34A] flex items-center justify-center flex-shrink-0 text-white shadow-sm shadow-green-200">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+               <div className="w-12 h-12 rounded-xl bg-[#16A34A] flex items-center justify-center flex-shrink-0 text-white shadow-sm shadow-green-200">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                </div>
                {/* Text Content */}
                <div className="flex flex-col">
                   <div className="text-sm font-bold text-gray-500">Total Validated Hours</div>
-                  <div className="text-3xl font-bold text-gray-900 tracking-tight leading-none mt-1">{totalValidatedHours}</div>
+                  <div className="text-2xl font-bold text-gray-900 tracking-tight leading-none mt-1">{totalValidatedHours}</div>
                </div>
             </div>
-         </div>
+             
+             {/* Progress Bar */}
+             <div className="mt-4">
+                <div className="flex flex-col items-end mb-1.5">
+                   <div className="text-xs font-medium text-gray-500">Goal: {targetHours} hrs</div>
+                   <div className="text-base font-bold text-gray-900">{(validatedProgress || 0).toFixed(1)}%</div>
+                </div>
+                <div className="w-full bg-gray-100 rounded-full h-2.5 overflow-hidden">
+                   <div className="bg-[#16A34A] h-full rounded-full transition-all duration-1000 ease-out relative" style={{ width: `${validatedProgress || 0}%` }}>
+                   </div>
+                </div>
+             </div>
+          </div>
       </div>
 
       {/* Bottom Section */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
          {/* Recent Activity (Left Column) */}
          <div className="lg:col-span-2">
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 flex flex-col gap-6">
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 flex flex-col gap-6 h-full">
                <div className="flex items-center justify-between">
                   <h3 className="text-lg font-bold text-gray-900">Recent Activity</h3>
-                  <div className="flex items-center gap-4 text-sm font-medium">
-                     <Link href="/portal/student/attendance" className="text-[#F97316] hover:text-[#EA580C]">Attendance</Link>
-                     <Link href="/portal/student/reports" className="text-[#F97316] hover:text-[#EA580C]">Reports</Link>
-                  </div>
                </div>
                
                <div className="space-y-4">
@@ -393,6 +471,11 @@ export function DashboardView({
                       <div className="bg-gray-50 rounded-xl border border-gray-100 p-8 text-center text-gray-400 italic">No recent activity</div>
                   ) : recentLogs.map((log, i) => {
                       const isAutoTimeOut = log.type === 'out' && (log.validated_by === 'SYSTEM_AUTO_CLOSE' || log.validated_by === 'AUTO TIME OUT');
+                      // Hide auto time-out entries unless they are official (edited by admin)
+                      if (isAutoTimeOut && log.status !== 'Official') {
+                          return null;
+                      }
+
                       return (
                       <div key={i} className="bg-gray-50 rounded-2xl border border-gray-100 p-5 flex items-center justify-between hover:border-gray-200 transition-colors">
                          <div className="flex items-center gap-5">
@@ -406,15 +489,18 @@ export function DashboardView({
                                )}
                             </div>
                             <div className="flex flex-col">
-                               <div className={`font-bold text-base ${isAutoTimeOut ? 'text-red-600' : 'text-gray-900'}`}>
-                                 {log.type === 'in' ? 'Time In' : isAutoTimeOut ? 'AUTO TIME OUT' : 'Time Out'}
+                               <div className={`font-bold text-base ${isAutoTimeOut ? 'text-gray-900' : 'text-gray-900'}`}>
+                                 {log.type === 'in' ? 'Time In' : 'Time Out'}
                                </div>
                                <div className="text-xs font-medium text-gray-400 mt-0.5">{log.date}</div>
                             </div>
                          </div>
-                         {!isAutoTimeOut && (
-                           <div className="font-bold text-gray-900 text-lg">{log.time}</div>
-                         )}
+                         <div className="font-bold text-gray-900 text-lg">
+                             {log.time}
+                             {log.status === 'Official' && (
+                                 <span className="block text-[10px] font-normal text-gray-500">(Official Time-Out)</span>
+                             )}
+                         </div>
                       </div>
                       );
                   })}
@@ -423,70 +509,43 @@ export function DashboardView({
          </div>
 
          {/* Sidebar (Right Column) */}
-         <div className="flex flex-col gap-6">
-            {/* Quick Actions */}
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
-               <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4 flex items-center gap-2">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-                  Quick Actions
-               </div>
-               <div className="space-y-3">
-
-                  <button 
-                    onClick={isCheckedIn ? onTimeOut : onTimeIn}
-                    className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl font-bold text-sm transition-all shadow-sm border-2 ${isCheckedIn ? 'bg-white border-red-100 text-red-600 hover:border-red-200 hover:bg-red-50' : 'bg-white border-green-100 text-green-600 hover:border-green-200 hover:bg-green-50'}`}
-                  >
-                     {isCheckedIn ? (
-                        <>
-                           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><rect x="9" y="9" width="6" height="6"/></svg>
-                           Time Out
-                        </>
-                     ) : (
-                        <>
-                           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
-                           Time In
-                        </>
-                     )}
-                  </button>
-
-                  <Link href="/portal/student/reports" className="w-full flex items-center justify-center gap-2 py-3 rounded-xl font-bold text-sm bg-[#F97316] text-white hover:bg-[#EA580C] transition-all shadow-md shadow-orange-200">
-                     Submit Report
-                  </Link>
-               </div>
-            </div>
-
+         <div className="flex flex-col gap-6 h-full">
             {/* Weekly Report Deadlines */}
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 flex flex-col">
                <div className="flex items-center justify-between mb-4">
                   <div className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2">
                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-500"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
                      Weekly Report Deadlines
                   </div>
                   <button 
-                    onClick={() => setShowAllReportsModal(true)}
-                    className="text-xs font-bold text-blue-600 hover:text-blue-700 hover:underline"
+                onClick={() => setShowAllDeadlinesModal(true)}
+                    className="text-xs font-bold text-blue-600 hover:text-blue-700 hover:underline whitespace-nowrap flex-shrink-0"
                   >
                     View All
                   </button>
                </div>
                
                <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                     <div className="h-8 w-8 rounded-full bg-white border border-gray-200 flex items-center justify-center text-xs font-bold text-gray-500">
-                        W1
-                     </div>
-                     <div>
-                        <div className="text-sm font-bold text-gray-900">Week 1</div>
-                        {isReportSubmitted ? (
-                            <div className="text-[10px] font-bold text-green-600 bg-green-100 px-2 py-0.5 rounded-full inline-block mt-1">Submitted</div>
-                        ) : (
-                            <div className="text-[10px] font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded-full inline-block mt-1">Not submitted yet</div>
-                        )}
-                     </div>
-                  </div>
-                  <div className="text-xs font-medium text-gray-500">
-                     Due {deadlineText}
-                  </div>
+                  {nextDeadline ? (
+                    <>
+                      <div className="flex items-center gap-3">
+                         <div>
+                            <div className="text-sm font-bold text-gray-900">Week {nextDeadline.week}</div>
+                            {isReportSubmitted ? (
+                                <div className="text-[10px] font-bold text-green-600 bg-green-100 px-2 py-0.5 rounded-full inline-block mt-1">Submitted</div>
+                            ) : (
+                                <div className="text-[10px] font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded-full inline-block mt-1">Not submitted yet</div>
+                            )}
+                         </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-sm font-bold text-gray-700">
+                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                         {deadlineText}
+                      </div>
+                    </>
+                  ) : (
+                      <div className="text-sm text-gray-500 italic w-full text-center py-2">No upcoming deadlines</div>
+                  )}
                </div>
             </div>
          </div>
@@ -501,11 +560,66 @@ export function DashboardView({
       )}
 
       {/* Submitted Reports Modal */}
+      {/* Modals */}
+      
       {showAllReportsModal && (
         <SubmittedReportsModal
           reports={reports}
           onClose={() => setShowAllReportsModal(false)}
         />
+      )}
+      {showAllDeadlinesModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-white sticky top-0 z-10">
+              <h2 className="text-lg font-bold text-gray-900">Weekly Report Deadlines</h2>
+              <button onClick={() => setShowAllDeadlinesModal(false)} className="p-1.5 hover:bg-gray-100 rounded-full transition-colors text-gray-400 hover:text-gray-600">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+            <div className="overflow-y-auto p-4 space-y-2 custom-scrollbar">
+              {(deadlines || []).map((d) => {
+                let endDate: Date;
+                try { endDate = new Date(d.date); } catch { endDate = new Date(); }
+                endDate.setHours(23, 59, 59, 999);
+                const startDate = new Date(endDate);
+                startDate.setDate(startDate.getDate() - 6);
+                startDate.setHours(0, 0, 0, 0);
+                const rangeLabel = `${startDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} - ${endDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+                const deadlineLabel = `Deadline: ${endDate.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}`;
+                const isSubmitted = d.status === "submitted";
+                return (
+                  <button
+                    key={d.week}
+                    onClick={() => {
+                      setShowAllDeadlinesModal(false);
+                      onViewReports();
+                    }}
+                    className="w-full text-left bg-gray-50 rounded-xl p-3 border border-gray-100 hover:bg-gray-100"
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="font-bold text-gray-900 text-sm">Week {d.week}</div>
+                      <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold ${isSubmitted ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
+                        {isSubmitted ? "Submitted" : "Not submitted yet"}
+                      </span>
+                    </div>
+                    <div className="text-sm font-bold text-gray-900 mb-0.5">{rangeLabel}</div>
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-gray-700 mb-1">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                      {deadlineLabel}
+                    </div>
+                    {isSubmitted ? (
+                      <div className="text-[9px] font-bold text-green-600 flex items-center gap-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                        View Report
+                      </div>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -537,18 +651,28 @@ export function getCameraAssistantMessage(input: CameraAnalysis): string {
   return `${msgs[0].replace(/\.$/, "")}, ${msgs[1].toLowerCase()}, and ${msgs[2].toLowerCase()}`;
 }
 
-export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, studentName }: { idnumber: string; attendance: AttendanceEntry[]; onUpdate: (next: AttendanceEntry[]) => void; supervisorId?: string; studentName?: string }) {
+export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, studentName, schedule }: { idnumber: string; attendance: AttendanceEntry[]; onUpdate: (next: AttendanceEntry[]) => void; supervisorId?: string; studentName?: string, schedule?: { amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [photo, setPhoto] = useState<string | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [dbSchedule, setDbSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(null);
+  const [dbSchedule, setDbSchedule] = useState<{ amIn: string; amOut: string; pmIn: string; pmOut: string; otIn?: string; otOut?: string } | null>(schedule || null);
+  
+  useEffect(() => {
+    if (schedule) {
+      setDbSchedule(schedule);
+    }
+  }, [schedule]);
   const [nowText, setNowText] = useState<string>("");
   const [attendanceSearchQuery, setAttendanceSearchQuery] = useState("");
   const [filterDate, setFilterDate] = useState("");
   const [monthFilter, setMonthFilter] = useState("");
+  const [filterStatus, setFilterStatus] = useState("");
+  const [filterOvertime, setFilterOvertime] = useState(false);
   const [selectedAttendanceEntry, setSelectedAttendanceEntry] = useState<AttendanceEntry | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
+  const isClickingRef = useRef(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [hasDesktopCamera, setHasDesktopCamera] = useState<boolean>(false);
   const [isMobile, setIsMobile] = useState<boolean>(false);
@@ -562,6 +686,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   const [showEarlyOutModal, setShowEarlyOutModal] = useState(false);
   const [earlyOutShiftEndText, setEarlyOutShiftEndText] = useState<string>("");
   const [showNoScheduleModal, setShowNoScheduleModal] = useState(false);
+  const [selectedEvent, setSelectedEvent] = useState<any | null>(null);
   const [showCooldownModal, setShowCooldownModal] = useState(false);
   const [showDuplicateModal, setShowDuplicateModal] = useState(false);
   const [duplicateModalMessage, setDuplicateModalMessage] = useState("");
@@ -571,6 +696,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   const [authorizedOvertime, setAuthorizedOvertime] = useState<{ start: number; end: number } | null>(null);
   const [allOvertimeShifts, setAllOvertimeShifts] = useState<{ effective_date: string; overtime_start: number; overtime_end: number }[]>([]);
   const [user, setUser] = useState<User | null>(null);
+  const [events, setEvents] = useState<any[]>([]);
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -598,6 +724,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
             if (!idnumber) return;
             const res = await fetch(`/api/overtime?student_id=${encodeURIComponent(idnumber)}`);
             const json = await res.json();
+            console.log("Overtime Fetch Response:", json);
             
             if (json.overtime_shifts) {
                 const shifts = json.overtime_shifts.map((s: any) => ({
@@ -684,6 +811,20 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
       });
     }
 
+    if (filterStatus) {
+      result = result.filter(a => {
+        const s = a.status || "Pending";
+        if (filterStatus === "Validated") return s === "Approved";
+        if (filterStatus === "Unvalidated") return s === "Rejected";
+        if (filterStatus === "Pending") return s !== "Approved" && s !== "Rejected";
+        return true;
+      });
+    }
+
+    if (filterOvertime) {
+      result = result.filter(a => !!a.is_overtime);
+    }
+
     if (attendanceSearchQuery) {
       const q = attendanceSearchQuery.toLowerCase();
       result = result.filter(a => {
@@ -694,9 +835,9 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     }
 
     return result;
-  }, [attendance, filterDate, monthFilter, attendanceSearchQuery]);
+  }, [uniqueAttendance, filterDate, monthFilter, attendanceSearchQuery, filterStatus, filterOvertime]);
 
-  const schedule = useMemo(() => {
+  const localSchedule = useMemo(() => {
     try {
       const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
       const saved = localStorage.getItem(key);
@@ -723,23 +864,71 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   }, [idnumber]);
 
   const officialScheduleText = useMemo(() => {
-    const s = dbSchedule || schedule;
+    const s = dbSchedule || localSchedule;
     if (!s) return "";
     const parts: string[] = [];
     if (s.amIn && s.amOut) {
-      parts.push(`AM ${formatDisplayTime(s.amIn)} - ${formatDisplayTime(s.amOut)}`);
+      parts.push(`Morning ${formatDisplayTime(s.amIn)} - ${formatDisplayTime(s.amOut)}`);
     }
     if (s.pmIn && s.pmOut) {
-      parts.push(`PM ${formatDisplayTime(s.pmIn)} - ${formatDisplayTime(s.pmOut)}`);
+      parts.push(`Afternoon ${formatDisplayTime(s.pmIn)} - ${formatDisplayTime(s.pmOut)}`);
     }
-    if (s.otIn && s.otOut) {
+    if (s.otIn && s.otOut && !authorizedOvertime) {
       parts.push(`OT ${formatDisplayTime(s.otIn)} - ${formatDisplayTime(s.otOut)}`);
     }
     return parts.join(" • ");
-  }, [dbSchedule, schedule]);
+  }, [dbSchedule, localSchedule, authorizedOvertime]);
 
   const refreshScheduleFromServer = useCallback(async () => {
     try {
+      // 0. Check for Coordinator Events (Highest Priority)
+      try {
+        const eventsRes = await fetch('/api/events', { cache: "no-store" });
+        const eventsData = await eventsRes.json();
+        if (eventsData.events && Array.isArray(eventsData.events)) {
+          setEvents(eventsData.events);
+          const now = new Date();
+          const offset = now.getTimezoneOffset();
+          const localDate = new Date(now.getTime() - (offset * 60 * 1000));
+          const todayStr = localDate.toISOString().split('T')[0];
+          
+          // Find events for today
+          const todayEvents = eventsData.events.filter((e: any) => e.event_date === todayStr);
+          
+          let applicableEvent = null;
+
+          // Priority 1: Course-specific event
+          if (user && user.courseIds && user.courseIds.length > 0) {
+            applicableEvent = todayEvents.find((e: any) => 
+              e.courses_id && Array.isArray(e.courses_id) && e.courses_id.length > 0 &&
+              user.courseIds!.some(id => e.courses_id.map(String).includes(String(id)))
+            );
+          }
+
+          // Priority 2: General event (no specific courses)
+          if (!applicableEvent) {
+            applicableEvent = todayEvents.find((e: any) => 
+              !e.courses_id || !Array.isArray(e.courses_id) || e.courses_id.length === 0
+            );
+          }
+          
+          if (applicableEvent) {
+            const next = {
+              amIn: normalizeTimeString(applicableEvent.am_in) || "",
+              amOut: normalizeTimeString(applicableEvent.am_out) || "",
+              pmIn: normalizeTimeString(applicableEvent.pm_in) || "",
+              pmOut: normalizeTimeString(applicableEvent.pm_out) || "",
+              otIn: normalizeTimeString(applicableEvent.overtime_in) || undefined,
+              otOut: normalizeTimeString(applicableEvent.overtime_out) || undefined,
+            };
+            setDbSchedule(next);
+            return next;
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch events", e);
+      }
+
       // 1. Try fetching specific student schedule first
       if (supabase && idnumber) {
         const { data: studentSched, error: schedError } = await supabase
@@ -764,25 +953,20 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
       // 2. Fallback to Supervisor Default
       let rows: any[] | null = null;
-      if (supabase) {
-        let query = supabase
-          .from("shifts")
-          .select("shift_name, official_start, official_end")
-          .order("official_start", { ascending: true });
+      
+      // Use prop or internal user state for supervisor ID
+      const effectiveSupervisorId = supervisorId || user?.supervisorid;
+      
+      console.log("[DEBUG] refreshScheduleFromServer", { supervisorId, userSupId: user?.supervisorid, effectiveSupervisorId });
 
-        if (supervisorId) {
-          query = query.eq("supervisor_id", supervisorId);
-        }
-
-        const { data, error } = await query;
-        if (!error && Array.isArray(data)) {
-          rows = data.filter(r => r && (r.official_start || r.official_end));
-        }
-      }
+      // Skip direct Supabase query for shifts because supervisorId is a string (ID Number) 
+      // but the DB expects an integer ID. The API handles this resolution.
+      
       if (!rows) {
-        const res = await fetch(`/api/shifts${supervisorId ? `?supervisor_id=${encodeURIComponent(supervisorId)}` : ''}`, { cache: "no-store" });
+        const res = await fetch(`/api/shifts${effectiveSupervisorId ? `?supervisor_id=${encodeURIComponent(effectiveSupervisorId)}` : ''}`, { cache: "no-store" });
         const json = await res.json();
         const data = json.shifts;
+        console.log("[DEBUG] Fetched shifts", data);
         if (Array.isArray(data)) {
           rows = data.filter((r: any) => r && (r.official_start || r.official_end));
         }
@@ -842,96 +1026,11 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
     } catch {
       return null;
     }
-  }, [supervisorId]);
+  }, [supervisorId, user]);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        let rows: any[] | null = null;
-
-        if (supabase) {
-          let query = supabase
-            .from("shifts")
-            .select("shift_name, official_start, official_end")
-            .order("official_start", { ascending: true });
-
-          if (supervisorId) {
-            query = query.eq("supervisor_id", supervisorId);
-          }
-
-          const { data, error } = await query;
-          if (!error && Array.isArray(data)) {
-            rows = data.filter(r => r && (r.official_start || r.official_end));
-          }
-        }
-
-        if (!rows) {
-          const res = await fetch(`/api/shifts${supervisorId ? `?supervisor_id=${encodeURIComponent(supervisorId)}` : ''}`, { cache: "no-store" });
-          const json = await res.json();
-          const data = json.shifts;
-          if (Array.isArray(data)) {
-            rows = data.filter((r: any) => r && (r.official_start || r.official_end));
-          }
-        }
-
-        if (!rows || rows.length === 0) return;
-
-        const sorted = rows
-          .slice()
-          .sort(
-            (a, b) =>
-              timeStringToMinutes(a.official_start || "") -
-              timeStringToMinutes(b.official_start || "")
-          );
-        let amRow = sorted[0];
-        let pmRow = sorted[1] || sorted[0];
-        const findByName = (match: (name: string) => boolean) =>
-          rows!.find((r) => {
-            const n = String(r.shift_name || "").toLowerCase().trim();
-            return match(n);
-          });
-        const amCandidate = findByName((n) => n.includes("am") || n.includes("morning"));
-        const pmCandidate = findByName((n) => n.includes("pm") || n.includes("afternoon"));
-        const otCandidate = findByName((n) => n === "overtime shift" || n === "overtime");
-
-        if (amCandidate && pmCandidate) {
-          amRow = amCandidate;
-          pmRow = pmCandidate;
-        }
-
-        let finalOtRow = otCandidate;
-        if (finalOtRow && (finalOtRow === amRow || finalOtRow === pmRow)) {
-          finalOtRow = undefined;
-        }
-
-        const amInNorm = normalizeTimeString(amRow.official_start || "");
-        const amOutNorm = normalizeTimeString(amRow.official_end || "");
-        const pmInNorm = normalizeTimeString(pmRow.official_start || "");
-        const pmOutNorm = normalizeTimeString(pmRow.official_end || "");
-        const otInNorm = normalizeTimeString(finalOtRow?.official_start || "");
-        const otOutNorm = normalizeTimeString(finalOtRow?.official_end || "");
-
-        // Relaxed validation: allow partial schedules
-        if (!amInNorm && !amOutNorm && !pmInNorm && !pmOutNorm) return;
-
-        if (!cancelled) {
-          setDbSchedule({ 
-            amIn: amInNorm || "",
-            amOut: amOutNorm || "", 
-            pmIn: pmInNorm || "", 
-            pmOut: pmOutNorm || "",
-            otIn: otInNorm || undefined,
-            otOut: otOutNorm || undefined
-          });
-        }
-      } catch {
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [supervisorId]);
+    refreshScheduleFromServer();
+  }, [refreshScheduleFromServer]);
 
   useEffect(() => {
     if (!supabase) return;
@@ -940,6 +1039,13 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "shifts" },
+        () => {
+          refreshScheduleFromServer();
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "coordinator_events" },
         () => {
           refreshScheduleFromServer();
         }
@@ -1231,8 +1337,17 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   const takePhoto = () => {
     if (!videoRef.current) return;
     const video = videoRef.current;
-    const w = video.videoWidth || 640;
-    const h = video.videoHeight || 480;
+    const MAX_WIDTH = 800;
+    let w = video.videoWidth || 640;
+    let h = video.videoHeight || 480;
+    
+    // Resize if too large to speed up upload
+    if (w > MAX_WIDTH) {
+      const ratio = h / w;
+      w = MAX_WIDTH;
+      h = w * ratio;
+    }
+
     const canvas = document.createElement('canvas');
     canvas.width = w;
     canvas.height = h;
@@ -1243,7 +1358,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
       ctx.scale(-1, 1);
     }
     ctx.drawImage(video, 0, 0, w, h);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.6); // 60% quality for faster upload
     setPhoto(dataUrl);
     stopCamera();
   };
@@ -1251,21 +1366,10 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   // Mobile uses file input capture via startCamera()
 
   const addEntry = async (type: "in" | "out") => {
-    if (!photo || submitting) return;
+    if (!photo || submitting || isSubmittingRef.current) return;
 
-    // 15-minute cooldown check
-    const COOLDOWN_MS = 15 * 60 * 1000;
-    const sortedEntries = attendance.slice().sort((a, b) => b.timestamp - a.timestamp);
-    const lastEntry = sortedEntries[0];
-
-    if (lastEntry) {
-      const diff = Date.now() - lastEntry.timestamp;
-      if (diff < COOLDOWN_MS) {
-        setShowCooldownModal(true);
-        return;
-      }
-    }
-
+    // Lock immediately
+    isSubmittingRef.current = true;
     setSubmitting(true);
     try {
       setCameraError(null);
@@ -1279,6 +1383,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         } else if (!effectiveSchedule) {
           setShowNoScheduleModal(true);
           setSubmitting(false);
+          isSubmittingRef.current = false;
           return;
         }
 
@@ -1322,7 +1427,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
               });
               
               // Notify user
-              alert(`Your previous attendance from ${logDate.toLocaleDateString()} was automatically closed at ${closeTime.toLocaleTimeString()} because you forgot to time out.`);
+              // alert(`Your previous attendance from ${logDate.toLocaleDateString()} was automatically closed at ${closeTime.toLocaleTimeString()} because you forgot to time out.`);
               
               // We don't return here; we proceed to allow the NEW Time In to happen immediately.
             } catch (err) {
@@ -1368,64 +1473,8 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         }
 
         if (!isOvertime) {
-            const amOutTime = timeStringToMinutes(effectiveSchedule.amOut || "12:00");
-            const pmInTime = timeStringToMinutes(effectiveSchedule.pmIn || "13:00");
-            const midpointMinutes = (amOutTime + pmInTime) / 2;
-
-            const getMinutes = (ts: number) => {
-                const d = new Date(ts);
-                return d.getHours() * 60 + d.getMinutes();
-            };
-            const isAm = (ts: number) => getMinutes(ts) < midpointMinutes;
-
-            const currentIsAm = isAm(nowMs);
-
-            const todayEntries = attendance.filter(l => {
-                const d = new Date(l.timestamp);
-                return (
-                    d.getFullYear() === now.getFullYear() && 
-                    d.getMonth() === now.getMonth() && 
-                    d.getDate() === now.getDate() &&
-                    !l.is_overtime
-                );
-            });
-
-            let hasIn = false;
-            let hasOut = false;
-            for (const entry of todayEntries) {
-                if (isAm(entry.timestamp) === currentIsAm) {
-                    if (entry.type === 'in') hasIn = true;
-                    if (entry.type === 'out') hasOut = true;
-                }
-            }
-            const isSessionComplete = hasIn && hasOut;
-
-            let count = 0;
-            for (const entry of todayEntries) {
-                if (entry.type === type && isAm(entry.timestamp) === currentIsAm) {
-                    count++;
-                }
-            }
-
-            if (count >= 1 || (type === 'in' && isSessionComplete)) {
-                 let msg = "Duplicate entry for this session is not allowed.";
-                 
-                 if (type === 'in' && isSessionComplete) {
-                      if (currentIsAm) {
-                          msg = "Morning session already completed. You may time in again for the afternoon session starting at 12:30 PM.";
-                      } else {
-                          msg = "You have completed your attendance sessions for today. You may time in again tomorrow.";
-                      }
-                 } else if (count >= 1) {
-                      if (type === 'in') msg = "You have already timed in for this session.";
-                      else msg = "You have already timed out for this session.";
-                 }
-
-                 setDuplicateModalMessage(msg);
-                 setShowDuplicateModal(true);
-                 setSubmitting(false);
-                 return;
-            }
+            // Deprecated AM/PM counting logic removed.
+            // Duplicate checks are now handled by Shift Window logic in handleBeforeSubmit.
         }
         // ---------------------------------------------------------
 
@@ -1588,6 +1637,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
               approvedAt: approvedAtNum,
               validated_by: e.validated_by,
               is_overtime: e.is_overtime,
+              rendered_hours: e.rendered_hours,
             };
           }) as AttendanceEntry[];
           onUpdate(mapped);
@@ -1601,19 +1651,17 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
       setCameraError(msg);
     } finally {
       setSubmitting(false);
+      isSubmittingRef.current = false;
     }
   };
 
   const handleBeforeSubmit = async (type: "in" | "out") => {
-    if (type === "in") {
-      await addEntry("in");
-      return;
-    }
-
     const now = new Date();
+    const nowMs = now.getTime();
     const effectiveSchedule = dbSchedule || schedule;
+
     if (!effectiveSchedule) {
-      await addEntry("out");
+      await addEntry(type);
       return;
     }
 
@@ -1628,56 +1676,99 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
       return d;
     };
 
-    const amIn = buildTs(effectiveSchedule.amIn || null);
-    const amOut = buildTs(effectiveSchedule.amOut || null);
-    const pmIn = buildTs(effectiveSchedule.pmIn || null);
-    const pmOut = buildTs(effectiveSchedule.pmOut || null);
-    const otIn = buildTs(effectiveSchedule.otIn);
-    const otOut = buildTs(effectiveSchedule.otOut);
+    // 1. Define Shifts with Windows
+    const shifts = [
+      { id: 'am', start: buildTs(effectiveSchedule.amIn), end: buildTs(effectiveSchedule.amOut), rawEnd: effectiveSchedule.amOut },
+      { id: 'pm', start: buildTs(effectiveSchedule.pmIn), end: buildTs(effectiveSchedule.pmOut), rawEnd: effectiveSchedule.pmOut },
+      { id: 'ot', start: buildTs(effectiveSchedule.otIn), end: buildTs(effectiveSchedule.otOut), rawEnd: effectiveSchedule.otOut }
+    ].filter(s => s.start && s.end);
 
-    const nowMs = now.getTime();
+    // Helper: Is timestamp within shift window (Start-30m to End)
+    const isWithinWindow = (ts: number, shift: any) => {
+      if (!shift.start || !shift.end) return false;
+      const startWindow = shift.start.getTime() - 30 * 60000;
+      const endWindow = shift.end.getTime();
+      return ts >= startWindow && ts <= endWindow;
+    };
 
-    let officialOut: Date | null = null;
+    if (type === "in") {
+      // Find Active Shift: Must be in window AND not already taken
+      const todayInLogs = attendance.filter(l => {
+        const d = new Date(l.timestamp);
+        return (
+          d.getFullYear() === now.getFullYear() &&
+          d.getMonth() === now.getMonth() &&
+          d.getDate() === now.getDate() &&
+          l.type === 'in' &&
+          l.status !== 'Rejected'
+        );
+      }).sort((a, b) => a.timestamp - b.timestamp);
 
-    if (amIn && amOut) {
-      const start = amIn.getTime() - 30 * 60 * 1000;
-      const end = amOut.getTime();
-      if (nowMs >= start && nowMs < end) {
-        officialOut = amOut;
+      // Determine which shifts are already consumed by past logs
+      const consumedShiftIds = new Set<string>();
+      
+      // Greedily assign past logs to shifts to see what's taken
+      todayInLogs.forEach(log => {
+          // Find the first shift this log fits into that hasn't been consumed yet
+          const match = shifts.find(s => 
+              !consumedShiftIds.has(s.id) && 
+              isWithinWindow(log.timestamp, s)
+          );
+          if (match) {
+              consumedShiftIds.add(match.id);
+          }
+      });
+
+      // Now check if the current time fits into a shift that is NOT consumed
+      const activeShift = shifts.find(shift => {
+        if (!isWithinWindow(nowMs, shift)) return false;
+        return !consumedShiftIds.has(shift.id);
+      });
+
+      if (!activeShift) {
+        setDuplicateModalMessage("You are outside any allowed shift time or you have already timed in for this shift.");
+        setShowDuplicateModal(true);
+        return;
       }
-    }
 
-    if (!officialOut && pmIn && pmOut) {
-      const start = pmIn.getTime() - 30 * 60 * 1000;
-      const end = pmOut.getTime();
-      if (nowMs >= start && nowMs < end) {
-        officialOut = pmOut;
-      }
-    }
-
-    if (!officialOut && otIn && otOut) {
-      const start = otIn.getTime() - 30 * 60 * 1000;
-      const end = otOut.getTime();
-      if (nowMs >= start && nowMs < end) {
-        officialOut = otOut;
-      }
-    }
-
-    if (officialOut && nowMs < officialOut.getTime()) {
-      let display = "";
-      if (officialOut && amOut && officialOut.getTime() === amOut.getTime()) {
-        display = formatDisplayTime(effectiveSchedule.amOut);
-      } else if (officialOut && pmOut && officialOut.getTime() === pmOut.getTime()) {
-        display = formatDisplayTime(effectiveSchedule.pmOut);
-      } else if (effectiveSchedule.otOut) {
-        display = formatDisplayTime(effectiveSchedule.otOut);
-      }
-      setEarlyOutShiftEndText(display);
-      setShowEarlyOutModal(true);
+      await addEntry("in");
       return;
     }
 
+    // Type OUT
+    // Find shift of the open session (Last IN)
+    const sorted = [...attendance].sort((a, b) => a.timestamp - b.timestamp);
+    const lastIn = sorted.reverse().find(l => l.type === 'in'); 
+
+    let targetShift = null;
+    if (lastIn) {
+      targetShift = shifts.find(shift => isWithinWindow(lastIn.timestamp, shift));
+    }
+
+    if (targetShift && targetShift.end) {
+      const shiftEnd = targetShift.end.getTime();
+      if (nowMs < shiftEnd) {
+        const display = formatDisplayTime(targetShift.rawEnd);
+        setEarlyOutShiftEndText(display);
+        setShowEarlyOutModal(true);
+        return;
+      }
+    }
+
     await addEntry("out");
+  };
+
+  const handleConfirmClick = async () => {
+    if (isClickingRef.current || submitting || isSubmittingRef.current) return;
+    isClickingRef.current = true;
+    try {
+      await handleBeforeSubmit(isCheckedIn ? "out" : "in");
+    } finally {
+      // Small delay to prevent accidental double-taps even after logic finishes
+      setTimeout(() => {
+        isClickingRef.current = false;
+      }, 500);
+    }
   };
 
   // const formatHours = (ms: number) => ... imported from lib
@@ -1740,41 +1831,16 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
             dynamicOt ? { start: Number(dynamicOt.overtime_start), end: Number(dynamicOt.overtime_end) } : undefined
         );
 
-        // Smart Pairing Logic
-        const noonCutoff = new Date(baseDate).setHours(12, 30, 0, 0);
+        // Sequential Pairing Logic (matches Superadmin view)
+        const nonOtLogs = sorted.filter(l => !l.is_overtime);
+        const otLogs = sorted.filter(l => !!l.is_overtime);
 
-        const usedIds = new Set<string>();
-        const isAvailable = (l: AttendanceEntry) => {
-            const key = l.id ? String(l.id) : `${l.timestamp}-${l.type}`;
-            return !usedIds.has(key);
-        };
-        const markUsed = (l: AttendanceEntry) => {
-            const key = l.id ? String(l.id) : `${l.timestamp}-${l.type}`;
-            usedIds.add(key);
-        };
-
-        // 1. Identify Start Points (INs)
-        let s1 = sorted.find(l => l.type === "in" && l.timestamp < noonCutoff && isAvailable(l)) || null;
-        if (s1) markUsed(s1);
-
-        let s3 = sorted.find(l => l.type === "in" && l.timestamp >= noonCutoff && isAvailable(l)) || null;
-        if (s3) markUsed(s3);
-        
-        // OT IN: strictly after PM IN (if exists), else just after OT Start
+        let s1: AttendanceEntry | null = null;
+        let s2: AttendanceEntry | null = null;
+        let s3: AttendanceEntry | null = null;
+        let s4: AttendanceEntry | null = null;
         let s5: AttendanceEntry | null = null;
-        
-        const hasOtConfig = !!dynamicOt || !!src?.otIn;
-        const otStartTs = hasOtConfig ? effectiveSchedule.otStart : null;
-
-        if (otStartTs !== null) {
-            s5 = sorted.find(l => 
-                l.type === "in" && 
-                l.timestamp >= otStartTs && 
-                (!s3 || l.timestamp > s3.timestamp) &&
-                isAvailable(l)
-            ) || null;
-        }
-        if (s5) markUsed(s5);
+        let s6: AttendanceEntry | null = null;
 
         // Helper for virtual auto-out
         const today = new Date();
@@ -1796,152 +1862,85 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
              };
         };
 
-        // 2. Identify End Points (OUTs) based on Pairs
-        
-        // s2 (AM OUT): Last OUT after s1 but before s3 (if s3 exists)
-        let s2: AttendanceEntry | null = null;
-        let crossShiftOut: AttendanceEntry | null = null;
-
+        // s1: first IN (non-OT)
+        s1 = nonOtLogs.find(l => l.type === 'in') || null;
+        // s2: first OUT after s1
         if (s1) {
-            const searchEnd = s3 ? s3.timestamp : (new Date(baseDate).setHours(23, 59, 59, 999));
-            const candidates = sorted.filter(l => l.type === "out" && l.timestamp > s1.timestamp && l.timestamp < searchEnd && isAvailable(l));
-            const candidate = candidates.pop() || null;
-            
-            if (candidate) {
-                // If the OUT is in the afternoon (cross-shift), and we don't have a separate PM session (s3),
-                // we treat it as the Morning OUT (s2) visually because the user wants to see it closed in the morning
-                // since they forgot to clock out for lunch.
-                s2 = candidate;
-                markUsed(s2);
-
-                if (!s3 && candidate.timestamp > noonCutoff) {
-                    crossShiftOut = candidate; // Keep track for calculation logic if needed
-                }
-            } else if (isPastDate) {
-                s2 = createVirtualOut(s1, 'am');
-            }
+          s2 = nonOtLogs.find(l => l.type === 'out' && l.timestamp > s1!.timestamp) || null;
+          if (!s2 && isPastDate) {
+            s2 = createVirtualOut(s1 as AttendanceEntry, 'am');
+          }
         }
-
-        // s4 (PM OUT): Last OUT after s3 but before s5 (if s5 exists)
-        let s4: AttendanceEntry | null = null;
+        // s3: next IN after s2 (or after s1 if no s2)
+        const afterTsForS3 = s2 ? s2.timestamp : (s1 ? s1.timestamp : 0);
+        s3 = nonOtLogs.find(l => l.type === 'in' && l.timestamp > afterTsForS3) || null;
+        // s4: first OUT after s3
         if (s3) {
-            const searchEnd = s5 ? s5.timestamp : (new Date(baseDate).setHours(23, 59, 59, 999));
-            const candidates = sorted.filter(l => l.type === "out" && l.timestamp > s3.timestamp && l.timestamp < searchEnd && isAvailable(l));
-            s4 = candidates.pop() || null;
-            if (s4) {
-                markUsed(s4);
-            } else if (isPastDate) {
-                s4 = createVirtualOut(s3, 'pm');
-            }
+          s4 = nonOtLogs.find(l => l.type === 'out' && l.timestamp > s3!.timestamp) || null;
+          if (!s4 && isPastDate) {
+            s4 = createVirtualOut(s3 as AttendanceEntry, 'pm');
+          }
         }
-
-        // s6 (OT OUT): Last OUT after s5
-        let s6: AttendanceEntry | null = null;
+        // s5/s6: overtime pair based on is_overtime
+        s5 = otLogs.find(l => l.type === 'in') || null;
         if (s5) {
-            const candidates = sorted.filter(l => l.type === "out" && l.timestamp > s5.timestamp && isAvailable(l));
-            s6 = candidates.pop() || null;
-            if (s6) {
-                markUsed(s6);
-            } else if (isPastDate) {
-                s6 = createVirtualOut(s5, 'ot');
-            }
+          s6 = otLogs.find(l => l.type === 'out' && l.timestamp > s5!.timestamp) || null;
+          if (!s6 && isPastDate) {
+            s6 = createVirtualOut(s5 as AttendanceEntry, 'ot');
+          }
         }
-
-        const hasSchedule =
-          !!src &&
-          typeof src.amIn === "string" &&
-          typeof src.amOut === "string" &&
-          typeof src.pmIn === "string" &&
-          typeof src.pmOut === "string";
 
         let total = 0;
         const dailyFlags = new Set<string>();
 
-        if (hasSchedule && src) {
+        // 3. Calculate Hours (Supervisor Logic - Exact Port)
+        // We use the same slot-based calculation as the supervisor portal to ensure consistency.
+        const calculateHours = (requireApproved: boolean) => {
+             const calc = (inLog: AttendanceEntry | null, outLog: AttendanceEntry | null, shift: 'am' | 'pm' | 'ot') => {
+                  if (!inLog || !outLog) return 0;
+                  if (inLog.status === 'Rejected' || outLog.status === 'Rejected') return 0;
+                  
+                  // Validated Hours Priority (Ledger - Source of Truth)
+                  if ((outLog as any).validated_hours !== undefined && (outLog as any).validated_hours !== null && Number((outLog as any).validated_hours) >= 0) {
+                        return Number((outLog as any).validated_hours) * 3600000;
+                  }
 
-        // --- Session Grouping ---
-        type Session = { in: AttendanceEntry; out: AttendanceEntry | null };
-        const sessions: Session[] = [];
-        let currentIn: AttendanceEntry | null = null;
-        
-        sorted.forEach(log => {
-            if (log.status === "Rejected") return;
+                  // Rendered Hours Priority (Frozen History)
+                  if (outLog.rendered_hours !== undefined && outLog.rendered_hours !== null && Number(outLog.rendered_hours) >= 0) {
+                        if (requireApproved) {
+                             const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
+                             const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
+                             if (!inOk || !outOk) return 0;
+                        }
+                        // Avoid double counting (same as supervisor)
+                        // If PM Out is same as AM Out (s2), it was already counted in AM
+                        if (shift === 'pm' && s2 && outLog.id === s2.id) return 0;
+                        // If OT Out is same as AM/PM Out, it was already counted
+                        if (shift === 'ot' && ((s2 && outLog.id === s2.id) || (s4 && outLog.id === s4.id))) return 0;
+                        
+                        return Number(outLog.rendered_hours) * 3600000;
+                  }
 
-            if (log.type === "in") {
-                if (currentIn) {
-                     sessions.push({ in: currentIn, out: null });
-                }
-                currentIn = log;
-            } else if (log.type === "out") {
-                if (currentIn) {
-                    sessions.push({ in: currentIn, out: log });
-                    currentIn = null;
-                }
-            }
-        });
-        if (currentIn) {
-            sessions.push({ in: currentIn, out: null });
-        }
+                  if (requireApproved) {
+                        const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
+                        const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
+                        if (!inOk || !outOk) return 0;
+                  }
 
-        // Calculate Hours using centralized logic
-        total = 0;
-        
-        sessions.forEach(session => {
-            if (!session.out) return;
+                  // Fallback: Live Schedule
+                  return calculateSessionDuration(inLog.timestamp, outLog.timestamp, shift, effectiveSchedule);
+             };
 
-            const { am, pm, ot } = calculateShiftDurations(session.in.timestamp, session.out.timestamp, effectiveSchedule);
-            
-            const f = checkSessionFlags(session.in.timestamp, session.out.timestamp, effectiveSchedule);
-            f.forEach(flag => dailyFlags.add(flag));
+             let t = 0;
+             t += calc(s1, s2, 'am');
+             t += calc(s3, s4, 'pm');
+             t += calc(s5, s6, 'ot');
+             return t;
+        };
 
-            total += am + pm + ot;
-        });
-        
-        // Final round to ensure minute precision - REDUNDANT with centralized logic
-        // total = Math.floor(total / 60000) * 60000;
+        total = calculateHours(false);
 
-        } else {
-            // Fallback: Use centralized logic with defaults if schedule is missing
-             // --- Session Grouping ---
-            type Session = { in: AttendanceEntry; out: AttendanceEntry | null };
-            const sessions: Session[] = [];
-            let currentIn: AttendanceEntry | null = null;
-            
-            sorted.forEach(log => {
-                if (log.status === "Rejected") return;
-
-                if (log.type === "in") {
-                    if (currentIn) {
-                        sessions.push({ in: currentIn, out: null });
-                    }
-                    currentIn = log;
-                } else if (log.type === "out") {
-                    if (currentIn) {
-                        sessions.push({ in: currentIn, out: log });
-                        currentIn = null;
-                    }
-                }
-            });
-            if (currentIn) {
-                sessions.push({ in: currentIn, out: null });
-            }
-
-            total = 0;
-
-            sessions.forEach(session => {
-                if (!session.out) return;
-                // Use effectiveSchedule which has defaults
-                const { am, pm, ot } = calculateShiftDurations(session.in.timestamp, session.out.timestamp, effectiveSchedule);
-                
-                const f = checkSessionFlags(session.in.timestamp, session.out.timestamp, effectiveSchedule);
-                f.forEach(flag => dailyFlags.add(flag));
-
-                total += am + pm + ot;
-            });
-             // total = Math.floor(total / 60000) * 60000;
-        }
-
-        return { date: day.date, s1, s2, s3, s4, s5, s6, total, flags: Array.from(dailyFlags) };
+        return { date: day.date, s1, s2, s3, s4, s5, s6, total, flags: Array.from(dailyFlags), schedule: effectiveSchedule };
       });
   }, [filteredAttendance, dbSchedule, schedule, allOvertimeShifts]);
 
@@ -1956,9 +1955,9 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         
         const sched = dbSchedule || schedule;
         if (sched) {
-             const isAmValidated = (day.s1?.status === 'Approved' || day.s2?.status === 'Approved');
-             const isPmValidated = (day.s3?.status === 'Approved' || day.s4?.status === 'Approved');
-             const isOtValidated = (day.s5?.status === 'Approved' || day.s6?.status === 'Approved');
+             const isAmValidated = ((day.s1 as any)?.status === 'Approved' || (day.s2 as any)?.status === 'Approved');
+             const isPmValidated = ((day.s3 as any)?.status === 'Approved' || (day.s4 as any)?.status === 'Approved');
+             const isOtValidated = ((day.s5 as any)?.status === 'Approved' || (day.s6 as any)?.status === 'Approved');
              
              // Build ShiftSchedule object
              const dateObj = new Date(day.date);
@@ -1979,16 +1978,34 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
              );
 
              if (isAmValidated) {
-                 const d = calculateShiftDurations(day.s1?.timestamp || 0, day.s2?.timestamp || 0, scheduleObj);
-                 overallValidated += d.am + d.pm + d.ot;
+                 if ((day.s2 as any)?.validated_hours != null && Number((day.s2 as any).validated_hours) > 0) {
+                     overallValidated += (day.s2 as any).validated_hours * 3600000;
+                 } else if ((day.s2 as any)?.rendered_hours != null && Number((day.s2 as any).rendered_hours) > 0) {
+                     overallValidated += (day.s2 as any).rendered_hours * 3600000;
+                 } else {
+                     const d = calculateShiftDurations((day.s1 as any)?.timestamp || 0, (day.s2 as any)?.timestamp || 0, scheduleObj);
+                     overallValidated += d.am + d.pm + d.ot;
+                 }
              }
              if (isPmValidated) {
-                 const d = calculateShiftDurations(day.s3?.timestamp || 0, day.s4?.timestamp || 0, scheduleObj);
-                 overallValidated += d.am + d.pm + d.ot;
+                 if ((day.s4 as any)?.validated_hours != null && Number((day.s4 as any).validated_hours) > 0) {
+                     overallValidated += (day.s4 as any).validated_hours * 3600000;
+                 } else if ((day.s4 as any)?.rendered_hours != null && Number((day.s4 as any).rendered_hours) > 0) {
+                     overallValidated += (day.s4 as any).rendered_hours * 3600000;
+                 } else {
+                     const d = calculateShiftDurations((day.s3 as any)?.timestamp || 0, (day.s4 as any)?.timestamp || 0, scheduleObj);
+                     overallValidated += d.am + d.pm + d.ot;
+                 }
              }
              if (isOtValidated) {
-                 const d = calculateShiftDurations(day.s5?.timestamp || 0, day.s6?.timestamp || 0, scheduleObj);
-                 overallValidated += d.am + d.pm + d.ot;
+                 if ((day.s6 as any)?.validated_hours != null && Number((day.s6 as any).validated_hours) > 0) {
+                     overallValidated += (day.s6 as any).validated_hours * 3600000;
+                 } else if ((day.s6 as any)?.rendered_hours != null && Number((day.s6 as any).rendered_hours) > 0) {
+                     overallValidated += (day.s6 as any).rendered_hours * 3600000;
+                 } else {
+                     const d = calculateShiftDurations((day.s5 as any)?.timestamp || 0, (day.s6 as any)?.timestamp || 0, scheduleObj);
+                     overallValidated += d.am + d.pm + d.ot;
+                 }
              }
         }
     });
@@ -2005,11 +2022,14 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
     // 2. Map Data
     const dataRows = processedDays.map(day => {
-      const fmt = (slot: typeof day.s1) => slot ? formatTime(slot.timestamp) : "-";
-      const fmtOut = (slot: typeof day.s1) => {
+      const fmt = (slot: any) => slot ? formatTime(slot.timestamp) : "-";
+      const fmtOut = (slot: any) => {
         if (!slot) return "-";
+        if (slot.status === 'Official') {
+            return `${formatTime(slot.timestamp)} (Official Time-Out)`;
+        }
         if (slot.validated_by === "SYSTEM_AUTO_CLOSE" || slot.validated_by === "AUTO TIME OUT") {
-            return "AUTO TIME OUT";
+            return "";
         }
         return formatTime(slot.timestamp);
       };
@@ -2040,12 +2060,12 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
           return "-";
       };
 
-      const amStatus = getStatus(day.s1, day.s2);
+      const amStatus = getStatus(day.s1 as any, day.s2 as any);
       let pmStatus = "-";
       if (day.s3 || day.s4) {
-          pmStatus = getStatus(day.s3, day.s4);
+          pmStatus = getStatus(day.s3 as any, day.s4 as any);
       } else if (day.s5 || day.s6) {
-          pmStatus = getStatus(day.s5, day.s6);
+          pmStatus = getStatus(day.s5 as any, day.s6 as any);
       }
 
       return [
@@ -2128,7 +2148,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   };
 
   return (
-    <div className="w-full space-y-6">
+    <div className="w-full space-y-4">
       {cameraError && (
         <div className="rounded-xl bg-red-50 border border-red-100 p-4 flex items-center gap-3 text-red-700 animate-in fade-in slide-in-from-top-2 shadow-sm">
           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
@@ -2138,13 +2158,13 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
       {/* Overtime Indicator */}
       {authorizedOvertime && (
-        <div className="rounded-xl bg-indigo-50 border border-indigo-100 p-4 flex items-center gap-3 text-indigo-700 animate-in fade-in slide-in-from-top-2 shadow-sm">
-           <div className="bg-indigo-100 p-2 rounded-full">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <div className="rounded-xl bg-indigo-50 border border-indigo-100 p-3 flex items-center gap-2 text-indigo-700 animate-in fade-in slide-in-from-top-2 shadow-sm">
+           <div className="bg-indigo-100 p-1.5 rounded-full">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
            </div>
            <div className="flex flex-col">
-              <span className="text-sm font-bold">Overtime Authorized</span>
-              <span className="text-xs opacity-90">
+              <span className="text-xs font-bold">Overtime Authorized</span>
+              <span className="text-[10px] opacity-90">
                 You can time in from {new Date(authorizedOvertime.start).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} to {new Date(authorizedOvertime.end).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}.
               </span>
            </div>
@@ -2155,14 +2175,14 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
       {showBreakModal && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
-            <h2 className="text-xl font-bold text-gray-900 mb-2">Cannot Time In</h2>
-            <p className="text-gray-700 mb-4">
+          <div className="bg-white rounded-xl shadow-lg w-full max-w-sm p-4">
+            <h2 className="text-base font-bold text-gray-900 mb-2">Cannot Time In</h2>
+            <p className="text-gray-700 text-xs mb-3">
               You cant time in until {breakPmInText || "the afternoon shift starts"}.
             </p>
             <button
               onClick={() => setShowBreakModal(false)}
-              className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
+              className="w-full px-3 py-1.5 bg-[#F97316] text-white rounded-lg font-bold text-xs"
             >
               OK
             </button>
@@ -2172,14 +2192,14 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
       {showNoScheduleModal && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
-            <h2 className="text-xl font-bold text-gray-900 mb-2">Cannot Time In</h2>
-            <p className="text-gray-700 mb-4">
+          <div className="bg-white rounded-xl shadow-lg w-full max-w-sm p-4">
+            <h2 className="text-base font-bold text-gray-900 mb-2">Cannot Time In</h2>
+            <p className="text-gray-700 text-xs mb-3">
               Official Time is not set by the supervisor. You cannot time in.
             </p>
             <button
               onClick={() => setShowNoScheduleModal(false)}
-              className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
+              className="w-full px-3 py-1.5 bg-[#F97316] text-white rounded-lg font-bold text-xs"
             >
               OK
             </button>
@@ -2189,14 +2209,14 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
       {showLateInModal && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
-            <h2 className="text-xl font-bold text-gray-900 mb-2">Cannot Time In</h2>
-            <p className="text-gray-700 mb-4">
+          <div className="bg-white rounded-xl shadow-lg w-full max-w-sm p-4">
+            <h2 className="text-base font-bold text-gray-900 mb-2">Cannot Time In</h2>
+            <p className="text-gray-700 text-xs mb-3">
               {lateInPmOutText || "You cannot time in beyond your official time."}
             </p>
             <button
               onClick={() => setShowLateInModal(false)}
-              className="w-full px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold"
+              className="w-full px-3 py-1.5 bg-[#F97316] text-white rounded-lg font-bold text-xs"
             >
               OK
             </button>
@@ -2206,16 +2226,16 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
       {showEarlyOutModal && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
-            <h2 className="text-xl font-bold text-gray-900 mb-2">Time Out Early?</h2>
-            <p className="text-gray-700 mb-4">
+          <div className="bg-white rounded-xl shadow-lg w-full max-w-sm p-4">
+            <h2 className="text-base font-bold text-gray-900 mb-2">Time Out Early?</h2>
+            <p className="text-gray-700 text-xs mb-3">
               Are you sure you want to time out early? Any remaining time until{" "}
               {earlyOutShiftEndText || "your official time out"} will not be counted toward your OJT hours.
             </p>
-            <div className="flex gap-3">
+            <div className="flex gap-2">
               <button
                 onClick={() => setShowEarlyOutModal(false)}
-                className="flex-1 px-4 py-2 rounded-xl border border-gray-300 text-gray-700 font-semibold bg-white hover:bg-gray-50"
+                className="flex-1 px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 font-semibold bg-white hover:bg-gray-50 text-xs"
               >
                 Cancel
               </button>
@@ -2224,7 +2244,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                   setShowEarlyOutModal(false);
                   await addEntry("out");
                 }}
-                className="flex-1 px-4 py-2 bg-[#F97316] text-white rounded-xl font-bold hover:bg-[#EA580C]"
+                className="flex-1 px-3 py-1.5 bg-[#F97316] text-white rounded-lg font-bold hover:bg-[#EA580C] text-xs"
               >
                 Yes, Time Out
               </button>
@@ -2234,12 +2254,12 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
       )}
 
       {showHistoryMode ? (
-        <div className="space-y-6">
+        <div className="space-y-2">
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+            <div className="px-3 py-1.5 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
               <div>
-                <h2 className="text-base sm:text-lg font-bold text-gray-900">Attendance History</h2>
-                <p className="text-xs text-gray-500 mt-1">
+                <h2 className="text-sm sm:text-base font-bold text-gray-900">Attendance History</h2>
+                <p className="text-[10px] text-gray-500 mt-0.5">
                   Full attendance records for {studentName || idnumber}.
                 </p>
               </div>
@@ -2247,38 +2267,38 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                 <button
                   onClick={handleDownloadExcel}
                   disabled={processedDays.length === 0}
-                  className="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-green-700 hover:bg-green-50 hover:border-green-200 transition-colors gap-2"
+                  className="inline-flex items-center px-2 py-1 text-[10px] font-semibold rounded-lg border border-gray-200 bg-white text-green-700 hover:bg-green-50 hover:border-green-200 transition-colors gap-1.5"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 15v4c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 15v4c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
                   Export Attendance
                 </button>
                 <button
                   onClick={() => setShowHistoryMode(false)}
-                  className="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-100 transition-colors"
+                  className="inline-flex items-center px-2 py-1 text-[10px] font-semibold rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-100 transition-colors"
                 >
-                  Back to Recent View
+                  Back
                 </button>
               </div>
             </div>
 
-            <div className="p-6 sm:p-8">
-              <div className="flex flex-col sm:flex-row gap-4">
+            <div className="p-2 sm:p-3">
+              <div className="flex flex-col sm:flex-row gap-2">
                 <div className="flex-1">
-                  <label className="text-xs font-bold text-gray-700 uppercase tracking-wide mb-1 block">Search</label>
+                  <label className="text-[10px] font-bold text-gray-700 uppercase tracking-wide mb-0.5 block">Search</label>
                   <input 
                     type="text" 
                     value={attendanceSearchQuery}
                     onChange={(e) => setAttendanceSearchQuery(e.target.value)}
                     placeholder="Search by type or date..." 
-                    className="w-full rounded-lg border border-gray-400 px-4 py-2.5 text-sm font-medium text-gray-900 placeholder:text-gray-500 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                    className="w-full rounded-lg border border-gray-400 px-2 py-1 text-[11px] font-medium text-gray-900 placeholder:text-gray-500 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
                   />
                 </div>
-                <div className="w-full sm:w-40">
-                  <label className="text-xs font-bold text-gray-700 uppercase tracking-wide mb-1 block">Filter by Month</label>
+                <div className="w-full sm:w-36">
+                  <label className="text-[10px] font-bold text-gray-700 uppercase tracking-wide mb-0.5 block">Filter by Month</label>
                   <select
                     value={monthFilter}
                     onChange={e => setMonthFilter(e.target.value)}
-                    className="w-full rounded-lg border border-gray-400 px-3 py-2.5 text-sm font-medium text-gray-900 bg-white focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                    className="w-full rounded-lg border border-gray-400 px-2 py-1 text-[11px] font-medium text-gray-900 bg-white focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
                   >
                     <option value="">All months</option>
                     {monthOptions.map(opt => (
@@ -2288,116 +2308,128 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                     ))}
                   </select>
                 </div>
-                <div className="w-full sm:w-auto">
-                  <label className="text-xs font-bold text-gray-700 uppercase tracking-wide mb-1 block">Filter by Date</label>
-                  <input 
-                    type="date" 
-                    value={filterDate}
-                    onChange={(e) => setFilterDate(e.target.value)}
-                    className="w-full sm:w-48 rounded-lg border border-gray-400 px-4 py-2.5 text-sm font-medium text-gray-900 placeholder:text-gray-500 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all bg-white"
-                  />
+                <div className="w-full sm:w-36">
+                  <label className="text-[10px] font-bold text-gray-700 uppercase tracking-wide mb-0.5 block">Filter by Status</label>
+                  <select
+                    value={filterStatus}
+                    onChange={e => setFilterStatus(e.target.value)}
+                    className="w-full rounded-lg border border-gray-400 px-2 py-1 text-[11px] font-medium text-gray-900 bg-white focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                  >
+                    <option value="">All Statuses</option>
+                    <option value="Pending">Pending</option>
+                    <option value="Validated">Validated</option>
+                    <option value="Unvalidated">Unvalidated</option>
+                  </select>
                 </div>
-                {(attendanceSearchQuery || filterDate || monthFilter) && (
-                  <div className="flex items-end">
-                    <button 
-                      onClick={() => { setAttendanceSearchQuery(""); setFilterDate(""); setMonthFilter(""); }}
-                      className="mb-[1px] px-4 py-2.5 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                    >
-                      Clear
-                    </button>
-                  </div>
-                )}
               </div>
 
-              <div className="mt-4 flex flex-wrap gap-2 text-xs">
-                <span className="px-3 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-700 font-medium">
+              <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
+                <span className="px-2 py-0.5 rounded-full border border-gray-200 bg-gray-50 text-gray-700 font-medium">
                   Pending: {statusCounts.Pending}
                 </span>
-                <span className="px-3 py-1 rounded-full border border-green-100 bg-green-50 text-green-700 font-medium">
+                <span className="px-2 py-0.5 rounded-full border border-green-100 bg-green-50 text-green-700 font-medium">
                   Validated: {statusCounts.Approved}
                 </span>
-                <span className="px-3 py-1 rounded-full border border-red-100 bg-red-50 text-red-700 font-medium">
+                <span className="px-2 py-0.5 rounded-full border border-red-100 bg-red-50 text-red-700 font-medium">
                   Unvalidated: {statusCounts.Rejected}
                 </span>
               </div>
 
-              <div className="mt-4 border-t border-gray-100 pt-4">
+              <div className="mt-2 border-t border-gray-100 pt-2">
+
                 {processedDays.length > 0 ? (
                   <>
                     <div className="hidden md:block overflow-x-auto custom-scrollbar">
-                      <table className="w-full text-[11px] text-left">
-                        <thead className="bg-gray-50 text-xs uppercase text-gray-500 font-bold">
+                      <table className="w-full text-[10px] text-left">
+                        <thead className="bg-gray-50 text-[10px] uppercase text-gray-500 font-bold">
                           <tr>
-                            <th rowSpan={2} className="px-4 py-3 border-r border-gray-100 min-w-[110px] text-left align-bottom pb-4">Date</th>
-                            <th colSpan={2} className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50">Morning</th>
-                            <th colSpan={2} className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50">Afternoon</th>
-                            <th colSpan={2} className="px-2 py-2 text-center border-r border-gray-100 border-b bg-gray-100/50">Overtime</th>
-                            <th rowSpan={2} className="px-4 py-3 text-right align-bottom pb-4">Total Hours</th>
+                            <th rowSpan={2} className="px-1 py-0.5 border-r border-gray-100 min-w-[70px] text-left align-bottom pb-1">Date</th>
+                            <th colSpan={2} className="px-1 py-0.5 text-center border-r border-gray-100 border-b bg-gray-100/50">Morning</th>
+                            <th colSpan={2} className="px-1 py-0.5 text-center border-r border-gray-100 border-b bg-gray-100/50">Afternoon</th>
+                            <th colSpan={2} className="px-1 py-0.5 text-center border-r border-gray-100 border-b bg-gray-100/50">Overtime</th>
+                            <th rowSpan={2} className="px-1 py-0.5 text-right align-bottom pb-1">Total Hours</th>
                           </tr>
                           <tr>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time In</th>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time Out</th>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time In</th>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time Out</th>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time In</th>
-                            <th className="px-2 py-2 text-center border-r border-gray-100 min-w-[80px] text-[10px] tracking-wider">Time Out</th>
+                            <th className="px-1 py-0.5 text-center border-r border-gray-100 min-w-[50px] text-[9px] tracking-wider">Time In</th>
+                            <th className="px-1 py-0.5 text-center border-r border-gray-100 min-w-[50px] text-[9px] tracking-wider">Time Out</th>
+                            <th className="px-1 py-0.5 text-center border-r border-gray-100 min-w-[50px] text-[9px] tracking-wider">Time In</th>
+                            <th className="px-1 py-0.5 text-center border-r border-gray-100 min-w-[50px] text-[9px] tracking-wider">Time Out</th>
+                            <th className="px-1 py-0.5 text-center border-r border-gray-100 min-w-[50px] text-[9px] tracking-wider">Time In</th>
+                            <th className="px-1 py-0.5 text-center border-r border-gray-100 min-w-[50px] text-[9px] tracking-wider">Time Out</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                           {processedDays.map((day, i) => (
                             <tr key={i} className="hover:bg-gray-50 transition-colors">
-                              <td className="px-4 py-3 font-medium text-gray-900 whitespace-nowrap border-r border-gray-100">
+                              <td className="px-1 py-0.5 font-medium text-gray-900 whitespace-nowrap border-r border-gray-100">
                                 {day.date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}
                               </td>
                               {[day.s1, day.s2, day.s3, day.s4, day.s5, day.s6].map((slot, idx) => {
                                 const pairOut = (idx === 0 || idx === 1) ? day.s2 : (idx === 2 || idx === 3) ? day.s4 : day.s6;
                                 const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
+                                
+                                let isLateTime = false;
+                                if (slot && slot.type === 'in' && day.schedule) {
+                                    if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.amIn);
+                                    if (idx === 2) isLateTime = isLate(slot.timestamp, day.schedule.pmIn);
+                                    if (idx === 4) isLateTime = isLate(slot.timestamp, day.schedule.otStart);
+                                }
 
                                 return (
-                                <td key={idx} className={`px-1.5 py-2 border-r border-gray-100 text-center min-w-[100px] ${isSessionAutoTimeOut && slot?.type === 'out' ? 'align-middle' : 'align-top'}`}>
+                                <td key={idx} className={`px-1 py-0.5 border-r border-gray-100 text-center min-w-[60px] ${isSessionAutoTimeOut && slot?.type === 'out' ? 'align-middle' : 'align-top'}`}>
                                   {slot ? (
-                                    <div className={`flex flex-col items-center gap-1 ${isSessionAutoTimeOut && slot.type === 'out' ? 'justify-center h-full' : ''}`}>
+                                    (isSessionAutoTimeOut && slot.type === 'out' && slot.status !== 'Official') ? null : (
+                                    <div className={`flex flex-col items-center gap-0.5 ${isSessionAutoTimeOut && slot.type === 'out' ? 'justify-center h-full' : ''}`}>
                                           {isSessionAutoTimeOut && slot.type === 'out' ? (
-                                            <span className="text-[10px] font-bold text-red-500 py-1 text-center w-full block">AUTO TIME OUT</span>
+                                            <div className="flex flex-col items-center">
+                                                <span className="text-[10px] font-medium text-gray-800">
+                                                    {formatTime(slot.timestamp)}
+                                                </span>
+                                                <span className="text-[8px] font-normal text-gray-500">(Official Time-Out)</span>
+                                            </div>
                                           ) : (
-                                            <span className="text-[11px] font-medium text-gray-800">
-                                              {formatTime(slot.timestamp)}
-                                            </span>
+                                            <div className="flex flex-col items-center w-full">
+                                                <div className={`text-[10px] font-medium whitespace-nowrap text-center ${isLateTime ? 'text-red-600 font-bold' : 'text-gray-800'}`}>
+                                                {formatTime(slot.timestamp)}
+                                                </div>
+                                                {slot.status === 'Official' && <div className="text-[8px] font-normal text-gray-500 leading-none mt-0.5 text-center">(Official Time-Out)</div>}
+                                                {isLateTime ? (
+                                                    <div className="text-[7px] font-bold text-red-500 leading-none text-center">LATE</div>
+                                                ) : (
+                                                    <div className="text-[7px] font-bold text-transparent leading-none invisible text-center">LATE</div>
+                                                )}
+                                            </div>
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
                                             slot.photoDataUrl ? (
                                               <div
-                                                className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
+                                                className="relative w-8 h-8 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
                                                 onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
                                               >
                                                 <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
                                               </div>
                                             ) : (
-                                              <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-50 flex flex-col items-center justify-center text-gray-400">
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                                                <span className="text-[9px] mt-1">System</span>
+                                              <div className="relative w-8 h-8 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-50 flex flex-col items-center justify-center text-gray-400">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                <span className="text-[8px] mt-0.5">System</span>
                                               </div>
                                             )
                                           )}
-                                          <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
+                                          <span className={`text-[9px] font-medium ${getStatusColorClass(slot)}`}>
                                             {formatStatusLabel(slot)}
                                           </span>
                                     </div>
+                                    )
                                   ) : (
-                                    <span className="text-gray-300 block py-4">-</span>
+                                    <span className="text-gray-300 block py-1">-</span>
                                   )}
                                 </td>
                                 );
                               })}
-                              <td className="px-6 py-4 text-right font-bold text-gray-900">
-                                <div className="flex flex-col items-end gap-1">
+                              <td className="px-2 py-1 text-right font-bold text-gray-900">
+                                <div className="flex flex-col items-end gap-0.5">
                                   <span>{formatHours(day.total)}</span>
-                                  {day.flags && day.flags.includes("MISSED_LUNCH_PUNCH") && (
-                                    <div className="flex items-center gap-1 text-amber-600" title="Missed Lunch Punch: Session spans across lunch break">
-                                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-                                      <span className="text-[10px] font-medium uppercase">Lunch Policy</span>
-                                    </div>
-                                  )}
+                                  {/* Lunch Policy flag removed per user request */}
                                 </div>
                               </td>
                             </tr>
@@ -2405,7 +2437,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                         </tbody>
                       </table>
                     </div>
-                    <div className="md:hidden space-y-3">
+                    <div className="md:hidden space-y-2">
                       {processedDays.map((day, i) => (
                         <div key={i} className="p-4 rounded-2xl border border-gray-200 bg-white">
                           <div className="text-sm font-semibold text-gray-900">
@@ -2419,16 +2451,29 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                   const pairOut = day.s2;
                                   const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
 
+                                  let isLateTime = false;
+                                  if (slot && slot.type === 'in' && day.schedule) {
+                                      if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.amIn);
+                                  }
+
                                   return (
                                   <div key={idx} className="flex flex-col items-center gap-1">
                                     {slot ? (
                                       <>
                                           {isSessionAutoTimeOut && slot.type === 'out' ? (
-                                            <span className="text-[10px] font-bold text-red-500 py-1 text-center w-full block">AUTO TIME OUT</span>
+                                            <span className="block h-4 w-full"></span>
                                           ) : (
-                                            <span className="text-[11px] font-medium text-gray-800">
-                                              {formatTime(slot.timestamp)}
-                                            </span>
+                                            <div className="flex flex-col items-center w-full">
+                                                <div className={`text-[11px] font-medium whitespace-nowrap text-center ${isLateTime ? 'text-red-600 font-bold' : 'text-gray-800'}`}>
+                                                {formatTime(slot.timestamp)}
+                                                </div>
+                                                {slot.status === 'Official' && <div className="text-[9px] font-normal text-gray-500 leading-none mt-0.5 text-center">(Official Time-Out)</div>}
+                                                {isLateTime ? (
+                                                    <div className="text-[7px] font-bold text-red-500 leading-none text-center">LATE</div>
+                                                ) : (
+                                                    <div className="text-[7px] font-bold text-transparent leading-none invisible text-center">LATE</div>
+                                                )}
+                                            </div>
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
                                             slot.photoDataUrl ? (
@@ -2445,9 +2490,11 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                               </div>
                                             )
                                           )}
+                                          {!(isSessionAutoTimeOut && slot.type === 'out') && (
                                             <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
                                               {formatStatusLabel(slot)}
                                             </span>
+                                          )}
                                       </>
                                     ) : (
                                       <span className="text-gray-300">-</span>
@@ -2464,16 +2511,29 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                   const pairOut = day.s4;
                                   const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
 
+                                  let isLateTime = false;
+                                  if (slot && slot.type === 'in' && day.schedule) {
+                                      if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.pmIn);
+                                  }
+
                                   return (
                                   <div key={idx} className="flex flex-col items-center gap-1">
                                     {slot ? (
                                       <>
                                           {isSessionAutoTimeOut && slot.type === 'out' ? (
-                                            <span className="text-[10px] font-bold text-red-500 py-1 text-center w-full block">AUTO TIME OUT</span>
+                                            <span className="block h-4 w-full"></span>
                                           ) : (
-                                            <span className="text-[11px] font-medium text-gray-800">
-                                              {formatTime(slot.timestamp)}
-                                            </span>
+                                            <div className="flex flex-col items-center w-full">
+                                                <div className={`text-[11px] font-medium whitespace-nowrap text-center ${isLateTime ? 'text-red-600 font-bold' : 'text-gray-800'}`}>
+                                                {formatTime(slot.timestamp)}
+                                                </div>
+                                                {slot.status === 'Official' && <div className="text-[9px] font-normal text-gray-500 leading-none mt-0.5 text-center">(Official Time-Out)</div>}
+                                                {isLateTime ? (
+                                                    <div className="text-[7px] font-bold text-red-500 leading-none text-center">LATE</div>
+                                                ) : (
+                                                    <div className="text-[7px] font-bold text-transparent leading-none invisible text-center">LATE</div>
+                                                )}
+                                            </div>
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
                                             slot.photoDataUrl ? (
@@ -2490,9 +2550,11 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                               </div>
                                             )
                                           )}
+                                          {!(isSessionAutoTimeOut && slot.type === 'out') && (
                                             <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
                                               {formatStatusLabel(slot)}
                                             </span>
+                                          )}
                                       </>
                                     ) : (
                                       <span className="text-gray-300">-</span>
@@ -2509,16 +2571,29 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                   const pairOut = day.s6;
                                   const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
 
+                                  let isLateTime = false;
+                                  if (slot && slot.type === 'in' && day.schedule) {
+                                      if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.otStart);
+                                  }
+
                                   return (
                                   <div key={idx} className="flex flex-col items-center gap-1">
                                     {slot ? (
                                       <>
                                           {isSessionAutoTimeOut && slot.type === 'out' ? (
-                                            <span className="text-[10px] font-bold text-red-500 py-1 text-center w-full block">AUTO TIME OUT</span>
+                                            <span className="block h-4 w-full"></span>
                                           ) : (
-                                            <span className="text-[11px] font-medium text-gray-800">
-                                              {formatTime(slot.timestamp)}
-                                            </span>
+                                            <div className="flex flex-col items-center w-full">
+                                                <div className={`text-[11px] font-medium whitespace-nowrap text-center ${isLateTime ? 'text-red-600 font-bold' : 'text-gray-800'}`}>
+                                                {formatTime(slot.timestamp)}
+                                                </div>
+                                                {slot.status === 'Official' && <div className="text-[9px] font-normal text-gray-500 leading-none mt-0.5 text-center">(Official Time-Out)</div>}
+                                                {isLateTime ? (
+                                                    <div className="text-[7px] font-bold text-red-500 leading-none text-center">LATE</div>
+                                                ) : (
+                                                    <div className="text-[7px] font-bold text-transparent leading-none invisible text-center">LATE</div>
+                                                )}
+                                            </div>
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
                                             slot.photoDataUrl ? (
@@ -2535,9 +2610,11 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                               </div>
                                             )
                                           )}
+                                          {!(isSessionAutoTimeOut && slot.type === 'out') && (
                                             <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
                                               {formatStatusLabel(slot)}
                                             </span>
+                                          )}
                                       </>
                                     ) : (
                                       <span className="text-gray-300">-</span>
@@ -2575,20 +2652,19 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
           </div>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2">
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden h-full flex flex-col">
+              <div className="px-3 py-2 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                 <div className="flex items-center gap-2">
                   <div className="h-2 w-2 rounded-full bg-[#F97316]"></div>
-                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Time Entry</div>
+                  <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Time Entry</div>
                 </div>
-                <div className={`px-3 py-1 rounded-lg text-xs font-bold border ${isCheckedIn ? "bg-green-50 text-green-700 border-green-100" : "bg-gray-50 text-gray-600 border-gray-100"}`}>
+                <div className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border ${isCheckedIn ? "bg-green-50 text-green-700 border-green-100" : "bg-gray-50 text-gray-600 border-gray-100"}`}>
                   {isCheckedIn ? "CURRENTLY TIMED IN" : "READY TO TIME IN"}
                 </div>
               </div>
-
-              <div className="p-6 sm:p-8 flex flex-col items-center">
+              <div className="p-3 flex flex-col items-center flex-1 h-full">
                 <input 
                   type="file" 
                   accept="image/*" 
@@ -2606,13 +2682,13 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                     });
                     if (todayAuth) {
                         return (
-                          <div className="w-full max-w-md mb-4">
-                            <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-center">
-                              <div className="text-[11px] font-semibold text-green-700 uppercase tracking-wide flex items-center justify-center gap-1">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                          <div className="w-full max-w-md mb-3">
+                            <div className="rounded-xl border border-green-200 bg-green-50 px-3 py-2 text-center">
+                              <div className="text-[10px] font-semibold text-green-700 uppercase tracking-wide flex items-center justify-center gap-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                                 Overtime Authorized
                               </div>
-                              <div className="mt-1 text-xs text-green-600">
+                              <div className="mt-0.5 text-[11px] text-green-600">
                                 You have been authorized for overtime today. You can now Time In.
                               </div>
                             </div>
@@ -2623,39 +2699,49 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                 })()}
 
                 {officialScheduleText ? (
-                  <div className="w-full max-w-md mb-4">
-                    <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-center">
-                      <div className="text-[11px] font-semibold text-gray-600 uppercase tracking-wide">
+                  <div className="w-full max-w-md mb-3">
+                    <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-center">
+                      <div className="text-[10px] font-semibold text-gray-600 uppercase tracking-wide">
                         Official Schedule
                       </div>
-                      <div className="mt-1 text-sm font-bold text-gray-900">
+                      <div className="mt-0.5 text-xs font-bold text-gray-900">
                         {officialScheduleText}
                       </div>
-                      <div className="mt-1 text-[11px] text-gray-500">
+                      {authorizedOvertime && (
+                        <div className="mt-1 pt-1 border-t border-gray-200">
+                          <div className="text-[10px] font-semibold text-green-600 uppercase tracking-wide">
+                            Overtime
+                          </div>
+                          <div className="text-xs font-bold text-green-700">
+                            {new Date(authorizedOvertime.start).toLocaleTimeString(undefined, {hour: 'numeric', minute:'2-digit'})} - {new Date(authorizedOvertime.end).toLocaleTimeString(undefined, {hour: 'numeric', minute:'2-digit'})}
+                          </div>
+                        </div>
+                      )}
+                      <div className="mt-0.5 text-[10px] text-gray-500">
                         You can time in 30 minutes before your official time in.
                       </div>
                     </div>
                   </div>
                 ) : (
-                  <div className="w-full max-w-md mb-4">
-                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-center">
-                      <div className="text-[11px] font-semibold text-amber-600 uppercase tracking-wide">
+                  <div className="w-full max-w-md mb-3">
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-center">
+                      <div className="text-[10px] font-semibold text-amber-600 uppercase tracking-wide">
                         Official Schedule
                       </div>
-                      <div className="mt-1 text-sm font-bold text-amber-900">
+                      <div className="mt-0.5 text-xs font-bold text-amber-900">
                         Official Time is not set by the supervisor
                       </div>
                     </div>
                   </div>
                 )}
 
-                <div className="relative w-full rounded-2xl bg-slate-900 border border-gray-200 shadow-inner flex items-center justify-center group h-[60vh] max-h-[700px] min-h-[280px] overflow-hidden">
+                <div className="relative w-full rounded-2xl bg-slate-900 border border-gray-200 shadow-inner flex items-center justify-center group flex-1 min-h-[300px] overflow-hidden">
                   {!photo && !stream && (
-                    <div className="flex flex-col items-center gap-3 text-gray-500">
-                      <div className="p-4 rounded-full bg-slate-800 text-slate-400 group-hover:text-white transition-colors">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                    <div className="flex flex-col items-center gap-2 text-gray-500">
+                      <div className="p-3 rounded-full bg-slate-800 text-slate-400 group-hover:text-white transition-colors">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                       </div>
-                      <span className="text-sm font-medium">Tap Start Camera to take a photo</span>
+                      <span className="text-xs font-medium">Tap Start Camera to take a photo</span>
                     </div>
                   )}
                   {!photo && stream && (
@@ -2668,12 +2754,12 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                        className={`w-full h-full object-contain ${isFrontCam ? "transform scale-x-[-1]" : ""}`} 
                      />
                      <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                       <div className="absolute top-6 left-1/2 -translate-x-1/2 z-10">
-                         <span className="inline-block px-4 py-2 rounded-full bg-blue-600/90 text-white font-semibold text-sm shadow-lg">
+                       <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
+                         <span className="inline-block px-3 py-1.5 rounded-full bg-blue-600/90 text-white font-semibold text-xs shadow-lg">
                            {cameraFeedback || "Frame Your Face"}
                          </span>
                        </div>
-                       <svg width="280" height="360" viewBox="0 0 280 360" className="opacity-90">
+                       <svg width="240" height="300" viewBox="0 0 280 360" className="opacity-90">
                          <ellipse cx="140" cy="190" rx="115" ry="155" fill="none" stroke="#2563eb" strokeWidth="6" />
                        </svg>
                      </div>
@@ -2684,31 +2770,31 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                   )}
                 </div>
 
-                <div className="mt-8 w-full max-w-md flex flex-col items-center gap-4">
+                <div className="mt-6 w-full max-w-md flex flex-col items-center gap-3">
                   {!photo && (
                     <>
                       {(!stream) && (
                         <button
                           onClick={startCamera}
-                          className="w-full rounded-xl px-8 py-4 text-white font-bold text-lg bg-[#F97316] hover:bg-[#EA580C] transition-all active:scale-95 shadow-md hover:shadow-lg flex items-center justify-center gap-2"
+                          className="w-full rounded-xl px-4 py-2.5 text-white font-bold text-sm bg-[#F97316] hover:bg-[#EA580C] transition-all active:scale-95 shadow-md hover:shadow-lg flex items-center justify-center gap-2"
                         >
-                          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                           Start Camera
                         </button>
                       )}
                       {stream && (
-                        <div className="flex gap-3 w-full">
+                        <div className="flex gap-2 w-full">
                           <button
                             onClick={takePhoto}
                             disabled={!videoReady}
-                            className={`flex-1 rounded-xl px-6 py-3 text-white font-bold transition-all active:scale-95 shadow-md flex items-center justify-center gap-2 ${videoReady ? "bg-[#F97316] hover:bg-[#EA580C]" : "bg-gray-400 cursor-not-allowed"}`}
+                            className={`flex-1 rounded-xl px-3 py-2 text-white font-bold text-sm transition-all active:scale-95 shadow-md flex items-center justify-center gap-2 ${videoReady ? "bg-[#F97316] hover:bg-[#EA580C]" : "bg-gray-400 cursor-not-allowed"}`}
                           >
-                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="3"></circle></svg>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="3"></circle></svg>
                             Take Photo
                           </button>
                           <button
                             onClick={stopCamera}
-                            className="flex-1 rounded-xl px-6 py-3 text-gray-700 font-bold bg-gray-100 hover:bg-gray-200 transition-all active:scale-95 shadow-md"
+                            className="flex-1 rounded-xl px-3 py-2 text-gray-700 font-bold text-sm bg-gray-100 hover:bg-gray-200 transition-all active:scale-95 shadow-md"
                           >
                             Stop Camera
                           </button>
@@ -2718,15 +2804,15 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                   )}
 
                   {photo && (
-                    <div className="flex flex-col gap-3 w-full animate-in fade-in slide-in-from-bottom-4">
+                    <div className="flex flex-col gap-2 w-full animate-in fade-in slide-in-from-bottom-4">
                       <button
-                        onClick={() => handleBeforeSubmit(isCheckedIn ? "out" : "in")}
+                        onClick={handleConfirmClick}
                         disabled={submitting}
-                        className={`w-full rounded-xl px-6 py-4 text-white font-bold text-lg transition-all active:scale-95 shadow-md flex items-center justify-center gap-3 ${isCheckedIn ? "bg-gray-900 hover:bg-black" : "bg-[#F97316] hover:bg-[#EA580C]"} ${submitting ? "opacity-70 cursor-wait" : ""}`}
+                        className={`w-full rounded-xl px-4 py-3 text-white font-bold text-base transition-all active:scale-95 shadow-md flex items-center justify-center gap-2 ${isCheckedIn ? "bg-gray-900 hover:bg-black" : "bg-[#F97316] hover:bg-[#EA580C]"} ${submitting ? "opacity-70 cursor-wait" : ""}`}
                       >
                         {submitting ? (
                           <>
-                            <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                             </svg>
@@ -2735,12 +2821,12 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                         ) : (
                           isCheckedIn ? (
                             <>
-                              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+                              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
                               Confirm Time Out
                             </>
                           ) : (
                             <>
-                              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path><polyline points="10 17 15 12 10 7"></polyline><line x1="15" y1="12" x2="3" y2="12"></line></svg>
+                              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path><polyline points="10 17 15 12 10 7"></polyline><line x1="15" y1="12" x2="3" y2="12"></line></svg>
                               Confirm Time In
                             </>
                           )
@@ -2749,7 +2835,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                       <button
                         onClick={() => { setPhoto(null); try { if (fileInputRef.current) fileInputRef.current.value = ""; } catch {} }}
                         disabled={submitting}
-                        className={`w-full rounded-xl px-4 py-3 text-gray-600 font-semibold bg-gray-100 hover:bg-gray-200 transition-all active:scale-95 ${submitting ? "opacity-50 cursor-not-allowed" : ""}`}
+                        className={`w-full rounded-xl px-3 py-2 text-gray-600 font-semibold bg-gray-100 hover:bg-gray-200 transition-all active:scale-95 text-sm ${submitting ? "opacity-50 cursor-not-allowed" : ""}`}
                       >
                         Retake Photo
                       </button>
@@ -2761,7 +2847,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
           </div>
 
           <div className="space-y-6">
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[600px] overflow-hidden">
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[300px] overflow-hidden">
               <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                 <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Recent Logs</div>
                 <button
@@ -2783,7 +2869,40 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                   uniqueAttendance
                     .slice()
                     .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
-                    .map((entry, idx) => (
+                    .map((entry, idx) => {
+                      let isLateEntry = false;
+                      if (entry.type === "in" && !(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT")) {
+                        const date = new Date(entry.timestamp);
+                        date.setHours(0, 0, 0, 0);
+                        const dateKey = date.toLocaleDateString('en-CA');
+                        const dynamicOt = allOvertimeShifts.find(s => s.effective_date === dateKey);
+                        const src = dbSchedule;
+                        
+                        const sched = buildSchedule(
+                            date,
+                            {
+                                amIn: src?.amIn || "08:00",
+                                amOut: src?.amOut || "12:00",
+                                pmIn: src?.pmIn || "13:00",
+                                pmOut: src?.pmOut || "17:00",
+                                otIn: src?.otIn,
+                                otOut: src?.otOut
+                            },
+                            dynamicOt ? { start: Number(dynamicOt.overtime_start), end: Number(dynamicOt.overtime_end) } : undefined
+                        );
+
+                        const noonCutoff = new Date(date).setHours(12, 30, 0, 0);
+                        
+                        if (sched.otStart && entry.timestamp >= sched.otStart) {
+                             isLateEntry = isLate(entry.timestamp, sched.otStart);
+                        } else if (entry.timestamp >= noonCutoff) {
+                             isLateEntry = isLate(entry.timestamp, sched.pmIn);
+                        } else {
+                             isLateEntry = isLate(entry.timestamp, sched.amIn);
+                        }
+                      }
+
+                      return (
                       <button 
                         key={idx} 
                         onClick={() => setSelectedAttendanceEntry(entry)}
@@ -2795,6 +2914,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                             </div>
                           ) : (entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? (
                             <div className="h-9 w-9 flex-shrink-0 flex items-center justify-center">
+                              {/* Blank for auto timeout */}
                             </div>
                           ) : (
                             <div className="h-9 w-9 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 border border-gray-100 relative flex items-center justify-center"></div>
@@ -2802,7 +2922,7 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between">
                             <span className={`text-[11px] font-semibold uppercase ${(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? "text-red-600" : "text-gray-700"}`}>
-                              {(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? "AUTO TIME OUT" : (entry.type === "in" ? "Time In" : "Time Out")}
+                              {(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? "" : (entry.type === "in" ? "Time In" : "Time Out")}
                             </span>
                             {!(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") && (
                             <span className={`text-[10px] font-medium ${getStatusColorClass(entry)}`}>
@@ -2810,21 +2930,65 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                             </span>
                             )}
                           </div>
-                          {!(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? (
-                          <div className="text-xs font-medium text-gray-900 mt-0.5">
-                            {new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          {entry.status === "Official" ? (
+                            <div className="text-xs font-medium text-gray-900 mt-0.5 flex items-center gap-2">
+                                {new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                <span className="text-[9px] font-bold text-green-600 bg-green-50 px-1.5 py-0.5 rounded border border-green-100">OFFICIAL</span>
+                            </div>
+                          ) : !(entry.validated_by === "SYSTEM_AUTO_CLOSE" || entry.validated_by === "AUTO TIME OUT") ? (
+                          <div className="flex flex-col items-start mt-0.5">
+                            <div className={`text-xs font-medium whitespace-nowrap ${isLateEntry ? 'text-red-600 font-bold' : 'text-gray-900'}`}>
+                                {new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                            </div>
+                            {isLateEntry ? (
+                                <div className="text-[7px] font-bold text-red-500 leading-none mt-0.5">LATE</div>
+                            ) : (
+                                <div className="text-[7px] font-bold text-transparent leading-none mt-0.5 invisible">LATE</div>
+                            )}
                           </div>
                           ) : (
-                            <div className="text-xs font-medium text-gray-400 mt-0.5">--:--</div>
+                            <div className="text-xs font-medium text-gray-400 mt-0.5"></div>
                           )}
                           <div className="text-[10px] text-gray-400">
                             {new Date(entry.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                           </div>
                         </div>
                       </button>
-                    ))
+                    );
+                    })
                 )}
               </div>
+            </div>
+
+            {/* Events Card */}
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[300px] overflow-hidden">
+               <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Events</div>
+               </div>
+               <div className="p-3 overflow-y-auto custom-scrollbar flex-1 space-y-2">
+                  {events.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-center p-6 text-gray-400">
+                        <p className="text-sm font-medium">No upcoming events</p>
+                    </div>
+                  ) : (
+                    events
+                    .sort((a, b) => new Date(b.event_date).getTime() - new Date(a.event_date).getTime())
+                    .map((event: any) => (
+                        <button 
+                          key={event.id} 
+                          onClick={() => setSelectedEvent(event)}
+                          className="w-full p-3 bg-white rounded-xl border border-gray-100 hover:border-blue-200 hover:shadow-md hover:bg-blue-50/30 transition-all text-left group"
+                        >
+                            <div className="font-semibold text-gray-800 text-sm group-hover:text-blue-700 transition-colors">{event.title}</div>
+                            <div className="text-xs text-gray-500 mt-1 flex items-center gap-1">
+                              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                              {new Date(event.event_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                            </div>
+                            {event.description && <div className="text-xs text-gray-600 mt-2 line-clamp-2">{event.description}</div>}
+                        </button>
+                    ))
+                  )}
+               </div>
             </div>
           </div>
         </div>
@@ -2889,6 +3053,71 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         />
       )}
 
+      {/* Event Details Modal */}
+      {selectedEvent && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="px-6 py-5 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">{selectedEvent.title}</h3>
+                <p className="text-sm text-gray-500 flex items-center gap-1.5 mt-1">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                  {new Date(selectedEvent.event_date).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                </p>
+              </div>
+              <button 
+                onClick={() => setSelectedEvent(null)}
+                className="p-2 rounded-full hover:bg-gray-200 text-gray-500 transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
+            </div>
+            
+            <div className="p-6 space-y-6">
+              {selectedEvent.description && (
+                <div className="bg-blue-50/50 rounded-xl p-4 border border-blue-100">
+                  <h4 className="text-xs font-bold text-blue-700 uppercase tracking-wider mb-2">Description</h4>
+                  <p className="text-sm text-gray-700 leading-relaxed">{selectedEvent.description}</p>
+                </div>
+              )}
+
+              <div className="flex flex-col gap-4">
+                <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 text-center">
+                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Morning Session</div>
+                  <div className="text-sm font-bold text-gray-900">
+                    {selectedEvent.am_in ? formatDisplayTime(selectedEvent.am_in) : "--:--"} - {selectedEvent.am_out ? formatDisplayTime(selectedEvent.am_out) : "--:--"}
+                  </div>
+                </div>
+                <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 text-center">
+                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Afternoon Session</div>
+                  <div className="text-sm font-bold text-gray-900">
+                    {selectedEvent.pm_in ? formatDisplayTime(selectedEvent.pm_in) : "--:--"} - {selectedEvent.pm_out ? formatDisplayTime(selectedEvent.pm_out) : "--:--"}
+                  </div>
+                </div>
+              </div>
+
+              {selectedEvent.overtime_in && selectedEvent.overtime_out && (
+                 <div className="bg-green-50 rounded-xl p-4 border border-green-100 text-center">
+                   <div className="text-xs font-bold text-green-700 uppercase tracking-wider mb-1">Overtime</div>
+                   <div className="text-sm font-bold text-green-900">
+                     {formatDisplayTime(selectedEvent.overtime_in)} - {formatDisplayTime(selectedEvent.overtime_out)}
+                   </div>
+                 </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-100 bg-gray-50 flex justify-end">
+              <button
+                onClick={() => setSelectedEvent(null)}
+                className="px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 hover:bg-gray-50 transition-colors shadow-sm"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Cooldown Modal */}
       {showCooldownModal && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
@@ -2913,7 +3142,42 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
   );
 }
 
-function ReportDetailsModal({ report, onClose }: { report: ReportEntry; onClose: () => void }) {
+const REPORT_SECTIONS = [
+  { id: "introduction", label: "Introduction", description: "State where you are assigned and your main role this week." },
+  { id: "activities", label: "Activities Performed", description: "Narrate the tasks you handled and your participation in each." },
+  { id: "tools", label: "Tools and Skills Used", description: "Mention software, equipment, or skills you applied." },
+  { id: "challenges", label: "Challenges Encountered", description: "Explain any problems or difficulties faced." },
+  { id: "solutions", label: "Solutions and Learning", description: "Describe how the problem was solved and what you learned." },
+  { id: "accomplishments", label: "Accomplishments", description: "Highlight completed work or outputs." },
+  { id: "reflection", label: "Reflection", description: "Share your insights and improvements." }
+];
+
+const INITIAL_REPORT_DATA = {
+  introduction: "",
+  activities: "",
+  tools: "",
+  challenges: "",
+  solutions: "",
+  accomplishments: "",
+  reflection: ""
+};
+
+function ReportDetailsModal({ report, onClose, onEdit }: { report: ReportEntry; onClose: () => void; onEdit?: () => void }) {
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+
+  const structuredData = useMemo(() => {
+    if (!report.body) return null;
+    try {
+      const data = JSON.parse(report.body);
+      if (typeof data === 'object' && data !== null && ('introduction' in data || 'activities' in data)) {
+        return data;
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }, [report.body]);
+
   return (
     <div 
       className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
@@ -2923,10 +3187,10 @@ function ReportDetailsModal({ report, onClose }: { report: ReportEntry; onClose:
         className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl animate-in zoom-in-95 duration-200"
         onClick={e => e.stopPropagation()}
       >
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+        <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 bg-green-100 text-green-600 rounded-full flex items-center justify-center">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+              <div className="h-8 w-8 bg-green-100 text-green-600 rounded-full flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
               </div>
               <div>
                 <h2 className="text-lg font-bold text-gray-900">Report Details</h2>
@@ -2935,73 +3199,163 @@ function ReportDetailsModal({ report, onClose }: { report: ReportEntry; onClose:
            </div>
            <button 
              onClick={onClose}
-             className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-all"
+             className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-all"
            >
-             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
            </button>
         </div>
         
-        <div className="p-6 overflow-y-auto custom-scrollbar space-y-6">
+        <div className="p-4 overflow-y-auto custom-scrollbar space-y-4">
            {/* Header Info */}
            <div className="flex items-start justify-between">
               <div>
-                 <h3 className="text-xl font-bold text-gray-900">{report.title}</h3>
-                 <p className="text-sm text-gray-500 mt-1">Submitted on {new Date(report.submittedAt).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</p>
+                 <h3 className="text-lg font-bold text-gray-900">{report.title}</h3>
+                 <p className="text-xs text-gray-500 mt-0.5">Submitted on {new Date(report.submittedAt).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</p>
               </div>
-              <span className="px-3 py-1 rounded-full bg-green-50 text-green-700 text-xs font-bold uppercase tracking-wide border border-green-100">
-                Submitted
+              <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold tracking-wide border ${report.isViewedByInstructor || report.instructorComment ? "bg-green-100 text-green-700 border-green-200" : "bg-orange-100 text-orange-700 border-orange-200"}`}>
+                {report.isViewedByInstructor || report.instructorComment ? "Reviewed" : "Under Review"}
               </span>
            </div>
 
            {/* Instructor Feedback */}
            {report.instructorComment && (
-              <div className="mt-6 animate-in slide-in-from-top-2">
-                 <div className="bg-red-50 rounded-xl p-5 border border-red-100 text-gray-800 shadow-sm relative">
-                    <div className="flex items-center gap-2 mb-2 text-red-700">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-                        <h3 className="font-bold">Instructor Feedback</h3>
+              <div className="mt-4 animate-in slide-in-from-top-2">
+                 <div className="bg-red-50 rounded-xl p-3 border border-red-100 text-gray-800 shadow-sm relative">
+                    <div className="flex items-center gap-2 mb-1 text-red-700">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                        <h3 className="font-bold text-xs">Instructor Feedback</h3>
                     </div>
-                    {report.instructorComment}
+                    <p className="text-sm">{report.instructorComment}</p>
                  </div>
               </div>
            )}
 
            {/* Attachment */}
            {report.fileName && (
-              <div className="p-4 rounded-xl border border-gray-200 bg-gray-50 flex items-center justify-between group hover:border-[#F97316] hover:bg-orange-50/10 transition-all">
+              <div className="p-3 rounded-xl border border-gray-200 bg-gray-50 flex items-center justify-between group hover:border-[#F97316] hover:bg-orange-50/10 transition-all">
                 <div className="flex items-center gap-3">
-                   <div className="h-10 w-10 bg-white border border-gray-200 rounded-lg flex items-center justify-center text-[#F97316]">
-                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                   <div className="h-8 w-8 bg-white border border-gray-200 rounded-lg flex items-center justify-center text-[#F97316]">
+                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
                    </div>
                    <div>
-                     <p className="text-sm font-bold text-gray-900 group-hover:text-[#F97316] transition-colors">{report.fileName}</p>
-                     <p className="text-xs text-gray-500">Attachment</p>
+                     <p className="text-xs font-bold text-gray-900 group-hover:text-[#F97316] transition-colors">{report.fileName}</p>
+                     <p className="text-[10px] text-gray-500">Document Attachment</p>
                    </div>
                 </div>
-                <a href={report.fileUrl || "#"} target="_blank" rel="noopener noreferrer" className="px-4 py-2 bg-white border border-gray-200 text-[#F97316] rounded-lg text-sm font-semibold hover:bg-[#F97316] hover:text-white transition-colors shadow-sm">
+                <a href={report.fileUrl || "#"} target="_blank" rel="noopener noreferrer" className="px-3 py-1.5 bg-white border border-gray-200 text-[#F97316] rounded-lg text-xs font-semibold hover:bg-[#F97316] hover:text-white transition-colors shadow-sm">
                    Download
                 </a>
               </div>
            )}
 
+           {/* Photos Attachment */}
+           {((report.photos && report.photos.length > 0) || report.photoName) && (
+             <div className="space-y-2">
+               <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Photo Evidence</h4>
+               <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                 {report.photos && report.photos.length > 0 ? (
+                    report.photos.map((photo, idx) => (
+                      <button 
+                        key={idx} 
+                        onClick={() => setSelectedImage(photo.url)}
+                        className="group relative aspect-square rounded-xl overflow-hidden border border-gray-200 bg-gray-50 hover:shadow-md transition-all block w-full text-left"
+                      >
+                         <img src={photo.url} alt={photo.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-end p-2">
+                            <p className="text-[9px] font-medium text-white opacity-0 group-hover:opacity-100 truncate w-full shadow-sm">{photo.name}</p>
+                         </div>
+                      </button>
+                    ))
+                 ) : (
+                    // Legacy Fallback
+                    <button 
+                      onClick={() => setSelectedImage(report.photoUrl || null)}
+                      className="group relative aspect-square rounded-xl overflow-hidden border border-gray-200 bg-gray-50 hover:shadow-md transition-all block w-full text-left"
+                    >
+                       <img src={report.photoUrl} alt={report.photoName} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                       <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-end p-2">
+                          <p className="text-[9px] font-medium text-white opacity-0 group-hover:opacity-100 truncate w-full shadow-sm">{report.photoName}</p>
+                       </div>
+                    </button>
+                 )}
+               </div>
+             </div>
+           )}
+
            {/* Content */}
-           <div className="space-y-2">
-              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Report Content</h4>
-              <div className="bg-gray-50 rounded-xl p-6 border border-gray-100 min-h-[150px] text-gray-700 whitespace-pre-wrap leading-relaxed">
-                {report.body || "No text content."}
-              </div>
+           <div className="space-y-4">
+              <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">Report Content</h4>
+              
+              {structuredData ? (
+                 <div className="space-y-4">
+                    {REPORT_SECTIONS.map((section, idx) => (
+                       <div key={section.id} className="group">
+                          <div className="mb-1.5 border-b border-gray-100 pb-1">
+                             <label className="block text-xs font-bold text-gray-900">
+                                {idx + 1}. {section.label}
+                             </label>
+                          </div>
+                          <div className="bg-gray-50 rounded-lg p-3 border border-gray-100 text-gray-700 whitespace-pre-wrap leading-relaxed text-sm">
+                             {structuredData[section.id] || "No response provided."}
+                          </div>
+                       </div>
+                    ))}
+                 </div>
+              ) : (
+                 <div className="bg-gray-50 rounded-xl p-3 border border-gray-100 min-h-[100px] text-gray-700 whitespace-pre-wrap leading-relaxed text-sm">
+                   {report.body || "No text content."}
+                 </div>
+              )}
            </div>
         </div>
         
-        <div className="p-4 border-t border-gray-100 bg-gray-50/50 flex justify-end">
+        <div className="p-3 border-t border-gray-100 bg-gray-50/50 flex justify-end gap-3">
+           {onEdit && (
+              <button 
+                 onClick={onEdit}
+                 className="px-4 py-2 bg-[#F97316] text-white font-bold rounded-xl hover:bg-[#EA580C] transition-colors shadow-sm text-sm flex items-center gap-2"
+              >
+                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                 Open in Text Editor
+              </button>
+           )}
            <button 
              onClick={onClose}
-             className="px-6 py-2.5 bg-white border border-gray-200 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-colors shadow-sm"
+             className="px-4 py-2 bg-white border border-gray-200 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-colors shadow-sm text-sm"
            >
              Close
            </button>
         </div>
       </div>
+      
+      {/* Lightbox Modal */}
+      {selectedImage && (
+        <div 
+          className="fixed inset-0 z-[110] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+          onClick={(e) => {
+            e.stopPropagation();
+            setSelectedImage(null);
+          }}
+        >
+          <div className="relative w-full max-w-4xl max-h-[90vh] flex items-center justify-center">
+             <button 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedImage(null);
+                }}
+                className="absolute -top-10 right-0 p-2 text-white hover:text-gray-300 transition-colors"
+             >
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+             </button>
+             <img 
+                src={selectedImage} 
+                alt="Full View" 
+                className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl"
+                onClick={(e) => e.stopPropagation()} 
+             />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3009,17 +3363,17 @@ function ReportDetailsModal({ report, onClose }: { report: ReportEntry; onClose:
 function DuplicateEntryModal({ onClose, message }: { onClose: () => void; message: string }) {
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col items-center text-center">
-        <div className="h-16 w-16 bg-red-100 rounded-full flex items-center justify-center text-red-600 mb-4">
-          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+      <div className="bg-white rounded-2xl w-full max-w-md p-4 shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col items-center text-center">
+        <div className="h-10 w-10 bg-red-100 rounded-full flex items-center justify-center text-red-600 mb-2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
         </div>
-        <h3 className="text-xl font-bold text-gray-900 mb-2">Attention</h3>
-        <p className="text-gray-600 mb-6 leading-relaxed">
+        <h3 className="text-lg font-bold text-gray-900 mb-2">Attention</h3>
+        <p className="text-sm text-gray-600 mb-5 leading-relaxed">
           {message}
         </p>
         <button 
           onClick={onClose}
-          className="w-full py-3 bg-[#F97316] text-white font-bold rounded-xl hover:bg-[#EA580C] transition-colors shadow-lg shadow-orange-200"
+          className="w-full py-2 bg-[#F97316] text-white font-bold rounded-xl hover:bg-[#EA580C] transition-colors shadow-lg shadow-orange-200 text-sm"
         >
           I Understand
         </button>
@@ -3027,6 +3381,47 @@ function DuplicateEntryModal({ onClose, message }: { onClose: () => void; messag
     </div>
   );
 }
+
+
+export function NoDeadlineModal({ onClose, onConfirm, week }: { onClose: () => void; onConfirm: () => void; week: number }) {
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl animate-in zoom-in-95 duration-200">
+        <div className="flex items-center gap-4 mb-4">
+          <div className="h-12 w-12 bg-yellow-100 text-yellow-600 rounded-full flex items-center justify-center flex-shrink-0">
+             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          </div>
+          <div>
+            <h3 className="text-lg font-bold text-gray-900">No Deadline Found</h3>
+            <p className="text-sm text-gray-500">Week {week}</p>
+          </div>
+        </div>
+        
+        <p className="text-gray-600 text-sm leading-relaxed mb-6">
+          This report does not have a set deadline. Are you sure you want to submit it now?
+          <br/><br/>
+          <span className="font-semibold text-gray-900">Note:</span> Once submitted, you cannot edit it unless your instructor returns it.
+        </p>
+
+        <div className="flex gap-3">
+          <button 
+            onClick={onClose}
+            className="flex-1 py-2.5 px-4 bg-white border border-gray-300 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-colors text-sm"
+          >
+            Cancel
+          </button>
+          <button 
+            onClick={onConfirm}
+            className="flex-1 py-2.5 px-4 bg-yellow-500 text-white font-bold rounded-xl hover:bg-yellow-600 transition-colors shadow-lg shadow-yellow-200 text-sm"
+          >
+            Submit Anyway
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 export function ReportsView({ 
   idnumber, 
@@ -3044,15 +3439,21 @@ export function ReportsView({
   onDraftUpdate: (drafts: ReportEntry[]) => void 
 }) {
   const [showAllReportsModal, setShowAllReportsModal] = useState(false);
+  const [showAllCardsModal, setShowAllCardsModal] = useState(false);
+  const [showNoDeadlineModal, setShowNoDeadlineModal] = useState(false);
   const [selectedWeek, setSelectedWeek] = useState<number | null>(null);
   const [viewingReport, setViewingReport] = useState<ReportEntry | null>(null);
+  const [viewingDraft, setViewingDraft] = useState<ReportEntry | null>(null);
   const [draftToDelete, setDraftToDelete] = useState<ReportEntry | null>(null);
   
   // Editor State
   const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
+  // const [body, setBody] = useState(NARRATIVE_GUIDE); // Replaced by structured data
+  const [reportData, setReportData] = useState<Record<string, string>>(INITIAL_REPORT_DATA);
   const [file, setFile] = useState<File | null>(null);
-  const [existingFile, setExistingFile] = useState<{name: string, type: string} | null>(null);
+  const [existingFile, setExistingFile] = useState<{name: string, type: string, url?: string} | null>(null);
+  const [photos, setPhotos] = useState<File[]>([]);
+  const [existingPhotos, setExistingPhotos] = useState<{name: string, type: string, url: string}[]>([]);
   const [draftId, setDraftId] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -3135,6 +3536,8 @@ export function ReportsView({
     });
 
     // If the last slot is Submitted, append a synthetic "Next Week" slot so the user has a place to land
+    // REMOVED: User requested to show "Up to date" instead of a locked future week.
+    /*
     const lastSlot = result[result.length - 1];
     if (lastSlot && (lastSlot.status === "Reviewed" || lastSlot.status === "Under Review")) {
         const nextWeek = lastSlot.week + 1;
@@ -3161,6 +3564,7 @@ export function ReportsView({
            isLocked: false // Always unlocked if previous is submitted
         });
     }
+    */
 
     return result;
   }, [reports, deadlines]);
@@ -3203,27 +3607,89 @@ export function ReportsView({
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setError(null);
     const f = e.target.files?.[0] || null;
+    
+    // Clear value to allow re-selection
+    e.target.value = "";
+    
     if (!f) { setFile(null); return; }
     const lower = f.name.toLowerCase();
     const ok = allowedTypes.has(f.type) || lower.endsWith(".pdf") || lower.endsWith(".doc") || lower.endsWith(".docx");
     if (!ok) {
-      setError("Only Word (.doc/.docx) and PDF files are allowed.");
+      const msg = "Only Word (.doc/.docx) and PDF files are allowed.";
+      setError(msg);
+      alert(msg);
       setFile(null);
       return;
     }
     if (f.size > 10 * 1024 * 1024) {
-      setError("File must be 10MB or smaller.");
+      const msg = "File must be 10MB or smaller.";
+      setError(msg);
+      alert(msg);
       setFile(null);
       return;
     }
     setFile(f);
   };
 
+  const onPhotosChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null);
+    const newFiles = Array.from(e.target.files || []);
+    if (newFiles.length === 0) return;
+
+    // Clear the input value to allow re-selecting the same file if needed
+    e.target.value = "";
+
+    const validFiles: File[] = [];
+    const errors: string[] = [];
+
+    for (const f of newFiles) {
+        if (!f.type.startsWith("image/")) {
+            errors.push(`File ${f.name} is not an image.`);
+            continue;
+        }
+        if (f.size > 5 * 1024 * 1024) {
+            errors.push(`Photo ${f.name} is too large (max 5MB).`);
+            continue;
+        }
+        validFiles.push(f);
+    }
+
+    if (errors.length > 0) {
+        const msg = errors.join("\n");
+        setError(msg);
+        alert(msg); // Ensure user sees the error
+    }
+    
+    if (validFiles.length > 0) {
+        setPhotos(prev => [...prev, ...validFiles]);
+    }
+  };
+
+  const removePhoto = (index: number) => {
+    setPhotos(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const removeExistingPhoto = (index: number) => {
+    setExistingPhotos(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const countWords = (data: Record<string, string>) => {
+    let total = 0;
+    Object.values(data).forEach(str => {
+       if (str && str.trim()) {
+         total += str.trim().split(/\s+/).filter(w => w.length > 0).length;
+       }
+    });
+    return total;
+  };
+
   const clearForm = () => {
     setTitle("");
-    setBody("");
+    setReportData(INITIAL_REPORT_DATA);
     setFile(null);
     setExistingFile(null);
+    setPhotos([]);
+    setExistingPhotos([]);
     setDraftId(null);
     setDraftSavedAt(null);
     setError(null);
@@ -3231,9 +3697,36 @@ export function ReportsView({
 
   const loadDraft = (d: ReportEntry) => {
     setTitle(d.title || "");
-    setBody(d.body || "");
+    try {
+      const parsed = JSON.parse(d.body || "{}");
+      // Check if it's our structured data (has at least one matching key)
+      if (typeof parsed === 'object' && parsed !== null && Object.keys(INITIAL_REPORT_DATA).some(k => k in parsed)) {
+         setReportData({ ...INITIAL_REPORT_DATA, ...parsed });
+      } else {
+         throw new Error("Legacy content");
+      }
+    } catch (e) {
+      // Legacy text fallback
+      // If it's the old guide text, we can ignore it. If it's user text, put in Introduction.
+      const isGuide = d.body?.includes("WEEKLY NARRATIVE OJT REPORT");
+      setReportData({ 
+        ...INITIAL_REPORT_DATA, 
+        introduction: isGuide ? "" : (d.body || "") 
+      });
+    }
+
     setFile(null);
-    setExistingFile(d.fileName ? {name: d.fileName, type: d.fileType || ""} : null);
+    setExistingFile(d.fileName ? {name: d.fileName, type: d.fileType || "", url: d.fileUrl} : null);
+    
+    setPhotos([]);
+    if (d.photos && d.photos.length > 0) {
+        setExistingPhotos(d.photos.map(p => ({ ...p, type: p.type || "image/jpeg" })));
+    } else if (d.photoName && d.photoUrl) {
+        setExistingPhotos([{name: d.photoName, type: "image/jpeg", url: d.photoUrl}]);
+    } else {
+        setExistingPhotos([]);
+    }
+
     setDraftId(d.id || null);
     setDraftSavedAt(d.submittedAt);
     setError(null);
@@ -3275,17 +3768,46 @@ export function ReportsView({
 
 
   const saveDraft = async () => {
-    if (!selectedWeek) return;
+    const targetWeek = selectedWeek || ((slots[slots.length-1]?.week || 0) + 1);
+    
     setSubmitting(true);
     try {
+      let fileData = null;
+      if (file) {
+        fileData = await toBase64(file);
+      }
+
+      // Process new photos
+      const photosPayload = [];
+      if (photos.length > 0) {
+        for (const p of photos) {
+            const data = await toBase64(p);
+            photosPayload.push({
+                name: p.name,
+                type: p.type,
+                data: data
+            });
+        }
+      }
+
       const payload: any = {
         idnumber,
         title: (file || existingFile) ? (file?.name || existingFile?.name) : title.trim(),
-        body: body.trim(),
+        body: JSON.stringify(reportData),
         fileName: file?.name || existingFile?.name,
         fileType: file?.type || existingFile?.type,
+        fileData: fileData,
+        existingFileUrl: existingFile?.url,
+        // Legacy fields for single photo compatibility
+        photoName: photos.length > 0 ? photos[0].name : (existingPhotos.length > 0 ? existingPhotos[0].name : null),
+        photoType: photos.length > 0 ? photos[0].type : (existingPhotos.length > 0 ? existingPhotos[0].type : null),
+        photoData: photosPayload.length > 0 ? photosPayload[0].data : null,
+        existingPhotoUrl: existingPhotos.length > 0 ? existingPhotos[0].url : null,
+        // New fields
+        photos: photosPayload,
+        existingPhotos: existingPhotos,
         isDraft: true,
-        week: selectedWeek
+        week: targetWeek
       };
       if (draftId) payload.id = draftId;
 
@@ -3318,14 +3840,46 @@ export function ReportsView({
     }
   };
 
-  const submit = async () => {
-    if (!selectedWeek) return;
+  const submit = async (force: boolean = false) => {
+    const targetWeek = selectedWeek || ((slots[slots.length-1]?.week || 0) + 1);
+
+    // Check for deadline if not forced
+    if (!force) {
+       const deadline = deadlines?.find(d => d.week === targetWeek);
+       if (!deadline) {
+          setShowNoDeadlineModal(true);
+          return;
+       }
+    }
+
     setError(null);
     const t = title.trim();
-    const b = body.trim();
+    
+    // Validation
     if (!t && !file && !existingFile) {
-      setError("Provide a title or attach a file.");
+      const msg = "Report title is required.";
+      setError(msg);
+      alert(msg);
       return;
+    }
+
+    // Word count validation (only if no document attachment)
+    if (!file && !existingFile) {
+      const wordCount = countWords(reportData);
+      if (wordCount < 150) {
+         const msg = `Report content must be at least 150 words. Current: ${wordCount} words.`;
+         setError(msg);
+         alert(msg);
+         return;
+      }
+    }
+
+    // Photo validation
+    if (photos.length === 0 && existingPhotos.length === 0) {
+       const msg = "Photo evidence is required. Please upload at least one work photo/proof of activity.";
+       setError(msg);
+       alert(msg);
+       return;
     }
     
     setSubmitting(true);
@@ -3335,15 +3889,37 @@ export function ReportsView({
         fileData = await toBase64(file);
       }
 
+      // Process new photos
+      const photosPayload = [];
+      if (photos.length > 0) {
+        for (const p of photos) {
+            const data = await toBase64(p);
+            photosPayload.push({
+                name: p.name,
+                type: p.type,
+                data: data
+            });
+        }
+      }
+
       const payload: any = {
         idnumber,
         title: (file || existingFile) ? (file?.name || existingFile?.name) : t,
-        body: b,
+        body: JSON.stringify(reportData),
         fileName: file?.name || existingFile?.name,
         fileType: file?.type || existingFile?.type,
         fileData: fileData,
+        existingFileUrl: existingFile?.url,
+        // Legacy fields for single photo compatibility
+        photoName: photos.length > 0 ? photos[0].name : (existingPhotos.length > 0 ? existingPhotos[0].name : null),
+        photoType: photos.length > 0 ? photos[0].type : (existingPhotos.length > 0 ? existingPhotos[0].type : null),
+        photoData: photosPayload.length > 0 ? photosPayload[0].data : null,
+        existingPhotoUrl: existingPhotos.length > 0 ? existingPhotos[0].url : null,
+        // New fields
+        photos: photosPayload,
+        existingPhotos: existingPhotos,
         isDraft: false,
-        week: selectedWeek
+        week: targetWeek
       };
       if (draftId) payload.id = draftId;
 
@@ -3364,6 +3940,7 @@ export function ReportsView({
     } catch (e) {
        const msg = e instanceof Error ? e.message : "Failed to submit report";
        setError(msg);
+       alert(msg);
     } finally {
       setSubmitting(false);
     }
@@ -3411,194 +3988,292 @@ export function ReportsView({
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-in fade-in duration-500">
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 animate-in fade-in duration-500">
       
       {/* Left Column - Main Editor / Viewer */}
-      <div className="lg:col-span-2 space-y-6">
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden min-h-[600px] flex flex-col">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-               <div className="flex items-center gap-3">
-                 <div className={`h-2.5 w-2.5 rounded-full ${
+      <div className="lg:col-span-2 space-y-2">
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden h-[500px] flex flex-col">
+            <div className="px-3 py-1.5 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+               <div className="flex items-center gap-2">
+                 <div className={`h-1.5 w-1.5 rounded-full ${
                     (activeSlot.status === "Reviewed" || activeSlot.status === "Under Review") ? "bg-green-500" :
                     activeSlot.status === "Overdue" ? "bg-red-500" :
                     activeSlot.status === "Pending" ? "bg-[#F97316]" : "bg-gray-400"
                  }`}></div>
-                 <h2 className="text-lg font-bold text-gray-800 uppercase tracking-wide">
+                 <h2 className="text-xs font-bold text-gray-800 uppercase tracking-wide">
                    {activeSlot.report ? "Report Details" : "Compose Report"}
                  </h2>
                </div>
-               <span className="text-sm font-semibold text-gray-500">Week {activeSlot.week}</span>
+               <span className="text-[10px] font-semibold text-gray-500">Week {activeSlot.week}</span>
             </div>
 
-            <div className="p-6 flex-1 flex flex-col">
-               {/* LOCKED STATE - BYPASSED for Drafting */}
-               {activeSlot.isLocked && false ? (
-                  <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
-                     <div className="h-16 w-16 bg-gray-100 rounded-full flex items-center justify-center text-gray-400 mb-4">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+            <div className="p-2 flex-1 flex flex-col min-h-0">
+               {/* LOCKED STATE */}
+               {activeSlot.isLocked ? (
+                  <div className="flex-1 flex flex-col items-center justify-center text-center p-3">
+                     <div className="h-8 w-8 bg-gray-100 rounded-full flex items-center justify-center text-gray-400 mb-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
                      </div>
-                     <h3 className="text-xl font-bold text-gray-900 mb-2">Report Locked</h3>
-                     <p className="text-gray-500 max-w-md">
+                     <h3 className="text-xs font-bold text-gray-900 mb-1">Report Locked</h3>
+                     <p className="text-[10px] text-gray-500 max-w-xs">
                         This report is currently locked. Please submit your report for the previous week to unlock this one.
                      </p>
                   </div>
                ) : (
                   /* EDIT / VIEW-IN-EDITOR MODE */
-                  <div className="space-y-6 flex-1 flex flex-col">
+                  <>
+                  <div className="space-y-1.5 flex-1 flex flex-col overflow-y-auto custom-scrollbar pr-1 min-h-0">
                      {activeSlot.report && (
-                        <div className={`border rounded-xl p-4 flex items-center gap-3 ${
+                        <div className={`border rounded-lg p-1.5 flex items-center gap-2 ${
                            activeSlot.status === "Reviewed" ? "bg-green-50 border-green-200 text-green-800" :
                            "bg-orange-50 border-orange-200 text-orange-800"
                         }`}>
-                           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
-                           <div className="text-sm font-medium">
+                           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                           <div className="text-[10px] font-medium">
                               {activeSlot.status === "Reviewed" ? "Report Reviewed." : "Report Under Review."} <button onClick={() => setViewingReport(activeSlot.report!)} className={`underline font-bold ${activeSlot.status === "Reviewed" ? "hover:text-green-900" : "hover:text-orange-900"}`}>View Details</button>
                            </div>
                         </div>
                      )}
 
                      {error && (
-                        <div className="rounded-xl bg-red-50 border border-red-100 p-4 flex items-center gap-3 text-red-700">
-                          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-                          <span className="text-sm font-medium">{error}</span>
+                        <div className="rounded-lg bg-red-50 border border-red-100 p-1.5 flex items-center gap-2 text-red-700">
+                           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                           <span className="text-[10px] font-medium">{error}</span>
                         </div>
                      )}
 
                      <div>
-                       <label className="block text-sm font-bold text-gray-700 mb-1.5">Report Title</label>
+                       <label className="block text-[9px] uppercase font-bold text-gray-500 mb-0.5">Report Title</label>
                        <input 
                          value={title} 
                          onChange={e => setTitle(e.target.value)}
                          disabled={!!file || !!activeSlot.report}
                          placeholder={!!file ? "Title will be the filename" : "e.g. Week " + activeSlot.week + " Accomplishment Report"}
-                         className={`w-full rounded-xl border border-gray-200 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all shadow-sm ${!!file || !!activeSlot.report ? "bg-gray-100 cursor-not-allowed opacity-70" : ""}`}
+                         className={`w-full rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all shadow-sm ${!!file || !!activeSlot.report ? "bg-gray-100 cursor-not-allowed opacity-70" : ""}`}
                        />
                      </div>
                      
-                     <div className="flex-1">
-                       <label className="block text-sm font-bold text-gray-700 mb-1.5">Content</label>
-                       <textarea 
-                        value={body}
-                        onChange={e => setBody(e.target.value)}
-                        disabled={!!file || !!activeSlot.report}
-                        placeholder={!!file ? "Text editing is disabled when a file is attached." : "Describe your activities, learnings, and accomplishments this week..."}
-                        className={`w-full h-full min-h-[250px] rounded-xl border border-gray-200 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all resize-none shadow-sm ${!!file || !!activeSlot.report ? "bg-gray-100 cursor-not-allowed opacity-70" : ""}`}
-                      />
-                     </div>
-
-                     <div>
-                       <label className="block text-sm font-bold text-gray-700 mb-1.5">Attachment (Optional)</label>
-                       {!file && !existingFile ? (
-                          activeSlot.report ? (
-                             <div className="p-4 rounded-xl border border-gray-200 bg-gray-50 text-gray-400 text-sm text-center">
-                                No attachment
+                    <div className="flex flex-col">
+                      <div className="flex justify-between items-center mb-2 pb-2 border-b border-gray-100">
+                         <label className="block text-[10px] uppercase font-bold text-gray-800 tracking-wide">Weekly Narrative OJT Report</label>
+                         <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full border ${countWords(reportData) < 150 ? 'bg-red-50 text-red-600 border-red-100' : 'bg-green-50 text-green-600 border-green-100'}`}>
+                            {countWords(reportData)} / 150 words
+                         </span>
+                      </div>
+                      
+                      <div className="space-y-4 pb-2">
+                        {REPORT_SECTIONS.map((section, idx) => (
+                          <div key={section.id} className="group">
+                             <div className="mb-1.5">
+                                <label className="block text-xs font-bold text-gray-900 mb-0.5">
+                                   {idx + 1}. {section.label}
+                                </label>
+                                <p className="text-[10px] text-gray-500 italic">{section.description}</p>
                              </div>
-                          ) : (
-                             <div className="relative group">
-                               <input 
-                                 type="file" 
-                                 onChange={onFileChange}
-                                 accept=".pdf,.doc,.docx"
-                                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                               />
-                               <div className="w-full rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 p-6 flex flex-col items-center justify-center text-center group-hover:border-[#F97316] group-hover:bg-orange-50/30 transition-all">
-                                 <div className="p-2 rounded-full bg-white shadow-sm mb-2 text-gray-400 group-hover:text-[#F97316] transition-colors">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-                                 </div>
-                                 <p className="text-sm font-semibold text-gray-700">Click to upload or drag and drop</p>
-                                 <p className="text-xs text-gray-400 mt-1">PDF or Word documents up to 10MB</p>
-                               </div>
-                             </div>
-                          )
-                       ) : (
-                          <div className="flex items-center justify-between p-4 rounded-xl border border-blue-100 bg-blue-50/50">
-                             <div className="flex items-center gap-3 min-w-0">
-                                <div className="p-2 rounded-lg bg-white border border-blue-100 shadow-sm text-blue-600">
-                                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                                </div>
-                                <div className="min-w-0">
-                                  <p className="text-sm font-semibold text-gray-900 truncate">{file ? file.name : existingFile?.name}</p>
-                                </div>
-                             </div>
-                             {!activeSlot.report && (
-                                <button onClick={() => { setFile(null); setExistingFile(null); }} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
-                                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                                </button>
-                             )}
+                             <textarea 
+                               value={reportData[section.id] || ""}
+                               onChange={e => setReportData({...reportData, [section.id]: e.target.value})}
+                               disabled={!!file || !!activeSlot.report}
+                               placeholder={`Type your response here...`}
+                               className={`w-full rounded-lg border border-gray-200 p-3 text-xs leading-relaxed text-gray-800 placeholder-gray-400 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all resize-none shadow-sm font-sans ${!!file || !!activeSlot.report ? "bg-gray-50 cursor-not-allowed opacity-80" : "bg-white"}`}
+                               rows={section.id === 'introduction' || section.id === 'reflection' ? 3 : 5}
+                             />
                           </div>
-                       )}
+                        ))}
+                      </div>
+                    </div>
+
+                     </div>
+                     <div className="pt-2 bg-white border-t border-gray-100 mt-2">
+                     <div className="grid grid-cols-2 gap-2">
+                        {/* Document Attachment */}
+                        <div>
+                           <label className="block text-[9px] uppercase font-bold text-gray-500 mb-0.5">Document (Optional)</label>
+                           {!file && !existingFile ? (
+                              activeSlot.report ? (
+                                 <div className="p-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-400 text-[10px] text-center h-[50px] flex items-center justify-center">
+                                    No attachment
+                                 </div>
+                              ) : (
+                                 <div className="relative group h-[50px]">
+                                    <input 
+                                       type="file" 
+                                       onChange={onFileChange}
+                                       accept=".pdf,.doc,.docx"
+                                       className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                                    />
+                                    <div className="w-full h-full rounded-lg border-2 border-dashed border-gray-200 bg-gray-50 p-1 flex flex-col items-center justify-center text-center group-hover:border-[#F97316] group-hover:bg-orange-50/30 transition-all">
+                                       <div className="flex items-center gap-1">
+                                          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                                          <span className="text-[10px] font-semibold text-gray-700">Upload File</span>
+                                       </div>
+                                    </div>
+                                 </div>
+                              )
+                           ) : (
+                              <div className="flex items-center justify-between p-1.5 rounded-lg border border-blue-100 bg-blue-50/50 h-[50px]">
+                                 <div className="flex items-center gap-2 min-w-0">
+                                    <div className="p-1 rounded-md bg-white border border-blue-100 shadow-sm text-blue-600">
+                                       <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                                    </div>
+                                    <div className="min-w-0">
+                                       <p className="text-[10px] font-semibold text-gray-900 truncate">{file ? file.name : existingFile?.name}</p>
+                                    </div>
+                                 </div>
+                                 {!activeSlot.report && (
+                                    <button onClick={() => { setFile(null); setExistingFile(null); }} className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors">
+                                       <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                    </button>
+                                 )}
+                              </div>
+                           )}
+                        </div>
+
+                        {/* Photo Attachment */}
+                        <div>
+                           <label className="block text-[9px] uppercase font-bold text-gray-500 mb-0.5">Photo Evidence (Required)</label>
+                           <div className="space-y-1.5">
+                              {/* Upload Area */}
+                              <div className="relative group h-[50px]">
+                                 <input 
+                                    type="file" 
+                                    onChange={onPhotosChange}
+                                    accept="image/*"
+                                    multiple
+                                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                                    disabled={!!activeSlot.report}
+                                 />
+                                 <div className={`w-full h-full rounded-lg border-2 border-dashed border-gray-200 bg-gray-50 p-1 flex flex-col items-center justify-center text-center transition-all ${!activeSlot.report ? "group-hover:border-[#F97316] group-hover:bg-orange-50/30" : "opacity-60 cursor-not-allowed"}`}>
+                                    <div className="flex items-center gap-1">
+                                       <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                                       <span className="text-[10px] font-semibold text-gray-700">Upload Photos (Multiple Allowed)</span>
+                                    </div>
+                                 </div>
+                              </div>
+                              
+                              {/* Photos List */}
+                              {(photos.length > 0 || existingPhotos.length > 0) && (
+                                 <div className="flex flex-wrap gap-2 mt-2">
+                                    {/* New Photos */}
+                                    {photos.map((photo, index) => (
+                                       <div key={`new-${index}`} className="relative group w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm">
+                                          <img 
+                                             src={URL.createObjectURL(photo)} 
+                                             alt="Preview" 
+                                             className="w-full h-full object-cover"
+                                          />
+                                          {!activeSlot.report && (
+                                             <button 
+                                                onClick={() => removePhoto(index)}
+                                                className="absolute top-0.5 right-0.5 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                                             >
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                             </button>
+                                          )}
+                                       </div>
+                                    ))}
+                                    
+                                    {/* Existing Photos */}
+                                    {existingPhotos.map((photo, index) => (
+                                       <div key={`existing-${index}`} className="relative group w-16 h-16 rounded-lg overflow-hidden border border-blue-200 shadow-sm">
+                                          <img 
+                                             src={photo.url} 
+                                             alt="Preview" 
+                                             className="w-full h-full object-cover"
+                                          />
+                                          {!activeSlot.report && (
+                                             <button 
+                                                onClick={() => removeExistingPhoto(index)}
+                                                className="absolute top-0.5 right-0.5 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                                             >
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                             </button>
+                                          )}
+                                       </div>
+                                    ))}
+                                 </div>
+                              )}
+                              
+                              {photos.length === 0 && existingPhotos.length === 0 && activeSlot.report && (
+                                 <div className="p-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-400 text-[10px] text-center h-[50px] flex items-center justify-center">
+                                    No photo evidence
+                                 </div>
+                              )}
+                           </div>
+                        </div>
                      </div>
 
-                     <div className="pt-6 border-t border-gray-100 flex justify-between items-center mt-auto">
+                     <div className="pt-2 border-t border-gray-100 flex justify-between items-center">
                         {!activeSlot.report ? (
                            <>
                               <div className="flex items-center gap-2">
-                                 <button onClick={saveDraft} disabled={submitting} className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 font-bold text-sm hover:bg-gray-50 hover:text-[#F97316] transition-all">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
-                                    Save Draft
+                                 <button onClick={saveDraft} disabled={submitting} className="flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-200 text-gray-600 font-bold text-[10px] hover:bg-gray-50 hover:text-[#F97316] transition-all">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                                    Save
                                  </button>
-                                 <button onClick={clearForm} className="px-4 py-2.5 rounded-xl text-gray-400 font-bold text-sm hover:bg-gray-50 hover:text-gray-600 transition-all">
+                                 <button onClick={clearForm} className="px-2 py-1 rounded-lg text-gray-400 font-bold text-[10px] hover:bg-gray-50 hover:text-gray-600 transition-all">
                                     Clear
                                  </button>
                               </div>
-                              <button onClick={submit} disabled={submitting} className="px-6 py-2.5 rounded-xl bg-[#F97316] text-white font-bold text-sm hover:bg-[#EA580C] transition-all shadow-sm disabled:opacity-70 flex items-center gap-2">
-                                {submitting && <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>}
-                                Submit Report
+                              <button onClick={() => submit(false)} disabled={submitting} className="px-3 py-1 rounded-lg bg-[#F97316] text-white font-bold text-[10px] hover:bg-[#EA580C] transition-all shadow-sm disabled:opacity-70 flex items-center gap-2">
+                                {submitting && <svg className="animate-spin h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>}
+                                Submit
                               </button>
                            </>
                         ) : (
-                           <div className="text-sm text-gray-500 italic w-full text-center">
+                           <div className="text-xs text-gray-500 italic w-full text-center">
                               This report has been submitted and cannot be edited.
                            </div>
                         )}
                      </div>
                   </div>
+                  </>
                )}
             </div>
           </div>
       </div>
 
       {/* Right Column - Sidebar */}
-      <div className="space-y-6">
+      <div className="space-y-2 h-[500px] flex flex-col">
          
          {/* My Drafts */}
-         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-             <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex-1 min-h-0 flex flex-col">
+             <div className="px-3 py-1.5 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                <div className="flex items-center gap-2">
-                 <div className="h-2 w-2 rounded-full bg-[#F97316]"></div>
-                 <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">My Drafts</span>
+                 <div className="h-1.5 w-1.5 rounded-full bg-[#F97316]"></div>
+                 <span className="text-[10px] font-bold text-gray-700 uppercase tracking-wider">My Drafts</span>
                </div>
-               <span className="px-2 py-0.5 rounded-full bg-gray-200 text-gray-600 text-[10px] font-bold">{drafts.length}</span>
+               <span className="px-1.5 py-0.5 rounded-full bg-gray-200 text-gray-600 text-[9px] font-bold">{drafts.length}</span>
              </div>
-             <div className="p-4">
+             <div className="p-1.5 overflow-y-auto custom-scrollbar">
                 {drafts.length === 0 ? (
-                  <div className="text-center py-8">
-                     <div className="h-10 w-10 bg-gray-50 rounded-full flex items-center justify-center text-gray-300 mx-auto mb-3">
-                       <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                  <div className="text-center py-3">
+                     <div className="h-6 w-6 bg-gray-50 rounded-full flex items-center justify-center text-gray-300 mx-auto mb-1">
+                       <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
                      </div>
-                     <p className="text-sm font-medium text-gray-900">No drafts saved</p>
-                     <p className="text-xs text-gray-500 mt-1">Your unfinished reports will be saved here automatically</p>
+                     <p className="text-[10px] font-medium text-gray-900">No drafts saved</p>
                   </div>
                 ) : (
-                  <div className="space-y-3">
+                  <div className="space-y-1">
                     {drafts.map(draft => (
                        <div 
                          key={draft.id} 
-                         onClick={() => loadDraft(draft)}
-                         className="w-full text-left p-3 rounded-xl border border-gray-100 hover:border-orange-200 hover:bg-orange-50 transition-all group cursor-pointer relative"
+                         onClick={() => setViewingDraft(draft)}
+                         className="w-full text-left p-2 rounded-lg border border-gray-100 hover:border-orange-200 hover:bg-orange-50 transition-all group cursor-pointer relative"
                        >
-                         <div className="flex justify-between items-start mb-1 pr-6">
-                            <span className="text-xs font-bold text-[#F97316]">Week {draft.week}</span>
-                            <span className="text-[10px] text-gray-400">{new Date(draft.submittedAt).toLocaleDateString()}</span>
+                         <div className="flex justify-between items-center pr-6">
+                            <p className="text-[10px] font-bold text-gray-900 truncate flex-1" title={draft.title || "Untitled Report"}>
+                               {draft.title || "Untitled Report"}
+                            </p>
+                            <span className="text-[9px] text-gray-400 whitespace-nowrap ml-2">{new Date(draft.submittedAt).toLocaleDateString()}</span>
                          </div>
-                         <p className="text-sm font-bold text-gray-900 truncate pr-6">{draft.title || "Untitled Report"}</p>
                          
                          <button 
                            onClick={(e) => deleteDraft(draft, e)}
-                           className="absolute top-2 right-2 p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
+                           className="absolute top-1.5 right-1.5 p-1 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
                            title="Delete Draft"
                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                          </button>
                        </div>
                     ))}
@@ -3608,20 +4283,20 @@ export function ReportsView({
          </div>
 
          {/* Weekly Reports List */}
-         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-             <div className="px-5 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-               <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">Weekly Reports</span>
+         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex-1 flex flex-col min-h-0">
+             <div className="px-3 py-1.5 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between flex-shrink-0">
+               <span className="text-[10px] font-bold text-gray-700 uppercase tracking-wider">Weekly Reports</span>
                <button 
-                 onClick={() => setShowAllReportsModal(true)}
-                 className="text-xs font-bold text-[#F97316] hover:text-[#EA580C] hover:underline transition-colors"
+                 onClick={() => setShowAllCardsModal(true)}
+                 className="text-[10px] font-bold text-[#F97316] hover:text-[#EA580C] hover:underline transition-colors"
                >
                  View All
                </button>
              </div>
-             <div className="max-h-[600px] overflow-y-auto p-4 space-y-3 custom-scrollbar">
+             <div className="flex-1 overflow-y-auto p-1.5 space-y-1 custom-scrollbar">
                 {slots.length === 0 ? (
-                  <div className="text-center py-8 text-gray-400">
-                    <p>No deadlines set</p>
+                  <div className="text-center py-3 text-gray-400">
+                    <p className="text-[10px]">No deadlines set</p>
                   </div>
                 ) : (
                   slots.map(slot => (
@@ -3634,18 +4309,18 @@ export function ReportsView({
                           setSelectedWeek(slot.week);
                         }
                       }}
-                       className={`w-full text-left p-4 rounded-xl border transition-all duration-200 relative overflow-hidden ${
+                       className={`w-full text-left p-1.5 rounded-lg border transition-all duration-200 relative overflow-hidden ${
                          selectedWeek === slot.week 
                            ? "border-[#F97316] ring-1 ring-[#F97316] bg-orange-50/30" 
                            : "border-gray-100 hover:border-orange-200 hover:shadow-sm bg-white"
                        }`}
                      >
-                       <div className="flex justify-between items-start mb-2">
+                       <div className="flex justify-between items-start mb-0.5">
                           <div className="flex items-center gap-2">
-                             <span className={`text-xs font-bold uppercase ${selectedWeek === slot.week ? "text-[#F97316]" : "text-gray-500"}`}>Week {slot.week}</span>
+                             <span className={`text-[10px] font-bold uppercase ${selectedWeek === slot.week ? "text-[#F97316]" : "text-gray-500"}`}>Week {slot.week}</span>
                              {slot.report?.instructorComment && (
                                 <div className="flex items-center gap-1 text-red-600 animate-pulse" title="Instructor Comment">
-                                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                   <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                       <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
                                    </svg>
                                 </div>
@@ -3653,39 +4328,41 @@ export function ReportsView({
                           </div>
                           
                           {slot.status === "Reviewed" ? (
-                             <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-bold uppercase tracking-wide">Reviewed</span>
+                             <span className="px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 text-[9px] font-bold uppercase tracking-wide">Reviewed</span>
                           ) : slot.status === "Under Review" ? (
-                             <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-[10px] font-bold uppercase tracking-wide">Under Review</span>
+                             <span className="px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700 text-[9px] font-bold uppercase tracking-wide">Under Review</span>
                           ) : slot.status === "Overdue" ? (
-                             <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-wide">Overdue</span>
+                             <span className="px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 text-[9px] font-bold uppercase tracking-wide">Overdue</span>
                           ) : slot.status === "Pending" ? (
-                             <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-[10px] font-bold uppercase tracking-wide">Action Required</span>
+                             <span className="px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700 text-[9px] font-bold uppercase tracking-wide">Pending</span>
+                          ) : slot.status === "Future" ? (
+                             <span className="px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[9px] font-bold uppercase tracking-wide">Upcoming</span>
                           ) : (
-                             <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-bold uppercase tracking-wide">Locked</span>
+                             <span className="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[9px] font-bold uppercase tracking-wide">Locked</span>
                           )}
                        </div>
                        
-                       <div className={`text-sm font-bold mb-1 ${slot.isLocked ? "text-gray-400" : "text-gray-900"}`}>
+                       <div className={`text-[10px] font-bold mb-0.5 ${slot.isLocked ? "text-gray-400" : "text-gray-900"}`}>
                           {slot.start.toLocaleDateString(undefined, {month: 'short', day: 'numeric'})} - {slot.end.toLocaleDateString(undefined, {month: 'short', day: 'numeric'})}
                        </div>
                        
-                       <div className="text-xs text-gray-500 mb-3">
-                          Deadline: {slot.end.toLocaleDateString(undefined, {weekday: 'long', month: 'long', day: 'numeric'})}
+                       <div className="text-[9px] text-gray-500 mb-1">
+                          Deadline: {slot.end.toLocaleDateString(undefined, {weekday: 'short', month: 'short', day: 'numeric'})}
                        </div>
                        
-                       <div className={`text-xs font-bold flex items-center gap-1 ${
+                       <div className={`text-[9px] font-bold flex items-center gap-1 ${
                           (slot.status === "Reviewed") ? "text-green-600" : 
                           slot.status === "Under Review" ? "text-orange-600" :
                           slot.isLocked ? "text-gray-400" : "text-[#F97316]"
                        }`}>
                           {(slot.status === "Reviewed" || slot.status === "Under Review") ? (
                              <>
-                               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                               <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                                View Report
                              </>
                           ) : slot.isLocked ? (
                              <>
-                               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                               <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
                                Locked
                              </>
                           ) : null}
@@ -3693,6 +4370,16 @@ export function ReportsView({
 
                      </button>
                   ))
+                )}
+                {slots.length > 0 && 
+                 (slots[slots.length-1].status === "Reviewed" || slots[slots.length-1].status === "Under Review") && (
+                   <div className="p-4 text-center animate-in fade-in slide-in-from-bottom-2 duration-500">
+                      <div className="h-10 w-10 bg-green-50 rounded-full flex items-center justify-center text-green-500 mx-auto mb-2">
+                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                      </div>
+                      <p className="text-[11px] font-bold text-gray-800">You are all caught up!</p>
+                      <p className="text-[10px] text-gray-500 mt-0.5">No pending reports at the moment.</p>
+                   </div>
                 )}
              </div>
          </div>
@@ -3705,6 +4392,17 @@ export function ReportsView({
         />
       )}
 
+      {viewingDraft && (
+        <ReportDetailsModal 
+          report={viewingDraft} 
+          onClose={() => setViewingDraft(null)} 
+          onEdit={() => {
+            setViewingDraft(null);
+            loadDraft(viewingDraft);
+          }}
+        />
+      )}
+
       {showAllReportsModal && (
         <SubmittedReportsModal 
           reports={reports} 
@@ -3714,6 +4412,69 @@ export function ReportsView({
             setViewingReport(report);
           }}
         />
+      )}
+      {showAllCardsModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-white sticky top-0 z-10">
+              <h2 className="text-lg font-bold text-gray-900">Weekly Reports</h2>
+              <button onClick={() => setShowAllCardsModal(false)} className="p-1.5 hover:bg-gray-100 rounded-full transition-colors text-gray-400 hover:text-gray-600">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+            <div className="overflow-y-auto p-4 space-y-2 custom-scrollbar">
+              {slots.map(slot => {
+                const rangeLabel = `${slot.start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} - ${slot.end.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+                const deadlineLabel = `Deadline: ${slot.end.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}`;
+                const statusClass =
+                  slot.status === "Reviewed" ? "bg-green-100 text-green-700" :
+                  slot.status === "Under Review" ? "bg-blue-100 text-blue-700" :
+                  slot.status === "Overdue" ? "bg-red-100 text-red-700" :
+                  slot.status === "Locked" ? "bg-gray-200 text-gray-700" :
+                  slot.status === "Future" ? "bg-gray-100 text-gray-600" :
+                  "bg-orange-100 text-orange-700";
+                return (
+                  <button
+                    key={slot.week}
+                    onClick={() => {
+                      if ((slot.status === "Reviewed" || slot.status === "Under Review") && slot.report) {
+                        setShowAllCardsModal(false);
+                        setViewingReport(slot.report);
+                      } else {
+                        setShowAllCardsModal(false);
+                        setSelectedWeek(slot.week);
+                      }
+                    }}
+                    className="w-full text-left p-3 rounded-xl border border-gray-100 hover:border-green-200 hover:shadow-sm bg-white transition-all"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="text-[11px] font-bold text-gray-700 uppercase tracking-wider">Week {slot.week}</div>
+                        <div className="text-sm font-bold text-gray-900">{rangeLabel}</div>
+                        <div className="text-[11px] text-gray-500">{deadlineLabel}</div>
+                        <div className="mt-1">
+                          {(slot.status === "Reviewed" || slot.status === "Under Review") && slot.report ? (
+                            <span className="inline-flex items-center gap-1 text-xs font-bold text-green-600">
+                              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                              View Report
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-xs font-bold text-[#F97316]">
+                              Write Report
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${statusClass}`}>
+                        {slot.status}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
       )}
 
       {draftToDelete && (
@@ -3739,6 +4500,16 @@ export function ReportsView({
             </div>
           </div>
         </div>
+      )}
+      {showNoDeadlineModal && selectedWeek && (
+        <NoDeadlineModal 
+            onClose={() => setShowNoDeadlineModal(false)}
+            onConfirm={() => {
+                setShowNoDeadlineModal(false);
+                submit(true);
+            }}
+            week={selectedWeek}
+        />
       )}
     </div>
   );
@@ -3896,17 +4667,17 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-in fade-in duration-500">
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 animate-in fade-in duration-500">
       {/* Main Profile Section */}
-      <div className="lg:col-span-2 space-y-6">
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="h-40 bg-gradient-to-r from-orange-400 to-orange-600 relative">
+      <div className="lg:col-span-2 space-y-3">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="h-24 bg-gradient-to-r from-orange-400 to-orange-600 relative">
              <div className="absolute inset-0 bg-black/10"></div>
           </div>
-          <div className="px-8 pb-8 relative">
-            <div className="flex flex-col sm:flex-row items-center sm:items-end gap-6 -mt-16 mb-6">
+          <div className="px-4 pb-3 relative">
+            <div className="flex flex-col sm:flex-row items-center sm:items-end gap-3 -mt-10 mb-3">
               <div 
-                className="relative group h-32 w-32 rounded-2xl border-4 border-white bg-white shadow-md flex items-center justify-center text-4xl font-bold text-gray-800 shrink-0 overflow-hidden cursor-pointer"
+                className="relative group h-20 w-20 rounded-xl border-4 border-white bg-white shadow-md flex items-center justify-center text-xl font-bold text-gray-800 shrink-0 overflow-hidden cursor-pointer"
                 onClick={() => !isUploading && fileInputRef.current?.click()}
               >
                 {student?.avatar_url ? (
@@ -3917,30 +4688,30 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
                 
                 <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity z-10">
                     {isUploading ? (
-                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-white"></div>
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
                     ) : (
-                        <span className="text-white text-xs font-medium">Change</span>
+                        <span className="text-white text-[9px] font-medium">Change</span>
                     )}
                 </div>
                 
                 {/* Action Buttons */}
-                <div className="absolute bottom-2 right-2 flex gap-2 z-20">
+                <div className="absolute bottom-0.5 right-0.5 flex gap-0.5 z-20">
                     {student?.avatar_url && (
                         <button 
                             onClick={handleAvatarDelete}
                             disabled={isDeleting || isUploading}
-                            className="h-8 w-8 bg-red-500 text-white rounded-full shadow-lg border-2 border-white flex items-center justify-center transition-transform hover:scale-110"
+                            className="h-5 w-5 bg-red-500 text-white rounded-full shadow-lg border border-white flex items-center justify-center transition-transform hover:scale-110"
                             title="Remove photo"
                         >
                              {isDeleting ? (
-                                <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div>
+                                <div className="animate-spin rounded-full h-1.5 w-1.5 border-b-2 border-white"></div>
                              ) : (
-                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                                <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                              )}
                         </button>
                     )}
-                    <div className="h-8 w-8 bg-[#F97316] text-white rounded-full shadow-lg border-2 border-white flex items-center justify-center transition-transform group-hover:scale-110">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <div className="h-5 w-5 bg-[#F97316] text-white rounded-full shadow-lg border border-white flex items-center justify-center transition-transform group-hover:scale-110">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path>
                         </svg>
                     </div>
@@ -3955,72 +4726,72 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
                     disabled={isUploading}
                 />
               </div>
-              <div className="text-center sm:text-left mb-2">
-                 <h1 className="text-2xl font-bold text-gray-900">{fullname || "Unknown User"}</h1>
-                 <p className="text-gray-500 font-medium">{student?.idnumber || "No ID"}</p>
+              <div className="text-center sm:text-left mb-0.5">
+                 <h1 className="text-lg font-bold text-gray-900">{fullname || "Unknown User"}</h1>
+                 <p className="text-gray-500 text-[10px] font-medium">{student?.idnumber || "No ID"}</p>
               </div>
             </div>
             
-            <div className="border-t border-gray-100 pt-8">
-              <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide mb-6 flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+            <div className="border-t border-gray-100 pt-3">
+              <h3 className="text-[9px] font-bold text-gray-900 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
                 Personal Information
               </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-6 gap-x-8">
-                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
-                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">First Name</label>
-                  <div className="text-gray-900 font-semibold">{student?.firstname || "-"}</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-2 gap-x-4">
+                <div className="p-2 rounded-lg bg-gray-50 border border-gray-100">
+                  <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">First Name</label>
+                  <div className="text-gray-900 text-xs font-semibold">{student?.firstname || "-"}</div>
                 </div>
-                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
-                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Last Name</label>
-                  <div className="text-gray-900 font-semibold">{student?.lastname || "-"}</div>
+                <div className="p-2 rounded-lg bg-gray-50 border border-gray-100">
+                  <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Last Name</label>
+                  <div className="text-gray-900 text-xs font-semibold">{student?.lastname || "-"}</div>
                 </div>
 
-                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
-                   <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Role</label>
-                   <div className="text-gray-900 font-semibold capitalize">Student</div>
+                <div className="p-2 rounded-lg bg-gray-50 border border-gray-100">
+                   <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Role</label>
+                   <div className="text-gray-900 text-xs font-semibold capitalize">Student</div>
                 </div>
               </div>
             </div>
 
-            <div className="border-t border-gray-100 pt-8 mt-8">
-              <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide mb-6 flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><path d="M22 10v6M2 10l10-5 10 5-10 5z"></path><path d="M6 12v5c3 3 9 3 12 0v-5"></path></svg>
+            <div className="border-t border-gray-100 pt-3 mt-2">
+              <h3 className="text-[9px] font-bold text-gray-900 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><path d="M22 10v6M2 10l10-5 10 5-10 5z"></path><path d="M6 12v5c3 3 9 3 12 0v-5"></path></svg>
                 Academic Details
               </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-6 gap-x-8">
-                 <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
-                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Course</label>
-                  <div className="text-gray-900 font-semibold">{student?.course || "N/A"}</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-2 gap-x-4">
+                 <div className="p-2 rounded-lg bg-gray-50 border border-gray-100">
+                  <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Course</label>
+                  <div className="text-gray-900 text-xs font-semibold">{student?.course || "N/A"}</div>
                 </div>
-                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
-                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Section</label>
-                  <div className="text-gray-900 font-semibold">{student?.section || "N/A"}</div>
+                <div className="p-2 rounded-lg bg-gray-50 border border-gray-100">
+                  <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Section</label>
+                  <div className="text-gray-900 text-xs font-semibold">{student?.section || "N/A"}</div>
                 </div>
-                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100 sm:col-span-2">
-                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Supervisor</label>
-                  <div className="text-gray-900 font-semibold">
+                <div className="p-2 rounded-lg bg-gray-50 border border-gray-100 sm:col-span-2">
+                  <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Supervisor</label>
+                  <div className="text-gray-900 text-xs font-semibold">
                     {supervisor ? `${(supervisor.firstname || "").trim()} ${(supervisor.lastname || "").trim()}`.trim() || supervisor.idnumber : "N/A"}
                   </div>
                 </div>
               </div>
             </div>
 
-            <div className="border-t border-gray-100 pt-8 mt-8">
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide flex items-center gap-2">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
+            <div className="border-t border-gray-100 pt-3 mt-2">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-[9px] font-bold text-gray-900 uppercase tracking-wide flex items-center gap-1.5">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
                   OJT Placement
                 </h3>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-6 gap-x-8">
-                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
-                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Company</label>
-                  <div className="text-gray-900 font-semibold">{company}</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-2 gap-x-4">
+                <div className="p-2 rounded-lg bg-gray-50 border border-gray-100">
+                  <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Company</label>
+                  <div className="text-gray-900 text-xs font-semibold">{company}</div>
                 </div>
-                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
-                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Location</label>
-                  <div className="text-gray-900 font-semibold">{location}</div>
+                <div className="p-2 rounded-lg bg-gray-50 border border-gray-100">
+                  <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Location</label>
+                  <div className="text-gray-900 text-xs font-semibold">{location}</div>
                 </div>
               </div>
             </div>
@@ -4029,57 +4800,57 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
       </div>
 
       {/* Sidebar / Security Section */}
-      <div className="space-y-6">
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden sticky top-8">
-          <div className="p-6 border-b border-gray-100 bg-gray-50/50">
-             <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
-               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+      <div className="space-y-2">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden sticky top-8">
+          <div className="p-2 border-b border-gray-100 bg-gray-50/50">
+             <h3 className="text-xs font-bold text-gray-900 flex items-center gap-1.5">
+               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
                Security
              </h3>
-             <p className="text-xs text-gray-500 mt-1">Manage your account password.</p>
+             <p className="text-[9px] text-gray-500 mt-0">Manage your account password.</p>
           </div>
           
-          <div className="p-6 space-y-5">
+          <div className="p-2 space-y-2">
             {message && (
-              <div className={`text-sm rounded-xl p-4 border flex items-start gap-3 ${message.includes("success") ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200"}`}>
+              <div className={`text-[10px] rounded-lg p-1.5 border flex items-start gap-1.5 ${message.includes("success") ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200"}`}>
                  <div className="shrink-0 mt-0.5">
                    {message.includes("success") ? 
-                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> : 
-                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> : 
+                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
                    }
                  </div>
                  <span>{message}</span>
               </div>
             )}
             
-            <div className="space-y-4">
+            <div className="space-y-1.5">
               <div>
-                <label className="block text-xs font-bold text-gray-700 mb-1.5">Current Password</label>
+                <label className="block text-[9px] font-bold text-gray-700 mb-0.5">Current Password</label>
                 <input
                   type="password"
                   value={currentPassword}
                   onChange={(e) => setCurrentPassword(e.target.value)}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all placeholder:text-gray-400"
+                  className="w-full rounded-lg border border-gray-300 px-2 py-1 text-[10px] focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all placeholder:text-gray-400"
                   placeholder="Enter current password"
                 />
               </div>
               <div>
-                <label className="block text-xs font-bold text-gray-700 mb-1.5">New Password</label>
+                <label className="block text-[9px] font-bold text-gray-700 mb-0.5">New Password</label>
                 <input
                   type="password"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all placeholder:text-gray-400"
+                  className="w-full rounded-lg border border-gray-300 px-2 py-1 text-[10px] focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all placeholder:text-gray-400"
                    placeholder="Enter new password"
                 />
               </div>
               <div>
-                <label className="block text-xs font-bold text-gray-700 mb-1.5">Confirm Password</label>
+                <label className="block text-[9px] font-bold text-gray-700 mb-0.5">Confirm Password</label>
                 <input
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all placeholder:text-gray-400"
+                  className="w-full rounded-lg border border-gray-300 px-2 py-1 text-[10px] focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all placeholder:text-gray-400"
                    placeholder="Confirm new password"
                 />
               </div>
@@ -4088,11 +4859,11 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
             <button
               disabled={loading}
               onClick={changePassword}
-              className="w-full rounded-xl bg-gray-900 text-white font-bold py-3 hover:bg-black transition-all active:scale-95 touch-manipulation disabled:opacity-70 disabled:cursor-not-allowed shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"
+              className="w-full rounded-lg bg-gray-900 text-white font-bold py-1.5 hover:bg-black transition-all active:scale-95 touch-manipulation disabled:opacity-70 disabled:cursor-not-allowed shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2 text-[10px]"
             >
               {loading ? (
                 <>
-                  <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <svg className="animate-spin h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                   </svg>
@@ -4109,8 +4880,8 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
       {showCropModal && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-              <h3 className="font-bold text-gray-900">Adjust Photo</h3>
+            <div className="p-3 border-b border-gray-100 flex items-center justify-between">
+              <h3 className="font-bold text-gray-900 text-sm">Adjust Photo</h3>
               <button 
                 onClick={() => {
                   setShowCropModal(false);
@@ -4118,7 +4889,7 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
                 }}
                 className="p-1 rounded-full hover:bg-gray-100 text-gray-500 transition-colors"
               >
-                <X size={20} />
+                <X size={18} />
               </button>
             </div>
             
@@ -4142,18 +4913,18 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
               )}
               
               <div className="absolute bottom-4 left-0 right-0 flex justify-center pointer-events-none">
-                <div className="bg-black/50 backdrop-blur-md text-white text-xs font-medium px-3 py-1.5 rounded-full flex items-center gap-2">
-                  <Move size={12} />
+                <div className="bg-black/50 backdrop-blur-md text-white text-[10px] font-medium px-3 py-1 rounded-full flex items-center gap-2">
+                  <Move size={10} />
                   <span>Drag to Reposition</span>
                 </div>
               </div>
             </div>
             
-            <div className="p-6 space-y-6">
+            <div className="p-4 space-y-4">
               <div className="space-y-3">
-                <div className="flex items-center justify-between text-xs font-medium text-gray-500">
-                  <span className="flex items-center gap-1.5"><ZoomOut size={14}/> Zoom Out</span>
-                  <span className="flex items-center gap-1.5">Zoom In <ZoomIn size={14}/></span>
+                <div className="flex items-center justify-between text-[10px] font-medium text-gray-500">
+                  <span className="flex items-center gap-1.5"><ZoomOut size={12}/> Zoom Out</span>
+                  <span className="flex items-center gap-1.5">Zoom In <ZoomIn size={12}/></span>
                 </div>
                 <input
                   type="range"
@@ -4163,7 +4934,7 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
                   step={0.1}
                   aria-labelledby="Zoom"
                   onChange={(e) => setZoom(Number(e.target.value))}
-                  className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-orange-600 hover:accent-orange-700 transition-all"
+                  className="w-full h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-orange-600 hover:accent-orange-700 transition-all"
                 />
               </div>
 
@@ -4173,18 +4944,18 @@ export function ProfileView({ student, supervisor, onUpdate }: { student: User |
                     setShowCropModal(false);
                     setAvatarPreview(null);
                   }}
-                  className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-600 font-semibold text-sm hover:bg-gray-50 transition-colors"
+                  className="flex-1 py-1.5 rounded-xl border border-gray-200 text-gray-600 font-semibold text-xs hover:bg-gray-50 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleCropConfirm}
                   disabled={isUploading}
-                  className="flex-1 py-2.5 rounded-xl bg-orange-600 text-white font-semibold text-sm hover:bg-orange-700 transition-colors shadow-lg shadow-orange-600/20 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  className="flex-1 py-1.5 rounded-xl bg-orange-600 text-white font-semibold text-xs hover:bg-orange-700 transition-colors shadow-lg shadow-orange-600/20 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   {isUploading ? (
                     <>
-                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                       <span>Saving...</span>
                     </>
                   ) : (

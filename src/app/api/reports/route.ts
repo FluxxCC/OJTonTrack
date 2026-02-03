@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
 import { getSupabaseAdmin } from "@/lib/supabaseClient";
+import { getActiveSchoolYearId } from "../../../lib/school-year";
+import { sendPushNotification } from "@/lib/push-notifications";
+
+export const dynamic = 'force-dynamic';
 
 function configureCloudinary() {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME || "";
@@ -23,11 +27,16 @@ type ReportFiles = ReportFile[] | ReportFile | undefined;
 type ReportRow = {
   id: number;
   title?: string | null;
-  text?: string | null;
-  files?: ReportFiles;
-  ts?: number | null;
-  submittedat?: string | null;
-  instructor_comment?: string | null;
+  content?: string | null;
+  files?: any;
+  created_at?: string | null;
+  submitted_at?: string | null;
+  status?: string | null;
+  student_id: number;
+  reviewed_by_id?: number | null;
+  users_students?: { idnumber: string } | { idnumber: string }[] | null;
+  students?: { idnumber: string } | null;
+  school_year_id?: number | null;
 };
 
 export async function GET(req: Request) {
@@ -37,14 +46,46 @@ export async function GET(req: Request) {
 
     const url = new URL(req.url);
     const idnumber = String(url.searchParams.get("idnumber") || "").trim();
+    const syParam = url.searchParams.get("school_year_id");
+
+    let targetSyId: number | null = null;
+    if (syParam) {
+      targetSyId = parseInt(syParam);
+    } else {
+      targetSyId = await getActiveSchoolYearId(admin);
+    }
 
     let query = admin
       .from("reports")
-      .select("id, title, text, files, ts, submittedat, status, idnumber, reviewedby")
-      .order("ts", { ascending: false });
+      .select(`
+        id, 
+        title, 
+        content, 
+        files, 
+        created_at, 
+        submitted_at, 
+        status, 
+        student_id, 
+        reviewed_by_id, 
+        school_year_id,
+        users_students (
+          idnumber
+        )
+      `)
+      .order("created_at", { ascending: false });
+
+    if (targetSyId) {
+      query = query.eq("school_year_id", targetSyId);
+    }
 
     if (idnumber) {
-      query = query.eq("idnumber", idnumber);
+      // Look up student ID first
+      const { data: student } = await admin.from("users_students").select("id").eq("idnumber", idnumber).single();
+      if (student) {
+        query = query.eq("student_id", student.id);
+      } else {
+        return NextResponse.json({ reports: [], drafts: [] });
+      }
     }
 
     const { data, error } = await query;
@@ -55,44 +96,66 @@ export async function GET(req: Request) {
     }
 
     // Fetch instructor comments for these reports
-    const reportIds = (data || []).map((r: any) => String(r.id));
+    const reportIds = (data || []).map((r: any) => r.id);
     const commentsMap: Record<string, string> = {};
     const viewedMap: Record<string, boolean> = {};
     
     if (reportIds.length > 0) {
         const { data: comments } = await admin
             .from("report_comments")
-            .select("reportid, text, ts")
-            .in("reportid", reportIds)
-            .eq("byrole", "instructor")
-            .order("ts", { ascending: true }); // Get latest by overwriting in map
+            .select("report_id, content, created_at")
+            .in("report_id", reportIds)
+            .eq("author_role", "instructor")
+            .order("created_at", { ascending: true }); // Get latest by overwriting in map
             
         if (comments) {
             comments.forEach((c: any) => {
-                commentsMap[c.reportid] = c.text;
-                viewedMap[c.reportid] = true;
+                commentsMap[String(c.report_id)] = c.content;
+                viewedMap[String(c.report_id)] = true;
             });
         }
     }
 
     const reports = (data || []).map((row: ReportRow) => {
       // Parse files jsonb
-      let fileName = undefined;
-      let fileType = undefined;
-      let fileUrl = undefined;
-      let week = undefined;
+      let fileName: string | undefined = undefined;
+      let fileType: string | undefined = undefined;
+      let fileUrl: string | undefined = undefined;
+      let week: number | undefined = undefined;
 
       const extractWeek = (obj: any) => {
         if (obj && typeof obj === 'object' && 'week' in obj) return Number(obj.week);
         return undefined;
       };
 
-      if (row.files && Array.isArray(row.files) && row.files.length > 0) {
-        const f = row.files[0] as any;
-        fileName = f?.name;
-        fileType = f?.type;
-        fileUrl = f?.url;
-        week = extractWeek(f);
+      let photoName: string | undefined = undefined;
+      let photoUrl: string | undefined = undefined;
+      const photos: { name: string; url: string; type: string }[] = [];
+
+      if (row.files && Array.isArray(row.files)) {
+        row.files.forEach((f: any) => {
+            const w = extractWeek(f);
+            if (w) week = w;
+            
+            if (f.category === 'photo' || (f.type && f.type.startsWith('image/'))) {
+                // Add to photos array
+                photos.push({
+                    name: f.name,
+                    url: f.url,
+                    type: f.type || 'image/jpeg'
+                });
+
+                // Keep legacy fields pointing to the first photo (or last, depending on preference, but first is safer for "main" photo)
+                if (!photoName) {
+                    photoName = f.name;
+                    photoUrl = f.url;
+                }
+            } else if (f.name) {
+                fileName = f.name;
+                fileType = f.type;
+                fileUrl = f.url;
+            }
+        });
       } else if (row.files && typeof row.files === "object") {
         const f = row.files as any;
         fileName = f?.name;
@@ -105,15 +168,18 @@ export async function GET(req: Request) {
         id: row.id,
         week,
         title: row.title || "(Untitled)",
-        body: row.text,
+        body: row.content, // 'content' in new schema
         fileName,
         fileType,
         fileUrl,
+        photoName,
+        photoUrl,
+        photos, // Return the full array
         instructorComment: commentsMap[String(row.id)] || null,
-        isViewedByInstructor: viewedMap[String(row.id)] || !!(row as any).reviewedby,
-        submittedAt: row.ts ? Number(row.ts) : (row.submittedat ? new Date(row.submittedat).getTime() : Date.now()),
-        status: (row as any).status,
-        idnumber: (row as any).idnumber,
+        isViewedByInstructor: viewedMap[String(row.id)] || !!row.reviewed_by_id,
+        submittedAt: row.submitted_at ? new Date(row.submitted_at).getTime() : (row.created_at ? new Date(row.created_at).getTime() : Date.now()),
+        status: row.status,
+        idnumber: (Array.isArray(row.users_students) ? row.users_students[0]?.idnumber : (row.users_students as any)?.idnumber) || row.students?.idnumber,
       };
     });
 
@@ -141,10 +207,36 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: "Report ID is required" }, { status: 400 });
     }
 
+    if (!instructorId) {
+        return NextResponse.json({ error: "Instructor ID is required" }, { status: 400 });
+    }
+
+    // Resolve instructorId (string idnumber) to numeric ID
+    let numericInstructorId = null;
+    if (instructorId) {
+        const { data: instructorData } = await admin
+            .from("users_instructors")
+            .select("id")
+            .eq("idnumber", instructorId)
+            .single();
+        
+        if (instructorData) {
+            numericInstructorId = instructorData.id;
+        } else if (!isNaN(Number(instructorId))) {
+             // Fallback if it was already a number
+             numericInstructorId = Number(instructorId);
+        }
+    }
+
+    if (!numericInstructorId) {
+        console.error("Failed to resolve instructor ID:", instructorId);
+        return NextResponse.json({ error: "Invalid Instructor ID" }, { status: 400 });
+    }
+
     // Fetch report to get student idnumber
     const { data: reportData, error: reportError } = await admin
         .from("reports")
-        .select("idnumber")
+        .select("student_id, users_students (idnumber)")
         .eq("id", id)
         .single();
 
@@ -153,12 +245,14 @@ export async function PATCH(req: Request) {
         return NextResponse.json({ error: "Report not found" }, { status: 404 });
     }
 
-    // Update reviewedby and reviewedat in reports table
+    const studentIdNumber = (reportData.users_students as any)?.idnumber;
+
+    // Update reviewed_by_id and reviewed_at in reports table
     const { error: updateError } = await admin
         .from("reports")
         .update({
-            reviewedby: instructorId || "instructor",
-            reviewedat: new Date().toISOString()
+            reviewed_by_id: numericInstructorId, 
+            reviewed_at: new Date().toISOString()
         })
         .eq("id", id);
 
@@ -171,13 +265,12 @@ export async function PATCH(req: Request) {
         const { error } = await admin
           .from("report_comments")
           .insert({
-            reportid: String(id),
-            idnumber: reportData.idnumber,
-            text: instructorComment,
-            byid: instructorId || "instructor", // Fallback if not provided
-            byrole: "instructor",
-            ts: Date.now(),
-            unreadforstudent: true
+            report_id: id,
+            content: instructorComment,
+            author_id: numericInstructorId, 
+            author_role: "instructor",
+            created_at: new Date().toISOString(),
+            unread_for_student: true
           });
 
         if (error) {
@@ -187,10 +280,10 @@ export async function PATCH(req: Request) {
     }
 
     // Create Notification only if there is a comment text
-    if (instructorComment && instructorComment.trim().length > 0) {
+    if (instructorComment && instructorComment.trim().length > 0 && studentIdNumber) {
       try {
         await admin.from("notifications").insert({
-          idnumber: reportData.idnumber,
+          idnumber: studentIdNumber,
           title: "New Report Comment",
           message: "An instructor has commented on your report.",
           type: "report_comment",
@@ -217,141 +310,198 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
     }
 
-    const body = await req.json().catch(() => ({}));
-    console.log("Received report submission:", JSON.stringify(body, null, 2));
+    const body = await req.json();
+    const { 
+        idnumber, 
+        title, 
+        body: content, 
+        fileName, 
+        fileType, 
+        fileData, 
+        existingFileUrl,
+        photos, // Array of {name, type, data}
+        existingPhotos, // Array of {name, type, url}
+        isDraft,
+        week,
+        id // draft id if updating
+    } = body;
 
-    const { id, idnumber, title, body: text, fileName, fileType, fileData, isDraft, week } = body;
+    if (!idnumber) return NextResponse.json({ error: "Student ID required" }, { status: 400 });
 
-    if (!idnumber) {
-      console.error("Missing idnumber in report submission");
-      return NextResponse.json({ error: "idnumber is required" }, { status: 400 });
+    // Get Student ID
+    const { data: student, error: studentError } = await admin
+        .from("users_students")
+        .select("id, company, supervisor, supervisorid, firstname, lastname")
+        .eq("idnumber", idnumber)
+        .single();
+    
+    if (studentError || !student) {
+        return NextResponse.json({ error: "Student not found" }, { status: 404 });
     }
 
-    // Handle File Upload
-    let fileUrl = undefined;
+    const syId = await getActiveSchoolYearId(admin);
+    if (!syId) {
+        return NextResponse.json({ error: "No active school year found" }, { status: 400 });
+    }
+
+    // Handle File Uploads
+    const uploadedFiles: any[] = [];
+
+    // 1. Main Document
     if (fileData && fileName) {
-        configureCloudinary(); // Will throw if missing credentials
-        
+        configureCloudinary();
         try {
-            console.log("Uploading file to Cloudinary...");
             const uploadRes = await cloudinary.uploader.upload(fileData, {
-                folder: "ojt_reports",
+                folder: "reports_docs",
                 resource_type: "auto",
-                public_id: `report_${idnumber}_${Date.now()}_${fileName.replace(/\s+/g, '_')}`
+                filename_override: fileName,
+                use_filename: true
             });
-            fileUrl = uploadRes.secure_url;
-            console.log("File uploaded:", fileUrl);
+            uploadedFiles.push({
+                name: fileName,
+                type: fileType,
+                url: uploadRes.secure_url,
+                category: 'document',
+                week: week
+            });
         } catch (err) {
-            console.error("Cloudinary upload failed:", err);
-            return NextResponse.json({ error: "Failed to upload file" }, { status: 500 });
+            console.error("Cloudinary upload error (doc):", err);
+            return NextResponse.json({ error: "File upload failed" }, { status: 500 });
+        }
+    } else if (existingFileUrl) {
+        uploadedFiles.push({
+            name: fileName,
+            type: fileType,
+            url: existingFileUrl,
+            category: 'document',
+            week: week
+        });
+    }
+
+    // 2. Photos
+    if (photos && Array.isArray(photos)) {
+        configureCloudinary();
+        for (const p of photos) {
+            if (p.data) {
+                try {
+                    const uploadRes = await cloudinary.uploader.upload(p.data, {
+                        folder: "reports_photos",
+                        resource_type: "image",
+                        filename_override: p.name,
+                        use_filename: true
+                    });
+                    uploadedFiles.push({
+                        name: p.name,
+                        type: p.type,
+                        url: uploadRes.secure_url,
+                        category: 'photo',
+                        week: week
+                    });
+                } catch (err) {
+                    console.error("Cloudinary upload error (photo):", err);
+                    // Continue with other photos? or fail?
+                    // Fail safer
+                    return NextResponse.json({ error: "Photo upload failed" }, { status: 500 });
+                }
+            }
         }
     }
 
-    // Fetch user to get course
-    const { data: user, error: userError } = await admin
-        .from("users")
-        .select("course")
-        .eq("idnumber", idnumber)
-        .maybeSingle();
+    // 3. Existing Photos
+    if (existingPhotos && Array.isArray(existingPhotos)) {
+        existingPhotos.forEach((p: any) => {
+            uploadedFiles.push({
+                name: p.name,
+                type: p.type,
+                url: p.url,
+                category: 'photo',
+                week: week
+            });
+        });
+    }
 
-    if (userError) console.warn("Could not fetch user course:", userError);
-
-    const weekNum = week ? Number(week) : undefined;
-    const files = fileName 
-        ? [{ name: fileName, type: fileType, url: fileUrl, week: weekNum }] 
-        : (weekNum ? [{ week: weekNum }] : []);
-    
-    const ts = Date.now();
-    const submittedat = new Date().toISOString();
-    const status = isDraft ? "draft" : "submitted";
-
-    const payload = {
-      idnumber,
-      title: title || (isDraft ? "" : "(Untitled)"),
-      text: text || "",
-      files: files,
-      ts,
-      submittedat,
-      status,
-      course: user?.course || null,
-      createdat: submittedat,
+    // Prepare DB Payload
+    const dbPayload: any = {
+        student_id: student.id,
+        title: title || "(Untitled)",
+        content: content, // JSON string
+        files: uploadedFiles,
+        status: isDraft ? 'draft' : 'submitted',
+        school_year_id: syId,
+        submitted_at: isDraft ? null : new Date().toISOString()
     };
-    
-    let resultData;
-    let resultError;
 
+    if (isDraft) {
+        dbPayload.updated_at = new Date().toISOString();
+    } else {
+        // If submitting, we might want to set created_at if it's new, 
+        // but 'created_at' is usually default now().
+        // If updating a draft to submitted, we update status and submitted_at.
+    }
+
+    let result;
     if (id) {
-        // Update existing report/draft by ID
-        console.log(`Updating existing report/draft ${id} with status ${status}`);
-        
+        // Update existing report (draft)
         const { data, error } = await admin
             .from("reports")
-            .update(payload)
+            .update(dbPayload)
             .eq("id", id)
-            .eq("idnumber", idnumber) // Security check
-            .select("id, title, text, files, ts, status")
+            .select()
+            .single();
+        
+        if (error) throw error;
+        result = data;
+    } else {
+        // Insert new
+        const { data, error } = await admin
+            .from("reports")
+            .insert(dbPayload)
+            .select()
             .single();
             
-        resultData = data;
-        resultError = error;
-    } else {
-        // Insert new report/draft
-        console.log(`Inserting new report with status ${status}`);
-        const { data, error } = await admin
-          .from("reports")
-          .insert(payload)
-          .select("id, title, text, files, ts, status")
-          .single();
-          
-        resultData = data;
-        resultError = error;
-    }
-
-    if (resultError || !resultData) {
-      console.error("Error saving report:", resultError);
-      return NextResponse.json({ error: resultError?.message || "Failed to save report" }, { status: 500 });
+        if (error) throw error;
+        result = data;
     }
     
-    console.log("Report saved successfully:", resultData.id);
+    // Create Notification for Supervisor if Submitted
+    if (!isDraft && result) {
+        // Notify Supervisor
+        if (student.supervisorid) {
+             try {
+                 // Fetch supervisor idnumber
+                 const { data: supervisorData } = await admin
+                    .from("users_supervisors")
+                    .select("idnumber")
+                    .eq("id", student.supervisorid)
+                    .single();
 
-    return NextResponse.json({
-        report: {
-            id: resultData.id,
-            title: resultData.title,
-            body: resultData.text,
-            fileName: resultData.files?.[0]?.name,
-            fileType: resultData.files?.[0]?.type,
-            submittedAt: resultData.ts,
-            status: resultData.status
+                 if (supervisorData && supervisorData.idnumber) {
+                    // Simplify student name retrieval to avoid TS errors with dynamic joins
+                    const studentName = student.firstname || "Student"; 
+                    
+                    const msg = `New report submitted: ${title || "(Untitled)"}`;
+                    const url = `/portal/supervisor?tab=reports&studentId=${student.id}`;
+
+                    await sendPushNotification(supervisorData.idnumber, {
+                        title: "New Report Submitted",
+                        body: msg,
+                        url: url,
+                        tag: `report-submission-${result.id}`
+                    });
+                 }
+             } catch (notifyError) {
+                 console.error("Failed to notify supervisor:", notifyError);
+             }
         }
-    });
+        
+        // Notify Coordinator? (Optional, based on requirement "notify supervisor")
+    }
+
+    return NextResponse.json({ success: true, report: result });
+
   } catch (e) {
     console.error("Unexpected error in POST /api/reports:", e);
     const msg = e instanceof Error ? e.message : "Unexpected error";
     return NextResponse.json({ error: msg }, { status: 500 });
-  }
-}
-
-export async function DELETE(req: Request) {
-  try {
-    const admin = getSupabaseAdmin();
-    if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
-
-    const url = new URL(req.url);
-    const id = url.searchParams.get("id");
-
-    if (!id) {
-      return NextResponse.json({ error: "id is required" }, { status: 400 });
-    }
-
-    const { error } = await admin.from("reports").delete().eq("id", id);
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
-    return NextResponse.json({ success: true });
-  } catch (e) {
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }

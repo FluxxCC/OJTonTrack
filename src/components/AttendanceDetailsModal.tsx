@@ -11,6 +11,7 @@ interface AttendanceEntry {
   validatedBy?: string | null;
   validated_by?: string | null;
   validatedAt?: number;
+  rendered_hours?: number | null;
 }
 
 interface AttendanceDetailsModalProps {
@@ -66,7 +67,7 @@ export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceD
             <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1">Status</label>
               {(entry.validated_by === 'SYSTEM_AUTO_CLOSE' || entry.validated_by === 'AUTO TIME OUT') ? (
-                <span className="text-xs font-bold text-red-500">AUTO TIME OUT</span>
+                null
               ) : (
                 <div className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${
                   entry.status === 'Approved' ? 'bg-green-100 text-green-700' : 
@@ -94,7 +95,7 @@ export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceD
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1">Time</label>
               <div className="font-semibold text-gray-900 text-xl font-mono">
                 {isAutoTimeOut ? (
-                  <span className="text-gray-400">--:--</span>
+                  null
                 ) : (
                   (() => {
                     const d = new Date(entry.timestamp);
@@ -107,6 +108,15 @@ export function AttendanceDetailsModal({ entry, onClose, userName }: AttendanceD
                 )}
               </div>
             </div>
+
+            {entry.type === 'out' && entry.rendered_hours !== undefined && entry.rendered_hours !== null && (
+              <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1">Rendered Hours</label>
+                <div className="font-semibold text-gray-900 text-xl font-mono">
+                  {(entry.rendered_hours / 3600000).toFixed(2)} hrs
+                </div>
+              </div>
+            )}
 
             {(entry.validated_by === 'SYSTEM_AUTO_CLOSE' || entry.validated_by === 'AUTO TIME OUT') ? null : (
             <div

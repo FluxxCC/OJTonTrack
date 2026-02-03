@@ -1,27 +1,19 @@
--- Create system_audit_logs table if it doesn't exist
-CREATE TABLE IF NOT EXISTS public.system_audit_logs (
-   id bigint GENERATED ALWAYS AS IDENTITY NOT NULL, 
-   actor_idnumber text NOT NULL, 
-   actor_role text NOT NULL, 
-   action text NOT NULL, 
-   target_table text NOT NULL, 
-   target_id bigint NOT NULL, 
-   before_data jsonb, 
-   after_data jsonb, 
-   reason text, 
-   created_at timestamp with time zone DEFAULT now(), 
-   CONSTRAINT system_audit_logs_pkey PRIMARY KEY (id) 
+-- Migration to fix report_requirements schema
+-- We want to ensure we have course_id/section_id (nullable) and NO course/section text columns.
+
+-- 1. If course_id exists (as confirmed), make it nullable
+ALTER TABLE public.report_requirements ALTER COLUMN course_id DROP NOT NULL;
+
+-- 2. If section_id exists (as confirmed), make it nullable
+ALTER TABLE public.report_requirements ALTER COLUMN section_id DROP NOT NULL;
+
+-- 3. Drop unique index if it exists (old one)
+DROP INDEX IF EXISTS public.report_requirements_unique_idx;
+
+-- 4. Create proper unique index for IDs
+CREATE UNIQUE INDEX IF NOT EXISTS report_requirements_unique_ids_idx 
+ON public.report_requirements (
+    COALESCE(course_id, -1), 
+    COALESCE(section_id, -1), 
+    week_number
 );
-
--- Enable RLS
-ALTER TABLE public.system_audit_logs ENABLE ROW LEVEL SECURITY;
-
--- Allow read access to superadmins (assuming you have policies or service role bypass)
--- For simplicity in this setup script, we'll allow all service role operations.
--- Adjust policies as needed for your auth setup.
-
--- Example policy:
--- CREATE POLICY "Enable read access for superadmins" ON "public"."system_audit_logs"
--- AS PERMISSIVE FOR SELECT
--- TO authenticated
--- USING (auth.jwt() ->> 'role' = 'superadmin');

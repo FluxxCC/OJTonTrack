@@ -11,7 +11,10 @@ import {
   LogOut, 
   LayoutDashboard,
   Settings,
-  UserPlus
+  UserPlus,
+  ChevronDown,
+  BookOpen,
+  Calendar
 } from 'lucide-react';
 import { 
   UsersView, 
@@ -26,6 +29,9 @@ import {
   Section,
   AssignSupervisorView
 } from "./ui";
+import { SettingsView } from "./settings_ui";
+import { AcademicCatalogView } from "../superadmin/AcademicCatalogView";
+import { SchedulingView } from "./SchedulingView";
 import { supabase } from "@/lib/supabaseClient";
 
 export default function CoordinatorPage() {
@@ -88,15 +94,28 @@ export default function CoordinatorPage() {
   const fetchUsers = async () => {
     try {
       setLoading(true);
-      const res = await fetch("/api/users?limit=2000");
-      const data = await res.json();
-      if (data.users) setUsers(data.users);
+      
+      // Fetch users for each role separately to ensure we get everyone
+      // The API defaults to 'student' if no role is provided, so we must be explicit
+      const roles = ["student", "instructor", "supervisor", "coordinator"];
+      const requests = roles.map(role => 
+        fetch(`/api/users?limit=2000&role=${role}`).then(res => res.json())
+      );
+
+      const results = await Promise.all(requests);
+      const allUsers = results.flatMap(data => data.users || []);
+      
+      setUsers(allUsers);
     } catch (error) {
       console.error("Failed to fetch users", error);
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    fetchUsers();
+  }, []);
 
   const fetchInstructorApprovalStatuses = async () => {
     try {
@@ -118,8 +137,6 @@ export default function CoordinatorPage() {
   };
 
   useEffect(() => {
-    fetchUsers();
-    
     // Fetch metadata
     fetch("/api/metadata")
       .then(res => res.json())
@@ -183,6 +200,39 @@ export default function CoordinatorPage() {
                [idnumber]: allowed
              }));
           }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase?.removeChannel(channel);
+    };
+  }, []);
+
+  // Real-time listener for school year changes (to refresh data when active SY changes)
+  useEffect(() => {
+    if (!supabase) return;
+
+    const channel = supabase
+      .channel('school_year_changes_coordinator')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'school_years'
+        },
+        () => {
+           console.log("School year updated, refreshing users...");
+           fetchUsers();
+           // Also refresh metadata in case courses/sections changed
+           fetch("/api/metadata")
+            .then(res => res.json())
+            .then(data => {
+              if (data.courses) setAvailableCourses(data.courses);
+              if (data.sections) setAvailableSections(data.sections);
+            })
+            .catch(console.error);
         }
       )
       .subscribe();
@@ -259,6 +309,8 @@ export default function CoordinatorPage() {
     { id: "instructor", label: "Instructors", icon: GraduationCap, color: "text-orange-600", bg: "bg-orange-50" },
     { id: "supervisor", label: "Supervisors", icon: Briefcase, color: "text-purple-600", bg: "bg-purple-50" },
     { id: "approval", label: "Account Approval", icon: UserCheck, color: "text-green-600", bg: "bg-green-50" },
+    { id: "academic-catalog", label: "Academic Catalog", icon: BookOpen, color: "text-gray-600", bg: "bg-gray-50" },
+    { id: "scheduling", label: "Scheduling", icon: Calendar, color: "text-orange-600", bg: "bg-orange-50" },
   ] as const;
 
   return (
@@ -321,7 +373,7 @@ export default function CoordinatorPage() {
         {/* Footer */}
         <div className="p-4 border-t border-gray-100 bg-gray-50/50">
           <div className="flex items-center gap-3 mb-4 px-2">
-            <div className="h-10 w-10 rounded-full bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center text-white font-bold shadow-md">
+            <div className="h-10 w-10 rounded-full bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center text-white font-bold shadow-md overflow-hidden relative">
               {(coordinatorName?.[0] || "C").toUpperCase()}
             </div>
             <div className="min-w-0">
@@ -355,25 +407,33 @@ export default function CoordinatorPage() {
       {/* Main Content */}
       <div className="flex-1 flex flex-col h-screen overflow-hidden relative">
         {/* Header */}
-        <header className="h-20 bg-white/80 backdrop-blur-md border-b border-gray-200 flex items-center justify-between px-6 z-20 sticky top-0">
-          <div className="flex items-center gap-4">
-            <button 
-              onClick={() => setSidebarOpen(!isSidebarOpen)}
-              className="lg:hidden p-2 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors"
-            >
-              <Menu size={24} />
-            </button>
-            <div className="sr-only" aria-hidden="true"></div>
-          </div>
-          
-          <div className="flex items-center gap-3">
-          </div>
-        </header>
+      <header className="h-16 bg-white/80 backdrop-blur-md border-b border-gray-200 flex items-center justify-between px-4 z-20 sticky top-0">
+        <div className="flex items-center gap-4">
+          <button 
+            onClick={() => setSidebarOpen(!isSidebarOpen)}
+            className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors lg:hidden"
+          >
+            <Menu size={24} />
+          </button>
+          <div className="sr-only" aria-hidden="true"></div>
+        </div>
+        
 
-        {/* Content Area */}
-        <main className="flex-1 overflow-hidden p-4 sm:p-6 lg:p-8 bg-[#F6F7F9] relative">
-           <div className="h-full max-w-7xl mx-auto w-full animate-in fade-in zoom-in-95 duration-300">
-            {activeTab === 'approval' ? (
+      </header>
+
+      {/* Content Area */}
+      <main className="flex-1 overflow-hidden p-0 bg-[#F6F7F9] relative">
+         <div className="h-full w-full animate-in fade-in zoom-in-95 duration-300">
+            {activeTab === 'academic-catalog' ? (
+              <div className="p-6 h-full overflow-y-auto">
+                 <h1 className="text-2xl font-bold text-gray-900 mb-6">Academic Catalog</h1>
+                 <AcademicCatalogView />
+              </div>
+            ) : activeTab === 'scheduling' ? (
+              <div className="p-6 h-full overflow-y-auto">
+                 <SchedulingView courses={availableCourses} />
+              </div>
+            ) : activeTab === 'approval' ? (
               <ApprovalsView 
                 users={users}
                 onView={setViewingUser}

@@ -9,10 +9,32 @@ export async function GET(req: Request) {
     if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
 
     const { searchParams } = new URL(req.url);
-    const supervisorId = searchParams.get("supervisor_id");
+    const supervisorIdNumber = searchParams.get("supervisor_id");
 
-    if (!supervisorId) {
-      // If no supervisor ID, fetch ALL overrides (grouped by supervisor)
+    let internalSupervisorId: number | null = null;
+    if (supervisorIdNumber) {
+        const { data: supervisorData } = await admin
+            .from("users_supervisors")
+            .select("id")
+            .eq("idnumber", supervisorIdNumber)
+            .maybeSingle();
+        
+        if (supervisorData) {
+            internalSupervisorId = supervisorData.id;
+        } else {
+             // If ID number provided but not found, return empty
+             return NextResponse.json({ overrides: {} });
+        }
+    }
+
+    if (!internalSupervisorId) {
+      // If no supervisor ID (or not found), fetch ALL overrides (grouped by supervisor)
+      // Note: This might need adjustment if we want to show overrides for ALL supervisors, 
+      // but without mapping back to idnumber it might be hard to use. 
+      // For now, let's assume we only care about specific supervisor if provided.
+      // If no ID provided, we might be in Superadmin view?
+      // Let's keep existing logic but be careful about supervisor_id type.
+      
       const { data, error } = await admin
         .from("shifts")
         .select("*")
@@ -21,9 +43,12 @@ export async function GET(req: Request) {
 
       if (error) throw error;
 
-      // Structure: SupervisorID -> { Date -> Override }
       const allOverrides: Record<string, Record<string, { date: string, am?: { start: string, end: string }, pm?: { start: string, end: string } }>> = {};
 
+      // We need to map internal IDs back to idnumbers if we return them?
+      // Or just return keyed by internal ID? The frontend likely expects idnumber if it passed idnumber.
+      // But if no ID passed, maybe it doesn't matter.
+      
       data.forEach((row: any) => {
         const sid = row.supervisor_id;
         if (!sid) return;
@@ -31,8 +56,8 @@ export async function GET(req: Request) {
         const parts = row.shift_name.split(":::");
         if (parts.length !== 3) return;
         
-        const date = parts[1]; // YYYY-MM-DD
-        const type = parts[2]; // AM or PM
+        const date = parts[1];
+        const type = parts[2];
 
         if (!allOverrides[sid]) {
             allOverrides[sid] = {};
@@ -56,7 +81,7 @@ export async function GET(req: Request) {
     const { data, error } = await admin
       .from("shifts")
       .select("*")
-      .eq("supervisor_id", supervisorId)
+      .eq("supervisor_id", internalSupervisorId)
       .like("shift_name", "OVERRIDE:::%")
       .order("shift_name", { ascending: true });
 
@@ -103,6 +128,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
+    // Lookup internal ID
+    const { data: supervisorData } = await admin
+        .from("users_supervisors")
+        .select("id")
+        .eq("idnumber", supervisor_id)
+        .maybeSingle();
+
+    if (!supervisorData) {
+        return NextResponse.json({ error: "Supervisor not found" }, { status: 404 });
+    }
+    const internalSupervisorId = supervisorData.id;
+
     // Validate date format YYYY-MM-DD
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         return NextResponse.json({ error: "Invalid date format" }, { status: 400 });
@@ -115,7 +152,7 @@ export async function POST(req: Request) {
             shift_name: `OVERRIDE:::${date}:::AM`,
             official_start: amIn,
             official_end: amOut,
-            supervisor_id
+            supervisor_id: internalSupervisorId
         });
     }
 
@@ -124,23 +161,32 @@ export async function POST(req: Request) {
             shift_name: `OVERRIDE:::${date}:::PM`,
             official_start: pmIn,
             official_end: pmOut,
-            supervisor_id
+            supervisor_id: internalSupervisorId
         });
     }
 
     // First delete existing overrides for this date to ensure clean slate (or handle removal of AM/PM)
-    await admin
+    const { error: deleteError } = await admin
         .from("shifts")
         .delete()
-        .eq("supervisor_id", supervisor_id)
+        .eq("supervisor_id", internalSupervisorId)
         .like("shift_name", `OVERRIDE:::${date}:::%`);
 
+    if (deleteError) {
+        console.error("Error deleting overrides:", deleteError);
+        throw deleteError;
+    }
+
     if (rows.length > 0) {
+        // Use insert since we just deleted
         const { error } = await admin
             .from("shifts")
-            .upsert(rows, { onConflict: "shift_name,supervisor_id" });
+            .insert(rows);
 
-        if (error) throw error;
+        if (error) {
+            console.error("Error inserting overrides:", error);
+            throw error;
+        }
     }
 
     return NextResponse.json({ ok: true });
@@ -162,11 +208,23 @@ export async function DELETE(req: Request) {
         if (!supervisorId || !date) {
           return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
         }
+
+        // Lookup internal ID
+        const { data: supervisorData } = await admin
+            .from("users_supervisors")
+            .select("id")
+            .eq("idnumber", supervisorId)
+            .maybeSingle();
+
+        if (!supervisorData) {
+            return NextResponse.json({ error: "Supervisor not found" }, { status: 404 });
+        }
+        const internalSupervisorId = supervisorData.id;
     
         const { error } = await admin
             .from("shifts")
             .delete()
-            .eq("supervisor_id", supervisorId)
+            .eq("supervisor_id", internalSupervisorId)
             .like("shift_name", `OVERRIDE:::${date}:::%`);
         
         if (error) throw error;

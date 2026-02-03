@@ -47,12 +47,30 @@ function CredentialsForm() {
         const user = json.user;
         const normalizedRole = String(user?.role || "").toLowerCase();
         try {
-          localStorage.setItem("idnumber", user.idnumber);
-          localStorage.setItem("role", normalizedRole);
-          localStorage.setItem("keepSignedIn", keepSignedIn ? "1" : "0");
-          if (user.id) localStorage.setItem("userId", String(user.id));
-          if (user.firstname) localStorage.setItem("firstname", user.firstname);
-          if (user.lastname) localStorage.setItem("lastname", user.lastname);
+          const storage = keepSignedIn ? localStorage : sessionStorage;
+          // Clear both first to avoid conflicts
+          localStorage.removeItem("idnumber");
+          localStorage.removeItem("role");
+          localStorage.removeItem("keepSignedIn");
+          localStorage.removeItem("userId");
+          localStorage.removeItem("firstname");
+          localStorage.removeItem("lastname");
+          localStorage.removeItem("avatar_url");
+          sessionStorage.removeItem("idnumber");
+          sessionStorage.removeItem("role");
+          sessionStorage.removeItem("keepSignedIn");
+          sessionStorage.removeItem("userId");
+          sessionStorage.removeItem("firstname");
+          sessionStorage.removeItem("lastname");
+          sessionStorage.removeItem("avatar_url");
+
+          storage.setItem("idnumber", user.idnumber);
+          storage.setItem("role", normalizedRole);
+          storage.setItem("keepSignedIn", keepSignedIn ? "1" : "0");
+          if (user.id) storage.setItem("userId", String(user.id));
+          if (user.firstname) storage.setItem("firstname", user.firstname);
+          if (user.lastname) storage.setItem("lastname", user.lastname);
+          if (user.avatar_url) storage.setItem("avatar_url", user.avatar_url);
         } catch {}
         router.push(`/portal/${normalizedRole}`);
       } catch (err) {
@@ -160,6 +178,19 @@ function CredentialsForm() {
                     </button>
                   </div>
               </div>
+
+              <div className="flex items-center">
+                  <input
+                      id="keepSignedIn"
+                      type="checkbox"
+                      checked={keepSignedIn}
+                      onChange={(e) => setKeepSignedIn(e.target.checked)}
+                      className="h-4 w-4 text-[#F97316] focus:ring-[#F97316] border-gray-300 rounded cursor-pointer"
+                  />
+                  <label htmlFor="keepSignedIn" className="ml-2 block text-sm text-gray-700 cursor-pointer select-none">
+                      Keep me signed in
+                  </label>
+              </div>
               
               {error && (
                 <div className="text-[#B91C1C] bg-[#FEE2E2] border border-[#FCA5A5] rounded-lg px-3 py-2 text-sm">
@@ -196,15 +227,6 @@ function CredentialsForm() {
         </form>
 
         <div className="mt-8 text-center">
-            <div className="mb-4 flex items-center justify-center gap-2">
-              <input
-                id="keep-signed-in"
-                type="checkbox"
-                checked={keepSignedIn}
-                onChange={(e) => setKeepSignedIn(e.target.checked)}
-              />
-              <label htmlFor="keep-signed-in" className="text-sm text-[#1F2937] font-medium">Keep me signed in</label>
-            </div>
             <button 
                 type="button"
                 onClick={() => router.push("/")}

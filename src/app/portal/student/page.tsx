@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
@@ -15,6 +15,9 @@ import {
   Calendar,
   LogIn,
   Zap,
+  Bell,
+  Check,
+  X
 } from 'lucide-react';
 import { 
   AttendanceView as LegacyAttendanceView, 
@@ -29,6 +32,19 @@ import { calculateSessionDuration, determineShift, ShiftSchedule, buildSchedule,
 import Link from "next/link";
 
 
+
+
+type Notification = {
+  id: number;
+  recipient_id: number;
+  recipient_role: string;
+  title: string;
+  message: string;
+  is_read: boolean;
+  created_at: string;
+  link?: string;
+  type?: string;
+};
 
 type ServerAttendanceEntry = { 
   id: number;
@@ -98,6 +114,103 @@ function StudentPage() {
   const [supervisor, setSupervisor] = useState<User | null>(null);
   const [attendance, setAttendance] = useState<AttendanceEntry[]>([]);
   const [reports, setReports] = useState<ReportEntry[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+
+  const fetchNotifications = useCallback(async () => {
+    if (!student?.id || !supabase) return;
+    try {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('recipient_id', student.id)
+        .eq('recipient_role', 'student')
+        .order('created_at', { ascending: false })
+        .limit(20);
+      
+      if (!error && data) {
+        setNotifications(data);
+      }
+    } catch (e) {
+      console.error("Fetch notifications error:", e);
+    }
+  }, [student?.id]);
+
+  const markAsRead = async (id: number) => {
+    if (!supabase) return;
+    // Optimistic update
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, is_read: true } : n));
+    try {
+      const { error } = await supabase
+        .from('notifications')
+        .update({ is_read: true })
+        .eq('id', id);
+        
+      if (error) {
+        // Revert if error
+        console.error("Error marking as read:", JSON.stringify(error, null, 2));
+        fetchNotifications();
+      }
+    } catch (e) { 
+        console.error("Exception marking as read:", e); 
+        fetchNotifications();
+    }
+  };
+
+  const markAllAsRead = async () => {
+     if (!student?.id || !supabase) return;
+     // Optimistic update
+     setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
+     try {
+       const { error } = await supabase
+         .from('notifications')
+         .update({ is_read: true })
+         .eq('recipient_id', student.id)
+         .eq('recipient_role', 'student')
+         .eq('is_read', false);
+         
+       if (error) {
+          console.error("Error marking all as read:", JSON.stringify(error, null, 2));
+          fetchNotifications(); // Revert
+       }
+     } catch (e) { 
+        console.error("Exception marking all as read:", e);
+        fetchNotifications(); // Revert
+     }
+  };
+
+  const handleNotificationClick = async (n: Notification) => {
+    if (!n.is_read) {
+      await markAsRead(n.id);
+    }
+    
+    setShowNotifications(false);
+
+    if (n.link) {
+      if (n.link.includes('tab=')) {
+         try {
+             const url = new URL(n.link, window.location.origin);
+             const tab = url.searchParams.get('tab');
+             if (tab && ['dashboard', 'attendance', 'reports', 'profile'].includes(tab)) {
+                 setActiveTab(tab as any);
+             } else {
+                 router.push(n.link);
+             }
+         } catch {
+             // Fallback for simple string match if URL parsing fails
+             const match = n.link.match(/tab=([^&]*)/);
+             if (match && ['dashboard', 'attendance', 'reports', 'profile'].includes(match[1])) {
+                 setActiveTab(match[1] as any);
+             } else {
+                 router.push(n.link);
+             }
+         }
+      } else {
+         router.push(n.link);
+      }
+    }
+  };
+
   const [drafts, setDrafts] = useState<ReportEntry[]>([]);
   const [targetHours, setTargetHours] = useState<number>(486);
   const [schedule, setSchedule] = useState<StoredSchedule | null>(null);
@@ -148,14 +261,19 @@ function StudentPage() {
     if (!idnumber) return;
     try {
       // Fetch Attendance
-      const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}`);
+      const res = await fetch(`/api/attendance?idnumber=${encodeURIComponent(idnumber)}`, { cache: "no-store" });
       const json = await res.json();
       if (res.ok && Array.isArray(json.entries)) {
         const mapped = json.entries.map((e: any) => {
           const sStr = String(e.status || "").trim().toLowerCase();
           const isRejected = sStr === "rejected";
           const isApproved = sStr === "approved" || (!!e.validated_by && !isRejected);
-          const status = isRejected ? "Rejected" : isApproved ? "Approved" : "Pending";
+          let status = isRejected ? "Rejected" : isApproved ? "Approved" : "Pending";
+          
+          if (sStr === "official") {
+             status = "Official";
+          }
+          
           const approvedAtNum = e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined;
           return {
             id: e.id,
@@ -165,42 +283,44 @@ function StudentPage() {
             status,
             approvedAt: approvedAtNum,
             validated_by: e.validated_by,
+            is_overtime: e.is_overtime,
+            rendered_hours: e.rendered_hours,
+            validated_hours: e.validated_hours,
           };
         }) as AttendanceEntry[];
         setAttendance(mapped);
       }
     } catch (e) { console.error(e); }
 
-    try {
-      // Fetch User Info
-      const uRes = await fetch(`/api/users?idnumber=${encodeURIComponent(idnumber)}`, { cache: "no-store" });
-      const uJson = await uRes.json();
-      if (Array.isArray(uJson.users) && uJson.users.length > 0) {
-        const me = uJson.users[0];
-        if (String(me.role).toLowerCase() === "student") {
+    // 3. User Data (Student & Supervisor)
+    if (idnumber) {
+      try {
+        const res = await fetch(`/api/users?idnumber=${encodeURIComponent(idnumber)}`);
+        const json = await res.json();
+        if (Array.isArray(json.users) && json.users.length > 0) {
+          const me = json.users[0];
           setStudent(me);
-          if (me.supervisorid) {
-             // Fetch Supervisor
-             try {
-               const supRes = await fetch(`/api/users?idnumber=${encodeURIComponent(me.supervisorid)}`, { cache: "no-store" });
-               const supJson = await supRes.json();
-               if (Array.isArray(supJson.users) && supJson.users.length > 0) {
-                 const sup = supJson.users[0];
-                 if (String(sup.role).toLowerCase() === "supervisor") {
-                   setSupervisor(sup);
-                 }
-               }
-             } catch {}
-          } else {
-            setSupervisor(null);
+          
+          // Check for joined supervisor data (from API join)
+          if ((me as any).users_supervisors) {
+            const joinedSup = (me as any).users_supervisors;
+            setSupervisor({
+              id: Number(me.supervisorid) || 0,
+              idnumber: joinedSup.idnumber,
+              role: 'supervisor',
+              firstname: joinedSup.firstname,
+              lastname: joinedSup.lastname,
+              company: joinedSup.company,
+              location: joinedSup.location
+            } as User);
           }
         }
-      }
-    } catch (e) { console.error(e); }
+      } catch {}
+    }
 
     try {
       // Fetch Reports
-      const rRes = await fetch(`/api/reports?idnumber=${encodeURIComponent(idnumber)}`);
+      const rRes = await fetch(`/api/reports?idnumber=${encodeURIComponent(idnumber)}`, { cache: "no-store" });
       const rJson = await rRes.json();
       if (rRes.ok) {
          if (Array.isArray(rJson.reports)) {
@@ -248,6 +368,197 @@ function StudentPage() {
       console.error("Failed to fetch deadlines", e);
     }
   };
+
+  const fetchSchedule = useCallback(async () => {
+    try {
+      let nextSchedule: any = null;
+
+      // 0. Check for Coordinator Events (Highest Priority)
+      try {
+        const eventsRes = await fetch('/api/events', { cache: "no-store" });
+        const eventsData = await eventsRes.json();
+        if (eventsData.events && Array.isArray(eventsData.events)) {
+          const now = new Date();
+          const offset = now.getTimezoneOffset();
+          const localDate = new Date(now.getTime() - (offset * 60 * 1000));
+          const todayStr = localDate.toISOString().split('T')[0];
+          
+          const todayEvents = eventsData.events.filter((e: any) => e.event_date === todayStr);
+          let applicableEvent = null;
+
+          // Priority 1: Course-specific event
+          if (student && student.courseIds && student.courseIds.length > 0) {
+            applicableEvent = todayEvents.find((e: any) => 
+              e.courses_id && Array.isArray(e.courses_id) && e.courses_id.length > 0 &&
+              student.courseIds!.some(id => e.courses_id.map(String).includes(String(id)))
+            );
+          }
+
+          // Priority 2: General event
+          if (!applicableEvent) {
+            applicableEvent = todayEvents.find((e: any) => 
+              !e.courses_id || !Array.isArray(e.courses_id) || e.courses_id.length === 0
+            );
+          }
+          
+          if (applicableEvent) {
+            nextSchedule = {
+              amIn: normalizeTimeString(applicableEvent.am_in) || "",
+              amOut: normalizeTimeString(applicableEvent.am_out) || "",
+              pmIn: normalizeTimeString(applicableEvent.pm_in) || "",
+              pmOut: normalizeTimeString(applicableEvent.pm_out) || "",
+              otIn: normalizeTimeString(applicableEvent.overtime_in) || undefined,
+              otOut: normalizeTimeString(applicableEvent.overtime_out) || undefined,
+            };
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch events", e);
+      }
+
+      if (nextSchedule) {
+        setDbSchedule(nextSchedule);
+        setSchedule(nextSchedule);
+        return;
+      }
+
+      // 1. Student Specific Schedule
+      if (supabase && idnumber) {
+        const { data: studentSched } = await supabase
+          .from("student_shift_schedules")
+          .select("*")
+          .eq("student_id", idnumber)
+          .maybeSingle();
+
+        if (studentSched) {
+            nextSchedule = {
+                amIn: normalizeTimeString(studentSched.am_in) || "",
+                amOut: normalizeTimeString(studentSched.am_out) || "",
+                pmIn: normalizeTimeString(studentSched.pm_in) || "",
+                pmOut: normalizeTimeString(studentSched.pm_out) || "",
+                otIn: normalizeTimeString(studentSched.ot_in) || undefined,
+                otOut: normalizeTimeString(studentSched.ot_out) || undefined,
+            };
+            setDbSchedule(nextSchedule);
+            setSchedule(nextSchedule);
+            return;
+        }
+      }
+
+      // 2. Supervisor Default
+      let fromLocal: StoredSchedule | null = null;
+      if (typeof window !== "undefined") {
+        const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
+        const saved = localStorage.getItem(key);
+        if (saved) {
+          fromLocal = JSON.parse(saved) as StoredSchedule;
+        }
+      }
+
+      if (fromLocal) {
+        const next = {
+          amIn: fromLocal.amIn || "",
+          amOut: fromLocal.amOut || "",
+          pmIn: fromLocal.pmIn || "",
+          pmOut: fromLocal.pmOut || "",
+          otIn: fromLocal.overtimeIn,
+          otOut: fromLocal.overtimeOut,
+        };
+        setSchedule(next);
+      }
+
+      if (!student && idnumber) {
+         // Small delay to allow student profile fetch if needed
+         await new Promise(r => setTimeout(r, 1000));
+      }
+
+      const res = await fetch(`/api/shifts${student?.supervisorid ? `?supervisor_id=${encodeURIComponent(student.supervisorid)}` : ''}`, { cache: "no-store" });
+      const json = await res.json();
+      const rows = Array.isArray(json.shifts)
+        ? json.shifts.filter((r: any) => r && (r.official_start || r.official_end))
+        : [];
+        
+      if (!rows.length) {
+        setDbSchedule(null);
+        setSchedule(null);
+        if (typeof window !== "undefined") {
+          const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
+          localStorage.removeItem(key);
+        }
+        return;
+      }
+
+      const sorted = rows
+        .slice()
+        .sort(
+          (a: any, b: any) =>
+            timeStringToMinutes(a.official_start || "") -
+            timeStringToMinutes(b.official_start || "")
+        );
+
+      let amRow = sorted[0];
+      let pmRow = sorted[1] || sorted[0];
+
+      const findByName = (match: (name: string) => boolean) =>
+        sorted.find((r: any) => {
+          const n = String(r.shift_name || "").toLowerCase().trim();
+          return match(n);
+        });
+
+      const amCandidate = findByName((n) => n.includes("am") || n.includes("morning"));
+      const pmCandidate = findByName((n) => n.includes("pm") || n.includes("afternoon"));
+      const otCandidate = findByName((n) => n === "overtime shift" || n === "overtime");
+
+      if (amCandidate && pmCandidate) {
+        amRow = amCandidate;
+        pmRow = pmCandidate;
+      }
+
+      let finalOtRow = otCandidate;
+      if (finalOtRow && (finalOtRow === amRow || finalOtRow === pmRow)) {
+        finalOtRow = undefined;
+      }
+
+      const amInNorm = normalizeTimeString(amRow.official_start || "");
+      const amOutNorm = normalizeTimeString(amRow.official_end || "");
+      const pmInNorm = normalizeTimeString(pmRow.official_start || "");
+      const pmOutNorm = normalizeTimeString(pmRow.official_end || "");
+      const otInNorm = normalizeTimeString(finalOtRow?.official_start || "");
+      const otOutNorm = normalizeTimeString(finalOtRow?.official_end || "");
+
+      if (!amInNorm || !amOutNorm || !pmInNorm || !pmOutNorm) return;
+
+      const next = {
+        amIn: amInNorm,
+        amOut: amOutNorm,
+        pmIn: pmInNorm,
+        pmOut: pmOutNorm,
+        otIn: otInNorm || undefined,
+        otOut: otOutNorm || undefined,
+      };
+
+      setDbSchedule(next);
+      setSchedule(next);
+      
+      if (typeof window !== "undefined") {
+        const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
+        const payload = {
+            amIn: next.amIn,
+            amOut: next.amOut,
+            pmIn: next.pmIn,
+            pmOut: next.pmOut,
+            overtimeIn: next.otIn,
+            overtimeOut: next.otOut,
+        };
+        try {
+            localStorage.setItem(key, JSON.stringify(payload));
+        } catch {}
+      }
+
+    } catch (e) {
+      console.error(e);
+    }
+  }, [idnumber, student]);
 
   useEffect(() => {
     fetchData();
@@ -326,9 +637,28 @@ function StudentPage() {
         { event: '*', schema: 'public', table: 'report_comments' },
         (payload: RealtimePostgresChangesPayload<any>) => { fetchData(); }
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'coordinator_events' },
+        () => { fetchSchedule(); }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'shifts' },
+        () => { fetchSchedule(); }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'notifications' },
+        () => { fetchNotifications(); }
+      )
       .subscribe();
     return () => { supabase?.removeChannel(channel); };
-  }, [idnumber]);
+  }, [idnumber, fetchSchedule, fetchNotifications]);
+
+  useEffect(() => {
+    fetchNotifications();
+  }, [fetchNotifications]);
 
   useEffect(() => {
     fetchDeadlines();
@@ -374,125 +704,11 @@ function StudentPage() {
     return () => { cancelled = true; };
   }, [student?.supervisorid]);
 
+
+
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        let fromLocal: StoredSchedule | null = null;
-
-        if (typeof window !== "undefined") {
-          const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
-          const saved = localStorage.getItem(key);
-          if (saved) {
-            const parsed = JSON.parse(saved) as StoredSchedule;
-            fromLocal = parsed;
-          }
-        }
-
-        if (fromLocal) {
-          const next = {
-            amIn: fromLocal.amIn || "",
-            amOut: fromLocal.amOut || "",
-            pmIn: fromLocal.pmIn || "",
-            pmOut: fromLocal.pmOut || "",
-            otIn: fromLocal.overtimeIn,
-            otOut: fromLocal.overtimeOut,
-          };
-          if (!cancelled) setSchedule(next);
-        }
-
-        // Wait for student profile to be loaded to get supervisor ID
-        if (!student && idnumber) {
-           // Small delay to allow student profile fetch
-           await new Promise(r => setTimeout(r, 1000));
-        }
-
-        const res = await fetch(`/api/shifts${student?.supervisorid ? `?supervisor_id=${encodeURIComponent(student.supervisorid)}` : ''}`, { cache: "no-store" });
-        const json = await res.json();
-        const rows = Array.isArray(json.shifts)
-          ? json.shifts.filter((r: any) => r && (r.official_start || r.official_end))
-          : [];
-        if (!rows.length) {
-          setDbSchedule(null);
-          setSchedule(null);
-          if (typeof window !== "undefined") {
-            const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
-            localStorage.removeItem(key);
-          }
-          return;
-        }
-
-        const sorted = rows
-          .slice()
-          .sort(
-            (a: any, b: any) =>
-              timeStringToMinutes(a.official_start || "") -
-              timeStringToMinutes(b.official_start || "")
-          );
-
-        let amRow = sorted[0];
-        let pmRow = sorted[1] || sorted[0];
-
-        const findByName = (match: (name: string) => boolean) =>
-          sorted.find((r: any) => {
-            const n = String(r.shift_name || "").toLowerCase().trim();
-            return match(n);
-          });
-
-        const amCandidate = findByName((n) => n.includes("am") || n.includes("morning"));
-        const pmCandidate = findByName((n) => n.includes("pm") || n.includes("afternoon"));
-        const otCandidate = findByName((n) => n === "overtime shift" || n === "overtime");
-
-        if (amCandidate && pmCandidate) {
-          amRow = amCandidate;
-          pmRow = pmCandidate;
-        }
-
-        let finalOtRow = otCandidate;
-        if (finalOtRow && (finalOtRow === amRow || finalOtRow === pmRow)) {
-          finalOtRow = undefined;
-        }
-
-        const amInNorm = normalizeTimeString(amRow.official_start || "");
-        const amOutNorm = normalizeTimeString(amRow.official_end || "");
-        const pmInNorm = normalizeTimeString(pmRow.official_start || "");
-        const pmOutNorm = normalizeTimeString(pmRow.official_end || "");
-        const otInNorm = normalizeTimeString(finalOtRow?.official_start || "");
-        const otOutNorm = normalizeTimeString(finalOtRow?.official_end || "");
-        if (!amInNorm || !amOutNorm || !pmInNorm || !pmOutNorm) return;
-
-        const next = {
-          amIn: amInNorm,
-          amOut: amOutNorm,
-          pmIn: pmInNorm,
-          pmOut: pmOutNorm,
-          otIn: otInNorm || undefined,
-          otOut: otOutNorm || undefined,
-        };
-
-        if (!cancelled) {
-          setSchedule(next);
-          if (typeof window !== "undefined") {
-            const key = idnumber ? `schedule_${idnumber}` : "schedule_default";
-            const payload = {
-              amIn: next.amIn,
-              amOut: next.amOut,
-              pmIn: next.pmIn,
-              pmOut: next.pmOut,
-              overtimeIn: next.otIn,
-              overtimeOut: next.otOut,
-            };
-            try {
-              localStorage.setItem(key, JSON.stringify(payload));
-            } catch {}
-          }
-        }
-      } catch {}
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [idnumber, student]);
+    fetchSchedule();
+  }, [fetchSchedule]);
 
   const processedAttendance = useMemo(() => {
     const sorted = [...attendance].sort((a, b) => a.timestamp - b.timestamp);
@@ -629,11 +845,19 @@ function StudentPage() {
               approvedInTs = log.timestamp;
             }
           } else if (log.type === "out" && inTs !== null) {
-            if (log.timestamp > inTs) {
+            if (typeof log.rendered_hours === 'number' && log.rendered_hours > 0) {
+               dayTotalMs += log.rendered_hours * 3600000;
+            } else if (log.timestamp > inTs) {
               dayTotalMs += log.timestamp - inTs;
             }
-            if (approvedInTs !== null && log.status === "Approved" && log.timestamp > approvedInTs) {
-              dayValidatedMs += log.timestamp - approvedInTs;
+            if (approvedInTs !== null && log.status === "Approved") {
+               if (typeof log.validated_hours === 'number' && log.validated_hours > 0) {
+                   dayValidatedMs += log.validated_hours * 3600000;
+               } else if (typeof log.rendered_hours === 'number' && log.rendered_hours > 0) {
+                   dayValidatedMs += log.rendered_hours * 3600000;
+               } else if (log.timestamp > approvedInTs) {
+                   dayValidatedMs += log.timestamp - approvedInTs;
+               }
             }
             inTs = null;
             approvedInTs = null;
@@ -667,25 +891,34 @@ function StudentPage() {
             const outTime = session.out ? session.out.timestamp : 0;
             if (!outTime) return;
 
-            // AM Shift
-            dayTotalMs += calculateSessionDuration(inTime, outTime, 'am', schedule);
-            
-            // PM Shift
-            dayTotalMs += calculateSessionDuration(inTime, outTime, 'pm', schedule);
-            
-            // OT Shift
-            dayTotalMs += calculateSessionDuration(inTime, outTime, 'ot', schedule);
+            // Use rendered_hours if available (frozen historical data), otherwise calculate dynamically
+            if (session.out && typeof session.out.rendered_hours === 'number' && session.out.rendered_hours > 0) {
+                dayTotalMs += session.out.rendered_hours * 3600000;
+            } else {
+                let shiftTotal = calculateSessionDuration(inTime, outTime, 'am', schedule) + 
+                                 calculateSessionDuration(inTime, outTime, 'pm', schedule) + 
+                                 calculateSessionDuration(inTime, outTime, 'ot', schedule);
+                
+                // Fallback to raw duration if off-schedule (Tracked Hours)
+                if (shiftTotal === 0) {
+                    const raw = outTime - inTime;
+                    if (raw > 0) shiftTotal = raw;
+                }
+                
+                dayTotalMs += shiftTotal;
+            }
 
             // Validated time (only if approved)
             if (session.in.status === 'Approved' && session.out?.status === 'Approved') {
-                 // For validated time, we might want to use the same logic or just strict pair?
-                 // The user wants uniform logic.
-                 // But validated time usually means "official credited hours". 
-                 // If the logs are approved, they count. The clamping logic applies to the timestamps.
-                 // So we just re-calculate using the same function.
-                 dayValidatedMs += calculateSessionDuration(inTime, outTime, 'am', schedule);
-                 dayValidatedMs += calculateSessionDuration(inTime, outTime, 'pm', schedule);
-                 dayValidatedMs += calculateSessionDuration(inTime, outTime, 'ot', schedule);
+                 if (session.out && typeof session.out.validated_hours === 'number' && session.out.validated_hours > 0) {
+                     dayValidatedMs += session.out.validated_hours * 3600000;
+                 } else if (session.out && typeof session.out.rendered_hours === 'number' && session.out.rendered_hours > 0) {
+                     dayValidatedMs += session.out.rendered_hours * 3600000;
+                 } else {
+                     dayValidatedMs += calculateSessionDuration(inTime, outTime, 'am', schedule);
+                     dayValidatedMs += calculateSessionDuration(inTime, outTime, 'pm', schedule);
+                     dayValidatedMs += calculateSessionDuration(inTime, outTime, 'ot', schedule);
+                 }
             }
         });
 
@@ -713,6 +946,7 @@ function StudentPage() {
 
     const targetMs = targetHours * 3600 * 1000;
     const progress = targetMs > 0 ? Math.min(100, (totalMsAll / targetMs) * 100) : 0;
+    const validatedProgress = targetMs > 0 ? Math.min(100, (totalValidatedMsAll / targetMs) * 100) : 0;
 
     return {
       totalMs: totalMsAll,
@@ -720,6 +954,7 @@ function StudentPage() {
       formattedTotal: formatHours(totalMsAll),
       formattedValidated: formatHours(totalValidatedMsAll),
       progress,
+      validatedProgress,
       recentRows,
     };
   }, [attendance, targetHours, idnumber, schedule, dbSchedule, now, studentSchedule, dateOverrides]);
@@ -737,6 +972,9 @@ function StudentPage() {
     }));
     return [...att, ...rep].sort((a,b) => b.timestamp - a.timestamp).slice(0, 8);
   }, [attendance, reports]);
+
+  const unreadCount = useMemo(() => notifications.filter(n => !n.is_read).length, [notifications]);
+
   const isCheckedIn = useMemo(() => {
     const sorted = attendance.slice().sort((a,b) => a.timestamp - b.timestamp);
     const last = sorted[sorted.length - 1];
@@ -935,7 +1173,62 @@ function StudentPage() {
               </button>
               <div />
             </div>
-            <div className="flex items-center gap-4" />
+            <div className="flex items-center gap-4">
+              <div className="relative">
+                <button 
+                  onClick={() => setShowNotifications(!showNotifications)} 
+                  className="p-2.5 rounded-full hover:bg-orange-50 text-gray-500 hover:text-[#F97316] transition-colors relative"
+                >
+                  <Bell size={22} strokeWidth={2} />
+                  {unreadCount > 0 && (
+                    <span className="absolute top-2 right-2.5 w-2.5 h-2.5 bg-red-500 border-2 border-white rounded-full"></span>
+                  )}
+                </button>
+                
+                {showNotifications && (
+                   <>
+                   <div className="fixed inset-0 z-40" onClick={() => setShowNotifications(false)} />
+                   <div className="absolute right-0 top-full mt-4 w-80 sm:w-96 bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden z-50 animate-in fade-in zoom-in-95 duration-200">
+                      <div className="px-5 py-4 border-b border-gray-50 flex justify-between items-center bg-gray-50/50">
+                         <h3 className="font-bold text-gray-900">Notifications</h3>
+                         {unreadCount > 0 && (
+                           <button onClick={markAllAsRead} className="text-xs font-bold text-[#F97316] hover:text-orange-700">Clear all</button>
+                         )}
+                      </div>
+                      <div className="max-h-[400px] overflow-y-auto custom-scrollbar">
+                         {notifications.length === 0 ? (
+                            <div className="p-12 text-center flex flex-col items-center justify-center text-gray-400">
+                               <div className="w-12 h-12 bg-gray-50 rounded-full flex items-center justify-center mb-3">
+                                  <Bell size={20} className="text-gray-300" />
+                               </div>
+                               <p className="text-sm font-medium">No notifications yet</p>
+                            </div>
+                         ) : (
+                            notifications.map(n => (
+                               <div 
+                                 key={n.id} 
+                                 onClick={() => handleNotificationClick(n)}
+                                 className={`p-4 border-b border-gray-50 hover:bg-gray-50 transition-colors cursor-pointer group relative ${!n.is_read ? 'bg-red-50' : ''}`}
+                               >
+                                  <div className="flex items-start gap-3.5">
+                                     <div className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 transition-colors ${!n.is_read ? 'bg-red-500' : 'bg-gray-200 group-hover:bg-gray-300'}`} />
+                                     <div className="flex-1 min-w-0">
+                                        <p className={`text-sm ${!n.is_read ? 'font-bold text-gray-900' : 'font-medium text-gray-600'}`}>{n.title}</p>
+                                        <p className="text-xs text-gray-500 mt-1 leading-relaxed line-clamp-2">{n.message}</p>
+                                        <p className="text-[10px] text-gray-400 mt-2 font-medium">
+                                          {new Date(n.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} • {new Date(n.created_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+                                        </p>
+                                     </div>
+                                  </div>
+                               </div>
+                            ))
+                         )}
+                      </div>
+                   </div>
+                   </>
+                )}
+              </div>
+            </div>
           </header>
 
           <main className="flex-1 overflow-y-auto p-4 sm:p-8 custom-scrollbar">
@@ -946,16 +1239,20 @@ function StudentPage() {
                   reports={reports}
                   totalHours={hoursAgg.formattedTotal}
                   totalValidatedHours={hoursAgg.formattedValidated}
-                  targetHours={student?.target_hours || 486}
+                  targetHours={targetHours}
+                  validatedProgress={hoursAgg.validatedProgress}
+                  deadlines={studentDeadlines}
                   nextDeadline={studentDeadlines.find(d => d.status === "pending") || studentDeadlines[studentDeadlines.length - 1]}
                   onTimeIn={handleTimeIn}
                   onTimeOut={handleTimeOut}
                   onViewAttendance={() => setActiveTab("attendance")}
+                  onViewReports={() => setActiveTab("reports")}
                   companyText={student?.company || "N/A"}
                   supervisorText={student?.supervisor_name || student?.supervisorid || "N/A"}
                   locationText={student?.location || "N/A"}
                   recentRows={hoursAgg.recentRows}
                   now={now}
+                  schedule={dbSchedule || schedule}
                 />
               )}
 
@@ -971,6 +1268,7 @@ function StudentPage() {
                         ? `${student.firstname} ${student.lastname}`
                         : undefined
                     }
+                    schedule={dbSchedule || schedule}
                   />
                 </div>
               )}

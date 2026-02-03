@@ -22,8 +22,15 @@ export default function Home() {
       let role = "";
       let idnumber = "";
       try {
-        role = localStorage.getItem("role") || "";
-        idnumber = localStorage.getItem("idnumber") || "";
+        // Check session storage first (for "Keep me signed in: OFF")
+        role = sessionStorage.getItem("role") || "";
+        idnumber = sessionStorage.getItem("idnumber") || "";
+        
+        // If not in session storage, check local storage (for "Keep me signed in: ON")
+        if (!role || !idnumber) {
+            role = localStorage.getItem("role") || "";
+            idnumber = localStorage.getItem("idnumber") || "";
+        }
       } catch {}
 
       if ((!role || !idnumber) && typeof navigator !== "undefined" && navigator.onLine) {
@@ -34,8 +41,11 @@ export default function Home() {
             if (data.role && data.idnumber) {
               role = data.role;
               idnumber = data.idnumber;
-              localStorage.setItem("role", role);
-              localStorage.setItem("idnumber", idnumber);
+              // Default to sessionStorage if recovered from server session without context, 
+              // but ideally server session implies persistence. 
+              // For now, let's just use what we have.
+              sessionStorage.setItem("role", role);
+              sessionStorage.setItem("idnumber", idnumber);
             }
           }
         } catch {}

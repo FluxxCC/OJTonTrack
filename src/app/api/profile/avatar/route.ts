@@ -26,11 +26,14 @@ export async function POST(req: Request) {
     }
 
     const body = await req.json();
-    const { idnumber, fileData } = body;
+    let { idnumber, fileData } = body;
 
     if (!idnumber || !fileData) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
+
+    // Normalize idnumber
+    idnumber = String(idnumber).trim();
 
     // Handle File Upload
     configureCloudinary();
@@ -51,17 +54,32 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: "Failed to upload file" }, { status: 500 });
     }
 
-    // Update User
-    const { error: updateError } = await admin
-        .from("users")
-        .update({
-            avatar_url: avatarUrl
-        })
-        .eq("idnumber", idnumber);
+    // Update User Avatar
+    // Search across all tables since we only have idnumber
+    const tables = ["users_students", "users_coordinators", "users_supervisors", "users_instructors", "users_super_admins"];
+    let updated = false;
 
-    if (updateError) {
-        console.error("Failed to update user avatar:", updateError);
-        return NextResponse.json({ error: updateError.message }, { status: 500 });
+    for (const t of tables) {
+        const { data } = await admin.from(t).select("id").eq("idnumber", idnumber).maybeSingle();
+        if (data) {
+             const { error: updateError } = await admin
+                .from(t)
+                .update({
+                    avatar_url: avatarUrl
+                })
+                .eq("id", data.id);
+             
+             if (updateError) {
+                 console.error(`Failed to update user avatar in ${t}:`, updateError);
+                 return NextResponse.json({ error: updateError.message }, { status: 500 });
+             }
+             updated = true;
+             break;
+        }
+    }
+
+    if (!updated) {
+         return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
     return NextResponse.json({ success: true, avatarUrl });
@@ -89,13 +107,20 @@ export async function DELETE(req: Request) {
         // For now, just clearing the DB is enough as Cloudinary storage is cheap/managed elsewhere
         // or we can extract public_id if needed.
 
-        const { error } = await admin
-            .from("users")
-            .update({ avatar_url: null })
-            .eq("idnumber", idnumber);
+        const tables = ["students", "coordinators", "supervisors", "instructors", "super_admins"];
+        let updated = false;
 
-        if (error) {
-            return NextResponse.json({ error: error.message }, { status: 500 });
+        for (const t of tables) {
+             const { data } = await admin.from(t).select("id").eq("idnumber", idnumber).maybeSingle();
+             if (data) {
+                 await admin.from(t).update({ avatar_url: null }).eq("id", data.id);
+                 updated = true;
+                 break;
+             }
+        }
+        
+        if (!updated) {
+            return NextResponse.json({ error: "User not found" }, { status: 404 });
         }
 
         return NextResponse.json({ success: true });

@@ -17,21 +17,41 @@ export async function GET(req: Request) {
         query = query.eq("effective_date", date);
     }
     if (student_id) {
-        query = query.eq("student_id", student_id);
+        // Resolve student_id if it's an idnumber (string)
+        let internalId = student_id;
+        // Check if it's an idnumber first
+        const { data: stData } = await admin
+            .from("users_students")
+            .select("id")
+            .eq("idnumber", student_id)
+            .maybeSingle();
+            
+        if (stData) {
+            internalId = stData.id;
+        }
+        
+        query = query.eq("student_id", internalId);
     }
     if (supervisor_id) {
-        query = query.eq("created_by", supervisor_id);
+        // Need to lookup ID if supervisor_id is idnumber string
+        const { data: sup } = await admin.from("users_supervisors").select("id").eq("idnumber", supervisor_id).single();
+        if (sup) {
+             query = query.eq("created_by_id", sup.id).eq("created_by_role", "supervisor");
+        } else {
+             // Fallback or empty result
+             query = query.eq("created_by_id", -1);
+        }
     }
 
     const { data, error } = await query;
 
     if (error) throw error;
     
-    // Convert BigInt to Number (safe for timestamps) or String
+    // Convert timestamp strings to Number (ms)
     const safeData = data ? data.map((item: any) => ({
         ...item,
-        overtime_start: Number(item.overtime_start),
-        overtime_end: Number(item.overtime_end)
+        overtime_start: new Date(item.overtime_start).getTime(),
+        overtime_end: new Date(item.overtime_end).getTime()
     })) : [];
 
     return NextResponse.json({ overtime_shifts: safeData });
@@ -81,16 +101,44 @@ export async function POST(req: Request) {
 
     const shiftId = shiftData.id;
 
+    // Lookup Supervisor internal ID
+    const { data: supervisorData, error: supError } = await admin
+        .from("users_supervisors")
+        .select("id")
+        .eq("idnumber", supervisor_id)
+        .single();
+    
+    if (supError || !supervisorData) {
+        return NextResponse.json({ error: "Supervisor not found" }, { status: 404 });
+    }
+
+    // Lookup Student ID if it's a string (idnumber)
+    let finalStudentId = student_id;
+    if (typeof student_id === 'string' && isNaN(Number(student_id))) {
+         // Assume it's an idnumber like "STUD101"
+         const { data: studentData, error: stError } = await admin
+            .from("users_students")
+            .select("id")
+            .eq("idnumber", student_id)
+            .single();
+         
+         if (stError || !studentData) {
+             return NextResponse.json({ error: `Student not found: ${student_id}` }, { status: 404 });
+         }
+         finalStudentId = studentData.id;
+    }
+
     // Insert into overtime_shifts
     const { error: insertError } = await admin
         .from("overtime_shifts")
         .insert({
             shift_id: shiftId,
-            overtime_start: start,
-            overtime_end: end,
+            overtime_start: new Date(start).toISOString(),
+            overtime_end: new Date(end).toISOString(),
             effective_date: date,
-            created_by: supervisor_id,
-            student_id: student_id
+            created_by_id: supervisorData.id,
+            created_by_role: 'supervisor',
+            student_id: finalStudentId
         });
 
     if (insertError) throw insertError;
