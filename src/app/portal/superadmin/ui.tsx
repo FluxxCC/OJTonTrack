@@ -368,6 +368,16 @@ export function TimeEntryView() {
   const [availableSections, setAvailableSections] = useState<Section[]>([]);
   const [studentSchedules, setStudentSchedules] = useState<Record<string, any>>({});
 
+  const courseOptions = useMemo(() => {
+    const names = availableCourses.map(c => c.name).filter(Boolean);
+    return Array.from(new Set(names)).sort((a, b) => a.localeCompare(b));
+  }, [availableCourses]);
+
+  const sectionOptions = useMemo(() => {
+    const names = availableSections.map(s => s.name).filter(Boolean);
+    return Array.from(new Set(names)).sort((a, b) => a.localeCompare(b));
+  }, [availableSections]);
+
   // Fetch student schedules
   useEffect(() => {
     fetch("/api/student-schedules")
@@ -964,10 +974,10 @@ export function TimeEntryView() {
                 onChange={(e) => setCourseFilter(e.target.value)}
                 className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none"
               >
-                <option value="">All courses</option>
-                {availableCourses.map((c) => (
-                  <option key={c.id} value={c.name}>
-                    {c.name}
+                <option value="" hidden>All courses</option>
+                {courseOptions.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
                   </option>
                 ))}
               </select>
@@ -976,10 +986,10 @@ export function TimeEntryView() {
                 onChange={(e) => setSectionFilter(e.target.value)}
                 className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none"
               >
-                <option value="">All sections</option>
-                {availableSections.map((s) => (
-                  <option key={s.id} value={s.name}>
-                    {s.name}
+                <option value="" hidden>All sections</option>
+                {sectionOptions.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
                   </option>
                 ))}
               </select>

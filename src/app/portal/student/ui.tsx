@@ -4113,6 +4113,79 @@ export function ReportsView({
     URL.revokeObjectURL(url);
   };
 
+  const openPrintableReport = async (r: ReportEntry, start?: Date, end?: Date) => {
+    const nameParts = (() => {
+      try {
+        const fn = localStorage.getItem("firstname") || "";
+        const ln = localStorage.getItem("lastname") || "";
+        return `${fn} ${ln}`.trim();
+      } catch { return ""; }
+    })();
+    let course = (() => { try { return localStorage.getItem("course") || ""; } catch { return ""; } })();
+    let section = (() => { try { return localStorage.getItem("section") || ""; } catch { return ""; } })();
+    if (!course || !section) {
+      try {
+        const res = await fetch(`/api/users?idnumber=${encodeURIComponent(idnumber)}`, { cache: "no-store" });
+        const json = await res.json();
+        if (Array.isArray(json.users) && json.users.length > 0) {
+          const me = json.users[0] || {};
+          course = me.course || (me.courses?.name) || course || "";
+          section = me.section || (me.sections?.name) || section || "";
+        }
+      } catch {}
+    }
+    const structured = (() => {
+      if (!r.body) return null;
+      try {
+        const data = JSON.parse(r.body);
+        if (data && typeof data === "object") return data;
+        return null;
+      } catch { return null; }
+    })();
+    const title = r.title || `Weekly Report ${r.week || ""}`;
+    const submittedDate = new Date(r.submittedAt);
+    const range = start && end
+      ? `${start.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })} - ${end.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}`
+      : submittedDate.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+    const escape = (s: string) => (s || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const S = structured || {};
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>
+      body { font-family: 'Times New Roman', Times, serif; color: #111827; }
+      table { width: 100%; border-collapse: collapse; }
+      td { vertical-align: top; font-size: 12px; }
+      .label { font-weight: 700; }
+      .center { text-align: center; }
+      .week { margin: 12px 0 8px; font-size: 16px; font-weight: 700; }
+      .section { margin: 10px 0; }
+      .section-title { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+      .section-body { font-size: 12px; line-height: 1.7; text-indent: 24px; white-space: pre-wrap; }
+    </style></head><body>
+      <table>
+        <tr>
+          <td>
+            <div><span class="label">Name:</span> ${escape(nameParts || idnumber)}</div>
+            <div><span class="label">ID NO.:</span> ${escape(idnumber)}</div>
+          </td>
+          <td style="text-align:right;">
+            <div><span class="label">Course and Section:</span> ${escape(course || "-")}${section ? `-${escape(section)}` : ""}</div>
+            <div><span class="label">Date:</span> ${escape(range || "-")}</div>
+          </td>
+        </tr>
+      </table>
+      <div class="center week">WEEK ${r.week || "-"}</div>
+      <div class="section"><div class="section-title">1. Introduction</div><div class="section-body">${escape(S.introduction || (structured ? "" : (r.body || "")))}</div></div>
+      <div class="section"><div class="section-title">2. Activities Performed</div><div class="section-body">${escape(S.activities || "")}</div></div>
+      <div class="section"><div class="section-title">3. Tools and Skills Used</div><div class="section-body">${escape(S.tools || "")}</div></div>
+      <div class="section"><div class="section-title">4. Challenges Encountered</div><div class="section-body">${escape(S.challenges || "")}</div></div>
+      <div class="section"><div class="section-title">5. Solutions and Learning</div><div class="section-body">${escape(S.solutions || "")}</div></div>
+      <div class="section"><div class="section-title">6. Accomplishments</div><div class="section-body">${escape(S.accomplishments || "")}</div></div>
+      <div class="section"><div class="section-title">7. Reflection</div><div class="section-body">${escape(S.reflection || "")}</div></div>
+    </body></html>`;
+    const blob = new Blob([html], { type: "application/msword" });
+    const filename = `Weekly_Report_Week_${r.week || ""}.docx`;
+    downloadBlob(blob, filename);
+  };
+
   const exportAllWord = async () => {
     const targets = filteredSlots.filter(s => !!s.report).map(s => s.report!) as ReportEntry[];
     for (const r of targets) {
@@ -4140,13 +4213,13 @@ export function ReportsView({
     return (
       <div className="flex flex-col gap-3 animate-in fade-in duration-300">
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between gap-3 flex-wrap">
+          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <h2 className="text-sm font-bold text-gray-900">Weekly Reports</h2>
             <div className="flex items-center gap-2">
               <select
                 value={monthFilter}
                 onChange={(e) => setMonthFilter(e.target.value)}
-                className="px-3 py-1.5 rounded-lg border border-gray-300 text-xs font-semibold text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316]"
+                className="px-3 py-1.5 rounded-lg border border-gray-300 text-xs font-semibold text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] w-full sm:w-auto"
               >
                 <option value="">All Months</option>
                 {monthOptions.map(m => {
@@ -4155,13 +4228,6 @@ export function ReportsView({
                   return <option key={m} value={m}>{label}</option>;
                 })}
               </select>
-              <button 
-                onClick={exportAllWord}
-                className="text-xs font-semibold text-[#F97316] hover:text-[#EA580C] px-3 py-1 rounded-lg hover:bg-orange-50 transition-colors"
-                title="Download each weekly report as Word"
-              >
-                Export
-              </button>
               <button 
                 onClick={() => setViewAllWeeks(false)}
                 className="text-xs font-semibold text-gray-600 hover:text-gray-900 px-3 py-1 rounded-lg hover:bg-gray-100 transition-colors"
@@ -4206,10 +4272,26 @@ export function ReportsView({
                         <div className="font-bold text-gray-900 text-sm">Week {slot.week}</div>
                         {statusChip}
                       </div>
-                      <div className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                        {deadlineLabel}
-                      </div>
+                    <div className="flex items-center gap-2">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2 w-full sm:w-auto">
+                <div className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                  {deadlineLabel}
+                </div>
+                {slot.report && (
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => { e.stopPropagation(); openPrintableReport(slot.report!, slot.start, slot.end); }}
+                    className="inline-flex items-center justify-center text-[10px] font-bold text-[#F97316] px-2 py-0.5 rounded-lg border border-orange-200 hover:bg-orange-50 hover:text-[#EA580C] transition-colors w-full sm:w-auto"
+                    title="Download"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-1"><path d="M3 15v4c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+                    Download
+                  </div>
+                )}
+              </div>
+                    </div>
                     </div>
                     <div className="text-sm font-bold text-gray-900">{rangeLabel}</div>
                   </button>
