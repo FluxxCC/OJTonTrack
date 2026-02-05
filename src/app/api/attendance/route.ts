@@ -75,19 +75,44 @@ export async function GET(req: Request) {
           
           if (ledgerData && ledgerData.length > 0) {
               const ledgerMap = new Map<string, any>();
+              const ledgerByDate = new Map<string, any[]>();
               ledgerData.forEach((l: any) => {
                   ledgerMap.set(`${l.student_id}-${l.date}-${l.shift_id}`, l);
+                  const k = `${l.student_id}-${l.date}`;
+                  const arr = ledgerByDate.get(k) || [];
+                  arr.push(l);
+                  ledgerByDate.set(k, arr);
               });
 
               data.forEach((row: any) => {
-                  if (row.type === 'out' && row.shift_id) {
-                      const key = `${row.student_id}-${row.attendance_date}-${row.shift_id}`;
-                      if (ledgerMap.has(key)) {
-                          const ledgerEntry = ledgerMap.get(key);
-                          row.rendered_hours = Number(ledgerEntry.hours);
-                          row.validated_hours = Number(ledgerEntry.hours);
-                          row.official_time_in = ledgerEntry.official_time_in;
-                          row.official_time_out = ledgerEntry.official_time_out;
+                  if (row.type === 'out') {
+                      if (row.shift_id) {
+                          const key = `${row.student_id}-${row.attendance_date}-${row.shift_id}`;
+                          if (ledgerMap.has(key)) {
+                              const ledgerEntry = ledgerMap.get(key);
+                              row.validated_hours = Number(ledgerEntry.hours);
+                              row.official_time_in = ledgerEntry.official_time_in;
+                              row.official_time_out = ledgerEntry.official_time_out;
+                              row.slot = ledgerEntry.slot;
+                          }
+                      } else {
+                          const k = `${row.student_id}-${row.attendance_date}`;
+                          const arr = ledgerByDate.get(k) || [];
+                          if (arr.length === 1) {
+                              const ledgerEntry = arr[0];
+                              row.validated_hours = Number(ledgerEntry.hours);
+                              row.official_time_in = ledgerEntry.official_time_in;
+                              row.official_time_out = ledgerEntry.official_time_out;
+                              row.slot = ledgerEntry.slot;
+                          } else if (arr.length > 1) {
+                              const best = arr.slice().sort((a, b) => Number(b.hours || 0) - Number(a.hours || 0))[0];
+                              if (best) {
+                                  row.validated_hours = Number(best.hours);
+                                  row.official_time_in = best.official_time_in;
+                                  row.official_time_out = best.official_time_out;
+                                  row.slot = best.slot;
+                              }
+                          }
                       }
                   }
               });
@@ -196,21 +221,44 @@ export async function GET(req: Request) {
         
         if (ledgerData && ledgerData.length > 0) {
             const ledgerMap = new Map<string, any>();
+            const ledgerByDate = new Map<string, any[]>();
             ledgerData.forEach((l: any) => {
                 ledgerMap.set(`${l.student_id}-${l.date}-${l.shift_id}`, l);
+                const k = `${l.student_id}-${l.date}`;
+                const arr = ledgerByDate.get(k) || [];
+                arr.push(l);
+                ledgerByDate.set(k, arr);
             });
 
             data.forEach((row: any) => {
-                if (row.type === 'out' && row.shift_id) {
-                    const key = `${row.student_id}-${row.attendance_date}-${row.shift_id}`;
-                    if (ledgerMap.has(key)) {
-                        const ledgerEntry = ledgerMap.get(key);
-                        // Stop overwriting rendered_hours
-                        // row.rendered_hours = Number(ledgerEntry.hours);
-                        
-                        row.validated_hours = Number(ledgerEntry.hours);
-                        row.official_time_in = ledgerEntry.official_time_in;
-                        row.official_time_out = ledgerEntry.official_time_out;
+                if (row.type === 'out') {
+                    if (row.shift_id) {
+                        const key = `${row.student_id}-${row.attendance_date}-${row.shift_id}`;
+                        if (ledgerMap.has(key)) {
+                            const ledgerEntry = ledgerMap.get(key);
+                            row.validated_hours = Number(ledgerEntry.hours);
+                            row.official_time_in = ledgerEntry.official_time_in;
+                            row.official_time_out = ledgerEntry.official_time_out;
+                            row.slot = ledgerEntry.slot;
+                        }
+                    } else {
+                        const k = `${row.student_id}-${row.attendance_date}`;
+                        const arr = ledgerByDate.get(k) || [];
+                        if (arr.length === 1) {
+                            const ledgerEntry = arr[0];
+                            row.validated_hours = Number(ledgerEntry.hours);
+                            row.official_time_in = ledgerEntry.official_time_in;
+                            row.official_time_out = ledgerEntry.official_time_out;
+                            row.slot = ledgerEntry.slot;
+                        } else if (arr.length > 1) {
+                            const best = arr.slice().sort((a, b) => Number(b.hours || 0) - Number(a.hours || 0))[0];
+                            if (best) {
+                                row.validated_hours = Number(best.hours);
+                                row.official_time_in = best.official_time_in;
+                                row.official_time_out = best.official_time_out;
+                                row.slot = best.slot;
+                            }
+                        }
                     }
                 }
             });
@@ -339,6 +387,15 @@ export async function POST(req: Request) {
             .order("official_start", { ascending: true }); // Morning -> Afternoon
         if (sData) sectionShifts = sData;
     }
+    let supervisorShifts: any[] = [];
+    if (user.supervisor_id) {
+        const { data: supShifts } = await admin
+            .from("shifts")
+            .select("*")
+            .eq("supervisor_id", user.supervisor_id)
+            .order("official_start", { ascending: true });
+        if (supShifts) supervisorShifts = supShifts;
+    }
 
     // ---------------------------------------------------------
     // NEW: Check for Coordinator Event Override (Highest Priority)
@@ -416,6 +473,51 @@ export async function POST(req: Request) {
     } catch (err) {
         console.error("Error fetching coordinator events:", err);
     }
+    let studentShiftSchedule: any | null = null;
+    try {
+        const { data: stuSched } = await admin
+            .from("student_shift_schedules")
+            .select("*")
+            .eq("student_id", user.idnumber)
+            .maybeSingle();
+        if (stuSched) {
+            studentShiftSchedule = stuSched;
+        }
+    } catch (err) {
+        console.error("Error fetching student schedule:", err);
+    }
+    const allShifts: any[] = [];
+    allShifts.push(...sectionShifts);
+    allShifts.push(...supervisorShifts);
+    if (studentShiftSchedule) {
+        if (studentShiftSchedule.am_in && studentShiftSchedule.am_out) {
+            allShifts.push({
+                id: `STUDENT_AM_${user.id}`,
+                shift_name: "Student Morning",
+                official_start: studentShiftSchedule.am_in,
+                official_end: studentShiftSchedule.am_out,
+                section_id: user.section_id
+            });
+        }
+        if (studentShiftSchedule.pm_in && studentShiftSchedule.pm_out) {
+            allShifts.push({
+                id: `STUDENT_PM_${user.id}`,
+                shift_name: "Student Afternoon",
+                official_start: studentShiftSchedule.pm_in,
+                official_end: studentShiftSchedule.pm_out,
+                section_id: user.section_id
+            });
+        }
+        if (studentShiftSchedule.ot_in && studentShiftSchedule.ot_out) {
+            allShifts.push({
+                id: `STUDENT_OT_${user.id}`,
+                shift_name: "Student Overtime",
+                official_start: studentShiftSchedule.ot_in,
+                official_end: studentShiftSchedule.ot_out,
+                section_id: user.section_id
+            });
+        }
+    }
 
     let photourl = "";
     if (photoDataUrl) {
@@ -463,10 +565,10 @@ export async function POST(req: Request) {
     // Rule 3: Shift Matching Logic (Time-In)
     // ---------------------------------------------------------
     if (!is_overtime && type === 'in') {
-         const d = new Date(ts);
-         const currentMins = d.getHours() * 60 + d.getMinutes();
+         const manila = getManilaDateParts(new Date(ts));
+         const currentMins = manila.hour * 60 + manila.minute;
 
-         for (const shift of sectionShifts) {
+         for (const shift of allShifts) {
              const startMins = timeStringToMinutes(shift.official_start);
              const endMins = timeStringToMinutes(shift.official_end);
              
@@ -543,16 +645,16 @@ export async function POST(req: Request) {
 
                  // A. Try to find shift from stored shift_id
                  if (lastIn.shift_id) {
-                     targetShift = sectionShifts.find(s => s.id === lastIn.shift_id);
+                     targetShift = allShifts.find(s => s.id === lastIn.shift_id);
                  }
 
                  // B. Fallback: Try matching logic if no shift_id stored (Legacy Support)
-                 if (!targetShift && sectionShifts.length > 0) {
-                      const d = new Date(inTime);
-                      const currentMins = d.getHours() * 60 + d.getMinutes();
+                 if (!targetShift && allShifts.length > 0) {
+                      const manilaIn = getManilaDateParts(new Date(inTime));
+                      const currentMins = manilaIn.hour * 60 + manilaIn.minute;
                       const buffer = 30;
 
-                      for (const shift of sectionShifts) {
+                      for (const shift of allShifts) {
                            const startMins = timeStringToMinutes(shift.official_start);
                            const endMins = timeStringToMinutes(shift.official_end);
                            let isMatch = false;
@@ -606,12 +708,77 @@ export async function POST(req: Request) {
                     );
                     rendered_hours = ms / 3600000;
                  } else {
-                    // No matching shift found -> Raw duration
-                    // Also use helper but with raw times? No, just raw diff.
-                    // But round to minute to be safe?
-                    const cleanIn = new Date(inTime); cleanIn.setSeconds(0, 0);
-                    const cleanOut = new Date(outTime); cleanOut.setSeconds(0, 0);
-                    rendered_hours = Math.max(0, (cleanOut.getTime() - cleanIn.getTime()) / 3600000);
+                    let bestShift: any = null;
+                    let bestMs = 0;
+                    for (const shift of allShifts) {
+                        const startMins = timeStringToMinutes(shift.official_start || "00:00");
+                        const endMins = timeStringToMinutes(shift.official_end || "00:00");
+                        const inDate = new Date(inTime);
+                        const manila = getManilaDateParts(inDate);
+                        const currentManilaMins = manila.hour * 60 + manila.minute;
+                        let isPrevDay = false;
+                        if (startMins > endMins && currentManilaMins <= endMins) {
+                            isPrevDay = true;
+                        }
+                        const officialInDate = getOfficialTimeInManila(inDate, shift.official_start || "00:00", false, isPrevDay);
+                        const isOutNextDay = startMins > endMins;
+                        const officialOutDate = getOfficialTimeInManila(officialInDate, shift.official_end || "00:00", isOutNextDay, false);
+                        const ms = calculateHoursWithinOfficialTime(
+                            new Date(inTime),
+                            new Date(outTime),
+                            officialInDate,
+                            officialOutDate
+                        );
+                        if (ms > bestMs) {
+                            bestMs = ms;
+                            bestShift = shift;
+                        }
+                    }
+                    if (bestShift && bestMs > 0) {
+                        computed_shift_id = bestShift.id;
+                        snapshot_official_in = bestShift.official_start || null;
+                        snapshot_official_out = bestShift.official_end || null;
+                        rendered_hours = bestMs / 3600000;
+                    } else {
+                        let defStart = '09:00';
+                        let defEnd = '17:00';
+                        const supId = user.supervisor_id;
+                        if (supId) {
+                            try {
+                                const { data: existingDefault } = await admin
+                                  .from('shifts')
+                                  .select('official_start, official_end')
+                                  .eq('supervisor_id', supId)
+                                  .eq('shift_name', 'AUTO:::DEFAULT')
+                                  .maybeSingle();
+                                if (existingDefault) {
+                                    defStart = existingDefault.official_start || defStart;
+                                    defEnd = existingDefault.official_end || defEnd;
+                                }
+                            } catch {}
+                        }
+                        snapshot_official_in = defStart;
+                        snapshot_official_out = defEnd;
+                        const inDate = new Date(inTime);
+                        const startMins = timeStringToMinutes(defStart);
+                        const endMins = timeStringToMinutes(defEnd);
+                        const manila = getManilaDateParts(inDate);
+                        const currentManilaMins = manila.hour * 60 + manila.minute;
+                        let isPrevDay2 = false;
+                        if (startMins > endMins && currentManilaMins <= endMins) {
+                             isPrevDay2 = true;
+                        }
+                        const officialInDate2 = getOfficialTimeInManila(inDate, defStart, false, isPrevDay2);
+                        const isOutNextDay2 = startMins > endMins;
+                        const officialOutDate2 = getOfficialTimeInManila(officialInDate2, defEnd, isOutNextDay2, false);
+                        const ms2 = calculateHoursWithinOfficialTime(
+                            new Date(inTime), 
+                            new Date(outTime), 
+                            officialInDate2, 
+                            officialOutDate2
+                        );
+                        rendered_hours = ms2 / 3600000;
+                    }
                  }
              }
           }
@@ -689,6 +856,21 @@ export async function POST(req: Request) {
         }
         if (finalShiftId) {
             const hoursRounded = Math.round(rendered_hours * 60) / 60;
+            let ledgerSlot: 'AM' | 'PM' | 'OT' | null = null;
+            if (is_overtime) {
+                ledgerSlot = 'OT';
+            } else {
+                const matchedShift = allShifts.find(s => String(s.id) === String(finalShiftId));
+                const name = String(matchedShift?.shift_name || "").toLowerCase();
+                if (name.includes("morning") || name.includes("am") || String(finalShiftId).includes("STUDENT_AM")) {
+                    ledgerSlot = 'AM';
+                } else if (name.includes("afternoon") || name.includes("pm") || String(finalShiftId).includes("STUDENT_PM")) {
+                    ledgerSlot = 'PM';
+                } else {
+                    // Fallback: default to AM for ambiguous names to avoid misclassification by time-of-day
+                    ledgerSlot = 'AM';
+                }
+            }
             await admin.from('validated_hours').upsert({
                 student_id: user.id,
                 date: new Date(ts).toISOString().split('T')[0],
@@ -697,8 +879,9 @@ export async function POST(req: Request) {
                 hours: hoursRounded,
                 official_time_in: snapshot_official_in,
                 official_time_out: snapshot_official_out,
-                validated_at: new Date().toISOString()
-            }, { onConflict: 'student_id, date, shift_id' });
+                validated_at: new Date().toISOString(),
+                slot: ledgerSlot
+            }, { onConflict: 'student_id, date, slot' });
             if (!shift_id && !computed_shift_id && insertRes.data?.id) {
                 await admin
                   .from('attendance')
@@ -717,7 +900,7 @@ export async function POST(req: Request) {
         // Get supervisor idnumber from supervisors table
         const { data: supUser, error: supErr } = await admin
           .from("users_supervisors")
-          .select("idnumber")
+          .select("id,idnumber")
           .eq("id", supervisorIdInt)
           .maybeSingle();
         
@@ -736,12 +919,42 @@ export async function POST(req: Request) {
                 hour12: true 
              }).format(new Date(ts));
              
-             const pushResult = await sendPushNotification(cleanSupId, {
-                title: `Attendance Alert`,
-                body: `${user.firstname} ${user.lastname} has ${action} at ${timeStr}.`,
-                url: `/portal/supervisor?tab=dashboard`,
-                tag: `attendance-${user.id}-${Date.now()}`
-             });
+             let pushResult = { sent: 0, failed: 0, errors: [] as any[] };
+             if (type === 'in') {
+               pushResult = await sendPushNotification(cleanSupId, {
+                  title: `Attendance Alert`,
+                  body: `${user.firstname} ${user.lastname} has ${action} at ${timeStr}.`,
+                  url: `/portal/supervisor?tab=dashboard`,
+                  tag: `attendance-${user.id}-${Date.now()}`
+               });
+               try {
+                 await admin.from('notifications').insert({
+                   recipient_id: supUser.id,
+                   recipient_role: 'supervisor',
+                   title: 'Student Time-In',
+                   message: `${user.firstname} ${user.lastname} clocked in at ${timeStr}.`,
+                   link: '/portal/supervisor?tab=dashboard',
+                   type: 'attendance'
+                 });
+               } catch {}
+             } else if (type === 'out') {
+               pushResult = await sendPushNotification(cleanSupId, {
+                  title: `Attendance Alert`,
+                  body: `${user.firstname} ${user.lastname} has ${action} at ${timeStr}.`,
+                  url: `/portal/supervisor?tab=dashboard`,
+                  tag: `attendance-${user.id}-${Date.now()}`
+               });
+               try {
+                 await admin.from('notifications').insert({
+                   recipient_id: supUser.id,
+                   recipient_role: 'supervisor',
+                   title: 'Student Time-Out',
+                   message: `${user.firstname} ${user.lastname} clocked out at ${timeStr}.`,
+                   link: '/portal/supervisor?tab=dashboard',
+                   type: 'attendance'
+                 });
+               } catch {}
+             }
              
              if (pushResult.sent > 0) {
                  notificationStatus = "sent";
@@ -831,18 +1044,7 @@ export async function PUT(req: Request) {
       .eq('id', id)
       .single();
 
-    if ((ts || type) && fullRecord?.shift_id) {
-      const { data: existingLedger } = await admin
-        .from('validated_hours')
-        .select('id')
-        .eq('student_id', fullRecord.student_id)
-        .eq('date', fullRecord.attendance_date)
-        .eq('shift_id', fullRecord.shift_id)
-        .maybeSingle();
-      if (existingLedger) {
-        updates.status = 'ADJUSTED';
-      }
-    }
+    // Do not override chosen status on edit; preserve dropdown selection
 
     const { error } = await admin
         .from('attendance')

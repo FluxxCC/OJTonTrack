@@ -137,19 +137,18 @@ function StudentPage() {
   }, [student?.id]);
 
   const markAsRead = async (id: number) => {
-    if (!supabase) return;
     // Optimistic update
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, is_read: true } : n));
     try {
-      const { error } = await supabase
-        .from('notifications')
-        .update({ is_read: true })
-        .eq('id', id);
-        
-      if (error) {
-        // Revert if error
-        console.error("Error marking as read:", JSON.stringify(error, null, 2));
-        fetchNotifications();
+      const res = await fetch("/api/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        console.error("Error marking as read:", JSON.stringify(err, null, 2));
+        fetchNotifications(); // revert
       }
     } catch (e) { 
         console.error("Exception marking as read:", e); 
@@ -158,19 +157,18 @@ function StudentPage() {
   };
 
   const markAllAsRead = async () => {
-     if (!student?.id || !supabase) return;
+     if (!student?.idnumber) return;
      // Optimistic update
      setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
      try {
-       const { error } = await supabase
-         .from('notifications')
-         .update({ is_read: true })
-         .eq('recipient_id', student.id)
-         .eq('recipient_role', 'student')
-         .eq('is_read', false);
-         
-       if (error) {
-          console.error("Error marking all as read:", JSON.stringify(error, null, 2));
+       const res = await fetch("/api/notifications", {
+         method: "PATCH",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ markAllRead: true, idnumber: student.idnumber })
+       });
+       if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          console.error("Error marking all as read:", JSON.stringify(err, null, 2));
           fetchNotifications(); // Revert
        }
      } catch (e) { 
@@ -284,8 +282,11 @@ function StudentPage() {
             approvedAt: approvedAtNum,
             validated_by: e.validated_by,
             is_overtime: e.is_overtime,
-            rendered_hours: e.rendered_hours,
+            // rendered_hours removed from calculation paths; use validated_hours or clamp
             validated_hours: e.validated_hours,
+            official_time_in: e.official_time_in,
+            official_time_out: e.official_time_out,
+            slot: e.slot
           };
         }) as AttendanceEntry[];
         setAttendance(mapped);
@@ -300,6 +301,10 @@ function StudentPage() {
         if (Array.isArray(json.users) && json.users.length > 0) {
           const me = json.users[0];
           setStudent(me);
+          if (me && typeof (me as any).target_hours === "number" && (me as any).target_hours > 0) {
+            setTargetHours(Number((me as any).target_hours));
+            try { localStorage.setItem("targetHours", String((me as any).target_hours)); } catch {}
+          }
           
           // Check for joined supervisor data (from API join)
           if ((me as any).users_supervisors) {
@@ -845,16 +850,14 @@ function StudentPage() {
               approvedInTs = log.timestamp;
             }
           } else if (log.type === "out" && inTs !== null) {
-            if (typeof log.rendered_hours === 'number' && log.rendered_hours > 0) {
-               dayTotalMs += log.rendered_hours * 3600000;
+            if ((log as any).validated_hours !== undefined && (log as any).validated_hours !== null && Number((log as any).validated_hours) >= 0) {
+               dayTotalMs += Number((log as any).validated_hours) * 3600000;
             } else if (log.timestamp > inTs) {
               dayTotalMs += log.timestamp - inTs;
             }
             if (approvedInTs !== null && log.status === "Approved") {
-               if (typeof log.validated_hours === 'number' && log.validated_hours > 0) {
-                   dayValidatedMs += log.validated_hours * 3600000;
-               } else if (typeof log.rendered_hours === 'number' && log.rendered_hours > 0) {
-                   dayValidatedMs += log.rendered_hours * 3600000;
+               if ((log as any).validated_hours !== undefined && (log as any).validated_hours !== null && Number((log as any).validated_hours) >= 0) {
+                   dayValidatedMs += Number((log as any).validated_hours) * 3600000;
                } else if (log.timestamp > approvedInTs) {
                    dayValidatedMs += log.timestamp - approvedInTs;
                }
@@ -891,34 +894,43 @@ function StudentPage() {
             const outTime = session.out ? session.out.timestamp : 0;
             if (!outTime) return;
 
-            // Use rendered_hours if available (frozen historical data), otherwise calculate dynamically
-            if (session.out && typeof session.out.rendered_hours === 'number' && session.out.rendered_hours > 0) {
-                dayTotalMs += session.out.rendered_hours * 3600000;
+            // Use validated_hours if available (ledger)
+            if (session.out && typeof (session.out as any).validated_hours === 'number' && Number((session.out as any).validated_hours) >= 0) {
+                dayTotalMs += Number((session.out as any).validated_hours) * 3600000;
+            } else if (session.out && (session.out as any).official_time_in && (session.out as any).official_time_out) {
+                try {
+                    const baseDate = new Date(inTime);
+                    const parseTime = (t: string) => {
+                        const parts = t.split(':').map(Number);
+                        const d = new Date(baseDate);
+                        d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                        return d;
+                    };
+                    let offIn = parseTime((session.out as any).official_time_in);
+                    let offOut = parseTime((session.out as any).official_time_out);
+                    if (offOut.getTime() < offIn.getTime()) {
+                        offOut.setDate(offOut.getDate() + 1);
+                    }
+                    dayTotalMs += calculateHoursWithinOfficialTime(
+                        new Date(inTime),
+                        new Date(outTime),
+                        offIn,
+                        offOut
+                    );
+                } catch {}
             } else {
-                let shiftTotal = calculateSessionDuration(inTime, outTime, 'am', schedule) + 
-                                 calculateSessionDuration(inTime, outTime, 'pm', schedule) + 
-                                 calculateSessionDuration(inTime, outTime, 'ot', schedule);
-                
-                // Fallback to raw duration if off-schedule (Tracked Hours)
-                if (shiftTotal === 0) {
-                    const raw = outTime - inTime;
-                    if (raw > 0) shiftTotal = raw;
-                }
-                
+                const shiftTotal = 
+                    calculateSessionDuration(inTime, outTime, 'am', schedule) + 
+                    calculateSessionDuration(inTime, outTime, 'pm', schedule) + 
+                    calculateSessionDuration(inTime, outTime, 'ot', schedule);
                 dayTotalMs += shiftTotal;
             }
 
-            // Validated time (only if approved)
+            // Validated time: require approval, then use ledger validated_hours
             if (session.in.status === 'Approved' && session.out?.status === 'Approved') {
-                 if (session.out && typeof session.out.validated_hours === 'number' && session.out.validated_hours > 0) {
-                     dayValidatedMs += session.out.validated_hours * 3600000;
-                 } else if (session.out && typeof session.out.rendered_hours === 'number' && session.out.rendered_hours > 0) {
-                     dayValidatedMs += session.out.rendered_hours * 3600000;
-                 } else {
-                     dayValidatedMs += calculateSessionDuration(inTime, outTime, 'am', schedule);
-                     dayValidatedMs += calculateSessionDuration(inTime, outTime, 'pm', schedule);
-                     dayValidatedMs += calculateSessionDuration(inTime, outTime, 'ot', schedule);
-                 }
+                if (session.out && typeof (session.out as any).validated_hours === 'number' && Number((session.out as any).validated_hours) >= 0) {
+                    dayValidatedMs += Number((session.out as any).validated_hours) * 3600000;
+                }
             }
         });
 
@@ -1277,6 +1289,7 @@ function StudentPage() {
                 <div className="space-y-6">
                   <ReportsView
                     idnumber={idnumber}
+                    studentId={student?.id}
                     reports={reports}
                     drafts={drafts}
                     deadlines={studentDeadlines}

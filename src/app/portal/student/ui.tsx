@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { AttendanceDetailsModal } from "@/components/AttendanceDetailsModal";
 import { supabase } from "@/lib/supabaseClient";
-import { buildSchedule, calculateSessionDuration, checkSessionFlags, ShiftSchedule, formatHours, formatDisplayTime, normalizeTimeString, timeStringToMinutes, calculateShiftDurations, isLate, calculateHoursWithinOfficialTime } from "@/lib/attendance";
+import { buildSchedule, calculateSessionDuration, checkSessionFlags, ShiftSchedule, formatHours, formatDisplayTime, normalizeTimeString, timeStringToMinutes, calculateShiftDurations, isLate, calculateHoursWithinOfficialTime, determineShift } from "@/lib/attendance";
 import Cropper from "react-easy-crop";
 import getCroppedImg from "@/lib/cropImage";
 import { Move, ZoomIn, ZoomOut, X } from "lucide-react";
@@ -72,6 +72,11 @@ function getStatusColorClass(entry?: AttendanceEntry | null): string {
   if (status === "Rejected") return "text-red-600";
   if (status === "Official") return "text-blue-600";
   return "text-yellow-600";
+}
+
+function getEntryPhoto(entry?: AttendanceEntry | null): string {
+  if (!entry) return "";
+  return entry.photoDataUrl || (entry as any)?.photourl || (entry as any)?.photoUrl || "";
 }
 
 const toBase64 = (file: File) => new Promise((resolve, reject) => {
@@ -175,6 +180,41 @@ export function StudentHeader() {
           </div>
           
           <div className="flex items-center gap-3">
+            <button
+              onClick={async () => {
+                try {
+                  const id = typeof window !== "undefined" ? (localStorage.getItem("idnumber") || "") : "";
+                  if (!id) {
+                    alert("No account detected");
+                    return;
+                  }
+                  const res = await fetch("/api/push/test", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ idnumber: id, role: "student", message: "Student test push" })
+                  });
+                  const json = await res.json().catch(() => ({}));
+                  if (json && json.success) {
+                    alert(`Test notification sent (${json.sent}/${json.subs_found})`);
+                  } else {
+                    let msg = "Failed";
+                    if (json?.error) msg += `: ${json.error}`;
+                    if (json?.env && (!json.env.has_public || !json.env.has_private)) {
+                      msg += "\nMissing server VAPID keys";
+                    }
+                    if (json?.subs_found === 0) {
+                      msg += "\nNo subscribed devices found";
+                    }
+                    alert(msg);
+                  }
+                } catch (e: any) {
+                  alert(e?.message || "Error sending test push");
+                }
+              }}
+              className="inline-flex items-center justify-center rounded-full bg-white/20 hover:bg-white/30 text-white font-semibold px-3 py-1 md:px-4 md:py-1.5 text-sm transition-colors"
+            >
+              Test Push
+            </button>
             <button
               onClick={() => router.replace("/")}
               className="inline-flex items-center justify-center rounded-full bg-white/20 hover:bg-white/30 text-white font-semibold px-3 py-1 md:px-4 md:py-1.5 text-sm transition-colors"
@@ -458,7 +498,7 @@ export function DashboardView({
       </div>
 
       {/* Bottom Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-stretch">
          {/* Recent Activity (Left Column) */}
          <div className="lg:col-span-2">
             <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 flex flex-col gap-6 h-full">
@@ -511,7 +551,7 @@ export function DashboardView({
          {/* Sidebar (Right Column) */}
          <div className="flex flex-col gap-6 h-full">
             {/* Weekly Report Deadlines */}
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 flex flex-col">
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 flex flex-col h-full">
                <div className="flex items-center justify-between mb-4">
                   <div className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2">
                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-500"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
@@ -1831,7 +1871,6 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
             dynamicOt ? { start: Number(dynamicOt.overtime_start), end: Number(dynamicOt.overtime_end) } : undefined
         );
 
-        // Sequential Pairing Logic (matches Superadmin view)
         const nonOtLogs = sorted.filter(l => !l.is_overtime);
         const otLogs = sorted.filter(l => !!l.is_overtime);
 
@@ -1842,18 +1881,16 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
         let s5: AttendanceEntry | null = null;
         let s6: AttendanceEntry | null = null;
 
-        // Helper for virtual auto-out
         const today = new Date();
         today.setHours(0,0,0,0);
         const isPastDate = baseDate < today;
 
-        const createVirtualOut = (inEntry: AttendanceEntry, shift: 'am' | 'pm' | 'ot'): AttendanceEntry => {
-             const outTs = shift === 'am' ? effectiveSchedule.amOut : (shift === 'pm' ? effectiveSchedule.pmOut : effectiveSchedule.otEnd);
-             // Ensure outTs > inEntry.timestamp
+        const createVirtualOut = (inEntry: AttendanceEntry): AttendanceEntry => {
+             const shift = determineShift(inEntry.timestamp, effectiveSchedule);
+             const outTs = shift === 'am' ? effectiveSchedule.amOut : effectiveSchedule.pmOut;
              const finalOutTs = outTs > inEntry.timestamp ? outTs : inEntry.timestamp + 60000;
-             
              return {
-                  id: inEntry.id ? -inEntry.id : -Math.floor(Math.random() * 1000000), // Negative ID for virtual
+                  id: inEntry.id ? -inEntry.id : -Math.floor(Math.random() * 1000000),
                   type: 'out',
                   timestamp: finalOutTs,
                   photoDataUrl: '',
@@ -1862,85 +1899,100 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
              };
         };
 
-        // s1: first IN (non-OT)
-        s1 = nonOtLogs.find(l => l.type === 'in') || null;
-        // s2: first OUT after s1
-        if (s1) {
-          s2 = nonOtLogs.find(l => l.type === 'out' && l.timestamp > s1!.timestamp) || null;
-          if (!s2 && isPastDate) {
-            s2 = createVirtualOut(s1 as AttendanceEntry, 'am');
-          }
+        const sessions: { in: AttendanceEntry; out: AttendanceEntry }[] = [];
+        let currentIn: AttendanceEntry | null = null;
+        for (const log of nonOtLogs) {
+            if (log.type === 'in') {
+                if (!currentIn) currentIn = log;
+            } else if (log.type === 'out') {
+                if (currentIn && log.timestamp > currentIn.timestamp) {
+                    sessions.push({ in: currentIn, out: log });
+                    currentIn = null;
+                }
+            }
         }
-        // s3: next IN after s2 (or after s1 if no s2)
-        const afterTsForS3 = s2 ? s2.timestamp : (s1 ? s1.timestamp : 0);
-        s3 = nonOtLogs.find(l => l.type === 'in' && l.timestamp > afterTsForS3) || null;
-        // s4: first OUT after s3
-        if (s3) {
-          s4 = nonOtLogs.find(l => l.type === 'out' && l.timestamp > s3!.timestamp) || null;
-          if (!s4 && isPastDate) {
-            s4 = createVirtualOut(s3 as AttendanceEntry, 'pm');
-          }
+        if (currentIn && isPastDate) {
+            sessions.push({ in: currentIn, out: createVirtualOut(currentIn) });
         }
-        // s5/s6: overtime pair based on is_overtime
+
+        const amSessions = sessions.filter(s => {
+            const slot = (s.out as any)?.slot;
+            if (slot === 'AM') return true;
+            if (slot === 'PM' || slot === 'OT') return false;
+            return determineShift(s.in.timestamp, effectiveSchedule) === 'am';
+        });
+        const pmSessions = sessions.filter(s => {
+            const slot = (s.out as any)?.slot;
+            if (slot === 'PM') return true;
+            if (slot === 'AM' || slot === 'OT') return false;
+            return determineShift(s.in.timestamp, effectiveSchedule) === 'pm';
+        });
+
+        const resolvePhoto = (entries: AttendanceEntry[]) => {
+          for (const e of entries) {
+            const p = getEntryPhoto(e);
+            if (p) return p;
+          }
+          return "";
+        };
+        const photoAmUrl = resolvePhoto(amSessions.flatMap(s => [s.in, s.out]));
+        const photoPmUrl = resolvePhoto(pmSessions.flatMap(s => [s.in, s.out]));
+        const photoOtUrl = resolvePhoto(otLogs);
+
+        if (amSessions.length > 0) {
+            s1 = amSessions[0].in;
+            s2 = amSessions[0].out;
+        }
+        if (pmSessions.length > 0) {
+            s3 = pmSessions[0].in;
+            s4 = pmSessions[0].out;
+        }
+
         s5 = otLogs.find(l => l.type === 'in') || null;
         if (s5) {
           s6 = otLogs.find(l => l.type === 'out' && l.timestamp > s5!.timestamp) || null;
           if (!s6 && isPastDate) {
-            s6 = createVirtualOut(s5 as AttendanceEntry, 'ot');
+            const outTs = effectiveSchedule.otEnd;
+            const finalOutTs = outTs > (s5 as AttendanceEntry).timestamp ? outTs : (s5 as AttendanceEntry).timestamp + 60000;
+            s6 = { id: (s5 as AttendanceEntry).id ? -(s5 as AttendanceEntry).id! : -Math.floor(Math.random() * 1000000), type: 'out', timestamp: finalOutTs, photoDataUrl: '', status: 'Pending', validated_by: 'AUTO TIME OUT' };
           }
         }
 
         let total = 0;
         const dailyFlags = new Set<string>();
 
-        // 3. Calculate Hours (Supervisor Logic - Exact Port)
-        // We use the same slot-based calculation as the supervisor portal to ensure consistency.
-        const calculateHours = (requireApproved: boolean) => {
-             const calc = (inLog: AttendanceEntry | null, outLog: AttendanceEntry | null, shift: 'am' | 'pm' | 'ot') => {
-                  if (!inLog || !outLog) return 0;
-                  if (inLog.status === 'Rejected' || outLog.status === 'Rejected') return 0;
-                  
-                  // Validated Hours Priority (Ledger - Source of Truth)
-                  if ((outLog as any).validated_hours !== undefined && (outLog as any).validated_hours !== null && Number((outLog as any).validated_hours) >= 0) {
-                        return Number((outLog as any).validated_hours) * 3600000;
-                  }
+        // 3. Calculate Hours (Ledger-first, frozen when available)
+        const calcFrozen = (inLog: AttendanceEntry | null, outLog: AttendanceEntry | null, shift: 'am' | 'pm' | 'ot') => {
+            if (!inLog || !outLog) return 0;
+            if ((inLog.status || "") === 'Rejected' || (outLog.status || "") === 'Rejected') return 0;
 
-                  // Rendered Hours Priority (Frozen History)
-                  if (outLog.rendered_hours !== undefined && outLog.rendered_hours !== null && Number(outLog.rendered_hours) >= 0) {
-                        if (requireApproved) {
-                             const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
-                             const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
-                             if (!inOk || !outOk) return 0;
-                        }
-                        // Avoid double counting (same as supervisor)
-                        // If PM Out is same as AM Out (s2), it was already counted in AM
-                        if (shift === 'pm' && s2 && outLog.id === s2.id) return 0;
-                        // If OT Out is same as AM/PM Out, it was already counted
-                        if (shift === 'ot' && ((s2 && outLog.id === s2.id) || (s4 && outLog.id === s4.id))) return 0;
-                        
-                        return Number(outLog.rendered_hours) * 3600000;
-                  }
+            const vh = (outLog as any)?.validated_hours;
+            if (vh !== undefined && vh !== null && !isNaN(Number(vh)) && Number(vh) >= 0) {
+                return Number(vh) * 3600000;
+            }
 
-                  if (requireApproved) {
-                        const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
-                        const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
-                        if (!inOk || !outOk) return 0;
-                  }
+            const offInStr = (outLog as any)?.official_time_in;
+            const offOutStr = (outLog as any)?.official_time_out;
+            if (offInStr && offOutStr) {
+                const base = new Date(inLog.timestamp);
+                const toDate = (t: string) => {
+                    const parts = t.split(":").map(Number);
+                    const d = new Date(base);
+                    d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                    return d;
+                };
+                const offIn = toDate(offInStr);
+                const offOut = toDate(offOutStr);
+                if (offOut.getTime() < offIn.getTime()) offOut.setDate(offOut.getDate() + 1);
+                return calculateHoursWithinOfficialTime(new Date(inLog.timestamp), new Date(outLog.timestamp), offIn, offOut);
+            }
 
-                  // Fallback: Live Schedule
-                  return calculateSessionDuration(inLog.timestamp, outLog.timestamp, shift, effectiveSchedule);
-             };
-
-             let t = 0;
-             t += calc(s1, s2, 'am');
-             t += calc(s3, s4, 'pm');
-             t += calc(s5, s6, 'ot');
-             return t;
+            return calculateSessionDuration(inLog.timestamp, outLog.timestamp, shift, effectiveSchedule);
         };
 
-        total = calculateHours(false);
+        total = calcFrozen(s1, s2, 'am') + calcFrozen(s3, s4, 'pm') + calcFrozen(s5, s6, 'ot');
 
-        return { date: day.date, s1, s2, s3, s4, s5, s6, total, flags: Array.from(dailyFlags), schedule: effectiveSchedule };
+        return { date: day.date, s1, s2, s3, s4, s5, s6, total, flags: Array.from(dailyFlags), schedule: effectiveSchedule, photoAmUrl, photoPmUrl, photoOtUrl };
       });
   }, [filteredAttendance, dbSchedule, schedule, allOvertimeShifts]);
 
@@ -2369,10 +2421,18 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                 const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
                                 
                                 let isLateTime = false;
-                                if (slot && slot.type === 'in' && day.schedule) {
-                                    if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.amIn);
-                                    if (idx === 2) isLateTime = isLate(slot.timestamp, day.schedule.pmIn);
-                                    if (idx === 4) isLateTime = isLate(slot.timestamp, day.schedule.otStart);
+                                if (slot && slot.type === 'in') {
+                                    const pairedOut = pairOut;
+                                    const toDate = (t: string, baseTs: number) => {
+                                        const d = new Date(baseTs);
+                                        const parts = t.split(":").map(Number);
+                                        d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                                        return d.getTime();
+                                    };
+                                    if (pairedOut && (pairedOut as any).official_time_in) {
+                                        const offInTs = toDate((pairedOut as any).official_time_in, slot.timestamp);
+                                        isLateTime = isLate(slot.timestamp, offInTs);
+                                    }
                                 }
 
                                 return (
@@ -2401,19 +2461,24 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                             </div>
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
-                                            slot.photoDataUrl ? (
+                                            (() => {
+                                              const paired = idx === 0 ? day.s2 : idx === 1 ? day.s1 : idx === 2 ? day.s4 : idx === 3 ? day.s3 : idx === 4 ? day.s6 : day.s5;
+                                              const groupFallback = idx < 2 ? day.photoAmUrl : idx < 4 ? day.photoPmUrl : day.photoOtUrl;
+                                              const photoUrl = getEntryPhoto(slot) || getEntryPhoto(paired) || groupFallback;
+                                              return photoUrl ? (
                                               <div
                                                 className="relative w-8 h-8 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
-                                                onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                                onClick={() => setSelectedImage({ url: photoUrl, timestamp: slot.timestamp })}
                                               >
-                                                <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                                <img src={photoUrl} alt="Log" className="w-full h-full object-cover" />
                                               </div>
-                                            ) : (
+                                              ) : (
                                               <div className="relative w-8 h-8 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-50 flex flex-col items-center justify-center text-gray-400">
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                                                 <span className="text-[8px] mt-0.5">System</span>
                                               </div>
-                                            )
+                                              );
+                                            })()
                                           )}
                                           <span className={`text-[9px] font-medium ${getStatusColorClass(slot)}`}>
                                             {formatStatusLabel(slot)}
@@ -2452,8 +2517,18 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                   const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
 
                                   let isLateTime = false;
-                                  if (slot && slot.type === 'in' && day.schedule) {
-                                      if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.amIn);
+                                  if (slot && slot.type === 'in') {
+                                      const pairedOut = pairOut;
+                                      const toDate = (t: string, baseTs: number) => {
+                                          const d = new Date(baseTs);
+                                          const parts = t.split(":").map(Number);
+                                          d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                                          return d.getTime();
+                                      };
+                                    if (pairedOut && (pairedOut as any).official_time_in) {
+                                          const offInTs = toDate((pairedOut as any).official_time_in, slot.timestamp);
+                                          isLateTime = isLate(slot.timestamp, offInTs);
+                                    }
                                   }
 
                                   return (
@@ -2476,19 +2551,24 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                             </div>
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
-                                            slot.photoDataUrl ? (
+                                            (() => {
+                                              const paired = idx === 0 ? day.s2 : day.s1;
+                                              const groupFallback = day.photoAmUrl;
+                                              const photoUrl = getEntryPhoto(slot) || getEntryPhoto(paired) || groupFallback;
+                                              return photoUrl ? (
                                               <div
                                                 className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
-                                                onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                                onClick={() => setSelectedImage({ url: photoUrl, timestamp: slot.timestamp })}
                                               >
-                                                <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                                <img src={photoUrl} alt="Log" className="w-full h-full object-cover" />
                                               </div>
-                                            ) : (
+                                              ) : (
                                               <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-50 flex flex-col items-center justify-center text-gray-400">
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                                                 <span className="text-[9px] mt-1">System</span>
                                               </div>
-                                            )
+                                              );
+                                            })()
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
                                             <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
@@ -2512,8 +2592,18 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                   const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
 
                                   let isLateTime = false;
-                                  if (slot && slot.type === 'in' && day.schedule) {
-                                      if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.pmIn);
+                                  if (slot && slot.type === 'in') {
+                                      const pairedOut = pairOut;
+                                      const toDate = (t: string, baseTs: number) => {
+                                          const d = new Date(baseTs);
+                                          const parts = t.split(":").map(Number);
+                                          d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                                          return d.getTime();
+                                      };
+                                    if (pairedOut && (pairedOut as any).official_time_in) {
+                                          const offInTs = toDate((pairedOut as any).official_time_in, slot.timestamp);
+                                          isLateTime = isLate(slot.timestamp, offInTs);
+                                    }
                                   }
 
                                   return (
@@ -2536,19 +2626,24 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                             </div>
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
-                                            slot.photoDataUrl ? (
+                                            (() => {
+                                              const paired = idx === 0 ? day.s4 : day.s3;
+                                              const groupFallback = day.photoPmUrl;
+                                              const photoUrl = getEntryPhoto(slot) || getEntryPhoto(paired) || groupFallback;
+                                              return photoUrl ? (
                                               <div
                                                 className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
-                                                onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                                onClick={() => setSelectedImage({ url: photoUrl, timestamp: slot.timestamp })}
                                               >
-                                                <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                                <img src={photoUrl} alt="Log" className="w-full h-full object-cover" />
                                               </div>
-                                            ) : (
+                                              ) : (
                                               <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-50 flex flex-col items-center justify-center text-gray-400">
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                                                 <span className="text-[9px] mt-1">System</span>
                                               </div>
-                                            )
+                                              );
+                                            })()
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
                                             <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
@@ -2572,8 +2667,18 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                   const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
 
                                   let isLateTime = false;
-                                  if (slot && slot.type === 'in' && day.schedule) {
-                                      if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.otStart);
+                                  if (slot && slot.type === 'in') {
+                                      const pairedOut = pairOut;
+                                      const toDate = (t: string, baseTs: number) => {
+                                          const d = new Date(baseTs);
+                                          const parts = t.split(":").map(Number);
+                                          d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                                          return d.getTime();
+                                      };
+                                    if (pairedOut && (pairedOut as any).official_time_in) {
+                                          const offInTs = toDate((pairedOut as any).official_time_in, slot.timestamp);
+                                          isLateTime = isLate(slot.timestamp, offInTs);
+                                    }
                                   }
 
                                   return (
@@ -2596,19 +2701,24 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
                                             </div>
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
-                                            slot.photoDataUrl ? (
+                                            (() => {
+                                              const paired = idx === 0 ? day.s6 : day.s5;
+                                              const groupFallback = day.photoOtUrl;
+                                              const photoUrl = getEntryPhoto(slot) || getEntryPhoto(paired) || groupFallback;
+                                              return photoUrl ? (
                                               <div
                                                 className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-100 cursor-zoom-in"
-                                                onClick={() => setSelectedImage({ url: slot.photoDataUrl, timestamp: slot.timestamp })}
+                                                onClick={() => setSelectedImage({ url: photoUrl, timestamp: slot.timestamp })}
                                               >
-                                                <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                                <img src={photoUrl} alt="Log" className="w-full h-full object-cover" />
                                               </div>
-                                            ) : (
+                                              ) : (
                                               <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-gray-50 flex flex-col items-center justify-center text-gray-400">
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                                                 <span className="text-[9px] mt-1">System</span>
                                               </div>
-                                            )
+                                              );
+                                            })()
                                           )}
                                           {!(isSessionAutoTimeOut && slot.type === 'out') && (
                                             <span className={`text-[10px] font-medium ${getStatusColorClass(slot)}`}>
@@ -2893,13 +3003,8 @@ export function AttendanceView({ idnumber, attendance, onUpdate, supervisorId, s
 
                         const noonCutoff = new Date(date).setHours(12, 30, 0, 0);
                         
-                        if (sched.otStart && entry.timestamp >= sched.otStart) {
-                             isLateEntry = isLate(entry.timestamp, sched.otStart);
-                        } else if (entry.timestamp >= noonCutoff) {
-                             isLateEntry = isLate(entry.timestamp, sched.pmIn);
-                        } else {
-                             isLateEntry = isLate(entry.timestamp, sched.amIn);
-                        }
+                        // Ledger-only: do not compute live late flags here
+                        isLateEntry = false;
                       }
 
                       return (
@@ -3425,6 +3530,7 @@ export function NoDeadlineModal({ onClose, onConfirm, week }: { onClose: () => v
 
 export function ReportsView({ 
   idnumber, 
+  studentId,
   reports, 
   drafts = [], 
   deadlines = [],
@@ -3432,6 +3538,7 @@ export function ReportsView({
   onDraftUpdate 
 }: { 
   idnumber: string; 
+  studentId?: number;
   reports: ReportEntry[]; 
   drafts?: ReportEntry[]; 
   deadlines?: { week: number; date: string }[];
@@ -3441,6 +3548,8 @@ export function ReportsView({
   const [showAllReportsModal, setShowAllReportsModal] = useState(false);
   const [showAllCardsModal, setShowAllCardsModal] = useState(false);
   const [showNoDeadlineModal, setShowNoDeadlineModal] = useState(false);
+  const [viewAllWeeks, setViewAllWeeks] = useState(false);
+  const [monthFilter, setMonthFilter] = useState<string>("");
   const [selectedWeek, setSelectedWeek] = useState<number | null>(null);
   const [viewingReport, setViewingReport] = useState<ReportEntry | null>(null);
   const [viewingDraft, setViewingDraft] = useState<ReportEntry | null>(null);
@@ -3791,7 +3900,8 @@ export function ReportsView({
       }
 
       const payload: any = {
-        idnumber,
+        idnumber: (idnumber?.trim() || (typeof window !== "undefined" ? (localStorage.getItem("idnumber") || "") : "")).trim(),
+        studentId,
         title: (file || existingFile) ? (file?.name || existingFile?.name) : title.trim(),
         body: JSON.stringify(reportData),
         fileName: file?.name || existingFile?.name,
@@ -3903,7 +4013,8 @@ export function ReportsView({
       }
 
       const payload: any = {
-        idnumber,
+        idnumber: (idnumber?.trim() || (typeof window !== "undefined" ? (localStorage.getItem("idnumber") || "") : "")).trim(),
+        studentId,
         title: (file || existingFile) ? (file?.name || existingFile?.name) : t,
         body: JSON.stringify(reportData),
         fileName: file?.name || existingFile?.name,
@@ -3986,6 +4097,136 @@ export function ReportsView({
       report: null,
       isLocked: false
   };
+
+  const getMonthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  const monthOptions = Array.from(new Set(slots.map(s => getMonthKey(s.end)))).sort();
+  const filteredSlots = monthFilter ? slots.filter(s => getMonthKey(s.end) === monthFilter) : slots;
+
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportAllWord = async () => {
+    const targets = filteredSlots.filter(s => !!s.report).map(s => s.report!) as ReportEntry[];
+    for (const r of targets) {
+      try {
+        if (r.fileUrl) {
+          const res = await fetch(r.fileUrl);
+          const blob = await res.blob();
+          const name = r.fileName || `Weekly_Report_Week_${r.week || ""}.docx`;
+          downloadBlob(blob, name);
+        } else {
+          const title = r.title || `Weekly Report ${r.week || ""}`;
+          const body = (r.body || "").replace(/\n/g, "<br/>");
+          const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title></head><body><h1 style="font-family:Arial; font-size:20px;">${title}</h1><div style="font-family:Arial; font-size:14px; line-height:1.6;">${body || "<i>No content</i>"}</div></body></html>`;
+          const blob = new Blob([html], { type: "application/msword" });
+          const name = `Weekly_Report_Week_${r.week || ""}.doc`;
+          downloadBlob(blob, name);
+        }
+      } catch (e) {
+        console.error("Export failed for report", r, e);
+      }
+    }
+  };
+
+  if (viewAllWeeks) {
+    return (
+      <div className="flex flex-col gap-3 animate-in fade-in duration-300">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between gap-3 flex-wrap">
+            <h2 className="text-sm font-bold text-gray-900">Weekly Reports</h2>
+            <div className="flex items-center gap-2">
+              <select
+                value={monthFilter}
+                onChange={(e) => setMonthFilter(e.target.value)}
+                className="px-3 py-1.5 rounded-lg border border-gray-300 text-xs font-semibold text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316]"
+              >
+                <option value="">All Months</option>
+                {monthOptions.map(m => {
+                  const [year, month] = m.split("-");
+                  const label = new Date(Number(year), Number(month)-1, 1).toLocaleString(undefined, { month: "short", year: "numeric" });
+                  return <option key={m} value={m}>{label}</option>;
+                })}
+              </select>
+              <button 
+                onClick={exportAllWord}
+                className="text-xs font-semibold text-[#F97316] hover:text-[#EA580C] px-3 py-1 rounded-lg hover:bg-orange-50 transition-colors"
+                title="Download each weekly report as Word"
+              >
+                Export
+              </button>
+              <button 
+                onClick={() => setViewAllWeeks(false)}
+                className="text-xs font-semibold text-gray-600 hover:text-gray-900 px-3 py-1 rounded-lg hover:bg-gray-100 transition-colors"
+              >
+                Back
+              </button>
+            </div>
+          </div>
+          <div className="p-4 space-y-2">
+            {filteredSlots.length === 0 ? (
+              <div className="text-center py-6 text-gray-500">No deadlines set</div>
+            ) : (
+              filteredSlots.map(slot => {
+                const rangeLabel = `${slot.start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} - ${slot.end.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+                const deadlineLabel = `Deadline: ${slot.end.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}`;
+                const statusChip = (
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    slot.status === "Reviewed" ? "bg-green-100 text-green-700" :
+                    slot.status === "Under Review" ? "bg-yellow-100 text-yellow-700" :
+                    slot.status === "Overdue" ? "bg-red-100 text-red-700" :
+                    slot.status === "Locked" ? "bg-gray-200 text-gray-700" :
+                    slot.status === "Future" ? "bg-blue-100 text-blue-700" :
+                    "bg-orange-100 text-orange-700"
+                  }`}>
+                    {slot.status}
+                  </span>
+                );
+                return (
+                  <button
+                    key={slot.week}
+                    onClick={() => {
+                      if (slot.report) setViewingReport(slot.report);
+                      else {
+                        setSelectedWeek(slot.week);
+                        setViewAllWeeks(false);
+                      }
+                    }}
+                    className="w-full text-left bg-gray-50 rounded-xl p-3 border border-gray-100 hover:bg-gray-100 transition-colors"
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2">
+                        <div className="font-bold text-gray-900 text-sm">Week {slot.week}</div>
+                        {statusChip}
+                      </div>
+                      <div className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                        {deadlineLabel}
+                      </div>
+                    </div>
+                    <div className="text-sm font-bold text-gray-900">{rangeLabel}</div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+        {viewingReport && (
+          <ReportDetailsModal 
+            report={viewingReport} 
+            onClose={() => setViewingReport(null)} 
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 animate-in fade-in duration-500">
@@ -4287,7 +4528,7 @@ export function ReportsView({
              <div className="px-3 py-1.5 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between flex-shrink-0">
                <span className="text-[10px] font-bold text-gray-700 uppercase tracking-wider">Weekly Reports</span>
                <button 
-                 onClick={() => setShowAllCardsModal(true)}
+                onClick={() => setViewAllWeeks(true)}
                  className="text-[10px] font-bold text-[#F97316] hover:text-[#EA580C] hover:underline transition-colors"
                >
                  View All

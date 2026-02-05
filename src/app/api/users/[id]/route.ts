@@ -22,6 +22,31 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   else if (userRole === 'instructor') tableName = 'users_instructors';
   else if (userRole === 'admin' || userRole === 'superadmin') tableName = 'users_super_admins';
 
+  // Resolve actor name for email "From: ..."
+  let actorName: string | null = null;
+  try {
+    const actorIdNum = String(body.actorId || "").trim();
+    const actorRole = String(body.actorRole || "").toLowerCase();
+    let actorTable = "";
+    if (actorIdNum) {
+      if (actorRole === "coordinator") actorTable = "users_coordinators";
+      else if (actorRole === "instructor") actorTable = "users_instructors";
+      else if (actorRole === "supervisor") actorTable = "users_supervisors";
+      else if (actorRole === "admin" || actorRole === "superadmin") actorTable = "users_super_admins";
+      else actorTable = "users_coordinators";
+      const { data: actor } = await admin
+        .from(actorTable)
+        .select("firstname, lastname")
+        .eq("idnumber", actorIdNum)
+        .maybeSingle();
+      if (actor) {
+        const fn = String(actor.firstname || "").trim();
+        const ln = String(actor.lastname || "").trim();
+        actorName = `${fn} ${ln}`.trim();
+      }
+    }
+  } catch {}
+
   // Fetch current state for audit log
   const { data: beforeData } = await admin.from(tableName).select("*").eq("id", id).single();
 
@@ -140,10 +165,17 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
                triggeredBy: body.actorId
             });
          } else if (newStatus === 'REJECTED') {
+            const noteRaw = typeof body.rejectionNote === 'string' ? body.rejectionNote : '';
+            const noteSafe = noteRaw.replace(/[<>&]/g, (c: string) => {
+              const map: Record<string, string> = { '<': '&lt;', '>': '&gt;', '&': '&amp;' };
+              return map[c] || '';
+            });
+            const actorRoleLabel = String(body.actorRole || '')
+              .toLowerCase() === 'instructor' ? 'Instructor' : 'Coordinator';
              await sendTransactionalEmail({
                to: afterData.email,
                subject: 'Your Account Application Update',
-               html: `<p>Hello ${afterData.firstname},</p><p>Your account application has been returned/rejected.</p><p>Reason: ${body.reason || 'Please contact admin.'}</p>`,
+              html: `<p>Hello ${afterData.firstname},</p><p>Your account application has been returned/rejected.</p>${noteSafe ? `<p><strong>${actorRoleLabel} note:</strong> ${noteSafe}</p>` : ''}${actorName ? `<p>From: ${actorName}</p>` : ''}`,
                emailType: 'APPLICATION_REJECTED',
                userId: id,
                triggeredBy: body.actorId
@@ -180,11 +212,53 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   }
   
   // First delete related records if necessary (though ON DELETE CASCADE should handle this if foreign keys are set up correctly)
-  if (tableName === 'users_coordinators') {
+  if (tableName === 'users_students') {
+      try {
+        // Fetch idnumber for cross-table cleanup (push_subscriptions, student_shift_schedules)
+        const { data: stuRow } = await admin
+          .from('users_students')
+          .select('idnumber')
+          .eq('id', id)
+          .maybeSingle();
+        const idnumber = stuRow?.idnumber ? String(stuRow.idnumber).trim() : null;
+        
+        // Remove dependent rows referencing the student_id to satisfy FKs
+        await admin.from('attendance').delete().eq('student_id', id);
+        await admin.from('validated_hours').delete().eq('student_id', id);
+        await admin.from('overtime_shifts').delete().eq('student_id', id);
+        await admin.from('student_shifts').delete().eq('student_id', id);
+        await admin.from('reports').delete().eq('student_id', id);
+
+        // Clean up non-FK tables keyed by idnumber
+        if (idnumber) {
+          try {
+            await admin.from('push_subscriptions').delete().eq('idnumber', idnumber);
+            await admin.from('student_shift_schedules').delete().eq('student_id', idnumber);
+          } catch {}
+        }
+      } catch (cleanupErr) {
+        const msg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+        console.error('Student cleanup before delete failed:', msg);
+        // Continue to attempt deletion; if FKs still prevent, DB will return error
+      }
+  } else if (tableName === 'users_coordinators') {
       await admin.from('coordinator_courses').delete().eq('coordinator_id', id);
   } else if (tableName === 'users_instructors') {
       await admin.from('instructor_courses').delete().eq('instructor_id', id);
       await admin.from('instructor_sections').delete().eq('instructor_id', id);
+  } else if (tableName === 'users_supervisors') {
+      // Detach students from this supervisor to avoid FK constraint errors
+      await admin.from('users_students').update({ supervisor_id: null }).eq('supervisor_id', id);
+      // Remove any shifts owned by this supervisor
+      await admin.from('shifts').delete().eq('supervisor_id', id);
+      // Clean up push subscriptions tied to this supervisor's idnumber (if available)
+      try {
+        const { data: supRow } = await admin.from('users_supervisors').select('idnumber').eq('id', id).maybeSingle();
+        const idnumber = supRow?.idnumber ? String(supRow.idnumber).trim() : null;
+        if (idnumber) {
+          await admin.from('push_subscriptions').delete().eq('idnumber', idnumber);
+        }
+      } catch {}
   }
 
   const { error } = await admin.from(tableName).delete().eq("id", id);

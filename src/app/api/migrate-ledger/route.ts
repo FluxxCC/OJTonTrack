@@ -112,8 +112,9 @@ export async function GET(req: Request) {
                             hours: Number(hours.toFixed(2)),
                             official_time_in: amShift.official_start,
                             official_time_out: amShift.official_end,
-                            validated_at: new Date().toISOString()
-                        }, { onConflict: 'student_id, date, shift_id' });
+                            validated_at: new Date().toISOString(),
+                            slot: 'AM'
+                        }, { onConflict: 'student_id, date, slot' });
                         
                         if (error) console.error("Upsert error AM:", error);
                         else results.push({ student: student.id, date: dateStr, shift: 'AM', hours });
@@ -142,8 +143,9 @@ export async function GET(req: Request) {
                             hours: Number(hours.toFixed(2)),
                             official_time_in: pmShift.official_start,
                             official_time_out: pmShift.official_end,
-                            validated_at: new Date().toISOString()
-                        }, { onConflict: 'student_id, date, shift_id' });
+                            validated_at: new Date().toISOString(),
+                            slot: 'PM'
+                        }, { onConflict: 'student_id, date, slot' });
 
                         if (error) console.error("Upsert error PM:", error);
                         else results.push({ student: student.id, date: dateStr, shift: 'PM', hours });

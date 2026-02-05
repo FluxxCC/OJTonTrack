@@ -33,6 +33,7 @@ import { SettingsView } from "./settings_ui";
 import { AcademicCatalogView } from "../superadmin/AcademicCatalogView";
 import { SchedulingView } from "./SchedulingView";
 import { supabase } from "@/lib/supabaseClient";
+import { CoordinatorProfileView } from "./ui";
 
 export default function CoordinatorPage() {
   const router = useRouter();
@@ -311,6 +312,7 @@ export default function CoordinatorPage() {
     { id: "approval", label: "Account Approval", icon: UserCheck, color: "text-green-600", bg: "bg-green-50" },
     { id: "academic-catalog", label: "Academic Catalog", icon: BookOpen, color: "text-gray-600", bg: "bg-gray-50" },
     { id: "scheduling", label: "Scheduling", icon: Calendar, color: "text-orange-600", bg: "bg-orange-50" },
+    { id: "profile", label: "Profile", icon: Settings, color: "text-gray-600", bg: "bg-gray-50" },
   ] as const;
 
   return (
@@ -339,7 +341,7 @@ export default function CoordinatorPage() {
         </div>
 
         {/* Navigation */}
-        <div className="flex-1 overflow-y-auto py-6 px-4 space-y-1">
+        <div className="flex-1 overflow-y-auto py-6 px-4 space-y-1 custom-scrollbar">
           <div className="text-xs font-bold text-gray-400 uppercase tracking-wider px-4 mb-2">Management</div>
           {navItems.map((item) => {
             const isActive = activeTab === item.id;
@@ -370,38 +372,7 @@ export default function CoordinatorPage() {
           })}
         </div>
 
-        {/* Footer */}
-        <div className="p-4 border-t border-gray-100 bg-gray-50/50">
-          <div className="flex items-center gap-3 mb-4 px-2">
-            <div className="h-10 w-10 rounded-full bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center text-white font-bold shadow-md overflow-hidden relative">
-              {(coordinatorName?.[0] || "C").toUpperCase()}
-            </div>
-            <div className="min-w-0">
-              <p className="text-sm font-bold text-gray-900 truncate">{coordinatorName || "Coordinator"}</p>
-              <p className="text-xs text-gray-500 truncate">Administrator</p>
-            </div>
-          </div>
-          {deferredPrompt && (
-            <button
-              onClick={handleInstallClick}
-              className="w-full flex items-center justify-center gap-2 text-[#F97316] hover:bg-orange-50 p-2 rounded-lg transition-colors text-sm font-semibold mb-2"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/>
-                <line x1="12" y1="15" x2="12" y2="3"/>
-              </svg>
-              <span>Install App</span>
-            </button>
-          )}
-          <button 
-            onClick={handleLogout}
-            className="w-full flex items-center justify-center gap-2 text-red-600 hover:bg-red-50 p-2 rounded-lg transition-colors text-sm font-semibold"
-          >
-            <LogOut size={16} />
-            Sign Out
-          </button>
-        </div>
+        
       </aside>
 
       {/* Main Content */}
@@ -415,23 +386,53 @@ export default function CoordinatorPage() {
           >
             <Menu size={24} />
           </button>
-          <div className="sr-only" aria-hidden="true"></div>
+          <div className="flex items-center gap-3 px-2">
+            <div className="h-9 w-9 rounded-full bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center text-white font-bold shadow-sm">
+              {(coordinatorName?.[0] || "C").toUpperCase()}
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-bold text-gray-900 truncate max-w-[12rem]">{coordinatorName || "Coordinator"}</p>
+              <p className="text-xs text-gray-500 truncate">Administrator</p>
+            </div>
+          </div>
         </div>
-        
-
+        <div className="flex items-center gap-3">
+          {deferredPrompt && (
+            <button
+              onClick={handleInstallClick}
+              className="flex items-center gap-2 text-[#F97316] hover:bg-orange-50 px-3 py-2 rounded-lg transition-colors text-sm font-semibold"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              <span>Install App</span>
+            </button>
+          )}
+          <button 
+            onClick={handleLogout}
+            className="flex items-center gap-2 text-red-600 hover:bg-red-50 px-3 py-2 rounded-lg transition-colors text-sm font-semibold"
+          >
+            <LogOut size={16} />
+            Sign Out
+          </button>
+        </div>
       </header>
 
       {/* Content Area */}
-      <main className="flex-1 overflow-hidden p-0 bg-[#F6F7F9] relative">
-         <div className="h-full w-full animate-in fade-in zoom-in-95 duration-300">
+      <main className="flex-1 min-h-[calc(100vh-64px)] overflow-y-auto p-6 bg-[#F6F7F9] relative custom-scrollbar flex flex-col">
+         <div className="w-full flex-1 animate-in fade-in zoom-in-95 duration-300">
             {activeTab === 'academic-catalog' ? (
-              <div className="p-6 h-full overflow-y-auto">
-                 <h1 className="text-2xl font-bold text-gray-900 mb-6">Academic Catalog</h1>
-                 <AcademicCatalogView />
+              <div>
+                <h1 className="text-2xl font-bold text-gray-900 mb-6">Academic Catalog</h1>
+                <AcademicCatalogView />
               </div>
+            ) : activeTab === 'profile' ? (
+              <CoordinatorProfileView />
             ) : activeTab === 'scheduling' ? (
-              <div className="p-6 h-full overflow-y-auto">
-                 <SchedulingView courses={availableCourses} />
+              <div>
+                <SchedulingView courses={availableCourses} />
               </div>
             ) : activeTab === 'approval' ? (
               <ApprovalsView 
@@ -521,7 +522,8 @@ export default function CoordinatorPage() {
                 onClick={async () => {
                   if (!deletingUser) return;
                   try {
-                    const res = await fetch(`/api/users/${deletingUser.id}`, { method: "DELETE" });
+                    const roleParam = deletingUser.role ? `?role=${encodeURIComponent(String(deletingUser.role))}` : "";
+                    const res = await fetch(`/api/users/${deletingUser.id}${roleParam}`, { method: "DELETE" });
                     const json = await res.json();
                     if (!res.ok) throw new Error(json?.error || "Failed to delete user");
                     setDeletingUser(null);

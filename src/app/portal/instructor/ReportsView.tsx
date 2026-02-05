@@ -46,6 +46,7 @@ let cachedReportsData: ReportEntry[] | null = null;
 let lastReportsFetchTime = 0;
 const REPORTS_CACHE_DURATION = 300000; // 5 minutes
 let cachedDeadlinesData: Record<string, Record<number, string>> | null = null;
+const studentIdCache = new Map<number, string>();
 
 interface ReportsViewProps {
     students: User[];
@@ -86,35 +87,64 @@ const ReportsView = React.memo(({ students, myIdnumber }: ReportsViewProps) => {
                        }
                    }
 
-                   setAllReports(prev => {
-                       const exists = prev.find(r => r.id === newReport.id);
+                   const resolveIdnumber = async (): Promise<string | undefined> => {
+                       const sid = Number(newReport.student_id);
+                       if (!sid || Number.isNaN(sid)) return undefined;
+                       if (!supabase) return undefined;
+                       if (studentIdCache.has(sid)) return studentIdCache.get(sid);
+                       try {
+                           const { data } = await supabase
+                             .from('users_students')
+                             .select('idnumber')
+                             .eq('id', sid)
+                             .maybeSingle();
+                           const idnum = data?.idnumber ? String(data.idnumber).trim() : undefined;
+                           if (idnum) studentIdCache.set(sid, idnum);
+                           return idnum;
+                       } catch {
+                           return undefined;
+                       }
+                   };
+
+                   const applyUpdate = (prevReports: ReportEntry[], idnum?: string) => {
+                       const exists = prevReports.find(r => r.id === newReport.id);
                        // Preserve comment as reports table update doesn't include it
                        const comment = exists?.instructorComment;
-                       // Check viewed status from DB column
-                       const isViewed = !!newReport.reviewedby;
+                       const isViewed = !!newReport.reviewed_by_id;
+                       const photos = Array.isArray(newReport.files) 
+                           ? newReport.files
+                               .filter((f: any) => f?.category === 'photo' || (f?.type || '').startsWith('image/'))
+                               .map((f: any) => ({ name: f.name, url: f.url, type: f.type }))
+                           : [];
 
                        const mapped: ReportEntry = {
                             id: newReport.id,
                             title: newReport.title,
-                            body: newReport.body,
-                            fileName: newReport.fileName,
-                            fileType: newReport.fileType,
-                            fileUrl: newReport.fileUrl,
-                            submittedAt: Number(newReport.submittedAt || newReport.ts),
+                            body: newReport.content,
+                            fileName: undefined,
+                            fileType: undefined,
+                            fileUrl: undefined,
+                            submittedAt: newReport.submitted_at ? new Date(newReport.submitted_at).getTime() : (newReport.created_at ? new Date(newReport.created_at).getTime() : Date.now()),
                             instructorComment: comment,
-                            idnumber: newReport.idnumber,
+                            idnumber: idnum,
                             isViewedByInstructor: isViewed,
-                            week
+                            week,
+                            photos
                        };
 
                        let newReports;
                        if (exists) {
-                           newReports = prev.map(r => r.id === mapped.id ? mapped : r);
+                           newReports = prevReports.map(r => r.id === mapped.id ? mapped : r);
                        } else {
-                           newReports = [...prev, mapped];
+                           newReports = [...prevReports, mapped];
                        }
                        cachedReportsData = newReports;
                        return newReports;
+                   };
+
+                   // Resolve idnumber asynchronously then update state
+                   resolveIdnumber().then(idnum => {
+                      setAllReports(prev => applyUpdate(prev, idnum));
                    });
                 } else if (payload.eventType === 'DELETE') {
                     setAllReports(prev => {
@@ -186,7 +216,8 @@ const ReportsView = React.memo(({ students, myIdnumber }: ReportsViewProps) => {
     const [weekOffset, setWeekOffset] = useState(0);
 
     // Filter Logic
-    const uniqueCourses = useMemo(() => Array.from(new Set(students.flatMap(s => (s.course || "").split(",").map(c => c.trim()).filter(Boolean)))).sort(), [students]);
+    const activeStudents = useMemo(() => students.filter(s => s.signup_status !== 'PENDING'), [students]);
+    const uniqueCourses = useMemo(() => Array.from(new Set(activeStudents.flatMap(s => (s.course || "").split(",").map(c => c.trim()).filter(Boolean)))).sort(), [activeStudents]);
     
     // Initialize filters with first available option if not set
     useEffect(() => {
@@ -196,12 +227,12 @@ const ReportsView = React.memo(({ students, myIdnumber }: ReportsViewProps) => {
     }, [uniqueCourses, filterCourse]);
 
     const uniqueSections = useMemo(() => {
-        let relevantStudents = students;
+        let relevantStudents = activeStudents;
         if (filterCourse) {
-            relevantStudents = students.filter(s => s.course === filterCourse);
+            relevantStudents = activeStudents.filter(s => s.course === filterCourse);
         }
         return Array.from(new Set(relevantStudents.flatMap(s => (s.section || "").split(",").map(se => se.trim()).filter(Boolean)))).sort();
-    }, [students, filterCourse]);
+    }, [activeStudents, filterCourse]);
 
     // Initialize section filter when course changes or on initial load
     useEffect(() => {
@@ -405,6 +436,7 @@ const ReportsView = React.memo(({ students, myIdnumber }: ReportsViewProps) => {
                             value={filterCourse}
                             onChange={e => { setFilterCourse(e.target.value); setFilterSection(""); }}
                             className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 bg-gray-50 hover:bg-white transition-all cursor-pointer min-w-[140px]"
+                            disabled={activeStudents.length === 0}
                         >
                             {uniqueCourses.map(c => <option key={c} value={c}>{c}</option>)}
                         </select>
@@ -412,6 +444,7 @@ const ReportsView = React.memo(({ students, myIdnumber }: ReportsViewProps) => {
                             value={filterSection}
                             onChange={e => setFilterSection(e.target.value)}
                             className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 bg-gray-50 hover:bg-white transition-all cursor-pointer min-w-[140px]"
+                            disabled={activeStudents.length === 0}
                         >
                             {uniqueSections.map(s => <option key={s} value={s}>{s}</option>)}
                         </select>
@@ -675,7 +708,8 @@ const ReportsView = React.memo(({ students, myIdnumber }: ReportsViewProps) => {
                                     <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Photo Evidence</h4>
                                     <div className="flex gap-3 overflow-x-auto pb-2 custom-scrollbar">
                                         {selectedReport.photos.map((photo: any, i: number) => {
-                                            const url = typeof photo === 'string' ? photo : photo.url || photo.fileUrl;
+                                            const raw = typeof photo === 'string' ? photo : (photo.url || photo.fileUrl || photo.secure_url || photo.photourl);
+                                            const url = raw && String(raw).startsWith('//') ? `https:${raw}` : raw;
                                             if (!url) return null;
                                             return (
                                                 <button 

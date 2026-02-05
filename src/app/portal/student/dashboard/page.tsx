@@ -6,7 +6,7 @@ import type { ReportEntry } from "../ui";
 
 import { calculateSessionDuration, determineShift, ShiftSchedule, normalizeTimeString, timeStringToMinutes, formatHours, buildSchedule, calculateShiftDurations, calculateHoursWithinOfficialTime } from "@/lib/attendance";
 
-type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; rendered_hours?: number; validated_hours?: number };
+type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected"; validatedAt?: number; rendered_hours?: number; validated_hours?: number; official_time_in?: string; official_time_out?: string; validated_by?: string };
 type ReportEntryLegacy = { text: string; fileName?: string; fileType?: string; submittedAt: number; timestamp?: number };
 
 type User = {
@@ -33,6 +33,8 @@ type AttendanceEntryRaw = {
   validated_at?: string;
   rendered_hours?: number;
   validated_hours?: number;
+  official_time_in?: string | null;
+  official_time_out?: string | null;
 };
 
 type ShiftRaw = {
@@ -88,6 +90,9 @@ export default function StudentDashboardPage() {
               validatedAt: validatedAtNum,
               rendered_hours: e.rendered_hours,
               validated_hours: e.validated_hours,
+              official_time_in: e.official_time_in || undefined,
+              official_time_out: e.official_time_out || undefined,
+              validated_by: e.validated_by || undefined,
             };
           }) as AttendanceEntry[];
           setAttendance(mapped);
@@ -144,6 +149,10 @@ export default function StudentDashboardPage() {
         if (Array.isArray(json.users) && json.users.length > 0) {
           const me = json.users[0];
           setStudent(me);
+          if (me && typeof (me as any).target_hours === "number" && (me as any).target_hours > 0) {
+            setTargetHours(Number((me as any).target_hours));
+            try { localStorage.setItem("targetHours", String((me as any).target_hours)); } catch {}
+          }
           if ((me as any).users_supervisors) {
               const joinedSup = (me as any).users_supervisors;
               setSupervisor({
@@ -370,58 +379,17 @@ export default function StudentDashboardPage() {
               if (!inLog || !outLog) return 0;
               if (inLog.status === 'Rejected' || outLog.status === 'Rejected') return 0;
 
-              // Validated Hours Priority (Ledger)
-              if (outLog.validated_hours !== undefined && outLog.validated_hours !== null && Number(outLog.validated_hours) >= 0) {
-                return Number(outLog.validated_hours) * 3600000;
-              }
-
-              // Rendered Hours Priority (Legacy)
-              if (outLog.rendered_hours !== undefined && outLog.rendered_hours !== null && Number(outLog.rendered_hours) >= 0) {
-                if (requireApproved) {
-                   const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
-                   const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
-                   if (!inOk || !outOk) return 0;
-                }
-                if (shift === 'pm' && s2 && outLog.id === s2.id) return 0;
-                if (shift === 'ot' && ((s2 && outLog.id === s2.id) || (s4 && outLog.id === s4.id))) return 0;
-                return Number(outLog.rendered_hours) * 3600000;
-              }
-
               if (requireApproved) {
                 const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
                 const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
                 if (!inOk || !outOk) return 0;
               }
 
-              // Snapshot Priority: If the out log contains a stored official_time_in / official_time_out
-              // (a frozen snapshot from validation/ledger), use that to calculate hours so that
-              // later changes to supervisor schedules don't affect historical totals.
-              if ((outLog as any).official_time_in && (outLog as any).official_time_out) {
-                try {
-                  const dateBase = new Date(inLog.timestamp);
-                  const parseTime = (t: string) => {
-                    const parts = t.split(':').map(Number);
-                    const d = new Date(dateBase);
-                    d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
-                    return d;
-                  };
-                  let offIn = parseTime((outLog as any).official_time_in);
-                  let offOut = parseTime((outLog as any).official_time_out);
-                  if (offOut.getTime() < offIn.getTime()) {
-                    offOut.setDate(offOut.getDate() + 1);
-                  }
-                  return calculateHoursWithinOfficialTime(
-                    new Date(inLog.timestamp),
-                    new Date(outLog.timestamp),
-                    offIn,
-                    offOut
-                  );
-                } catch (e) {
-                  console.error("Error calculating from snapshot", e);
-                }
+              // After approval gate, only use ledger validated_hours
+              if (outLog.validated_hours !== undefined && outLog.validated_hours !== null && Number(outLog.validated_hours) >= 0) {
+                return Number(outLog.validated_hours) * 3600000;
               }
-
-              return calculateSessionDuration(inLog.timestamp, outLog.timestamp, shift, effectiveSchedule);
+              return 0;
            };
 
            let t = 0;
@@ -437,17 +405,17 @@ export default function StudentDashboardPage() {
             if (!inLog || !outLog) return 0;
             if (inLog.status === 'Rejected' || outLog.status === 'Rejected') return 0;
             const vh = (outLog as any).validated_hours;
-            if (vh !== undefined && vh !== null && Number(vh) >= 0) {
+            // Use ledger hours only if the pair is approved/validated
+            const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
+            const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
+            if (inOk && outOk && vh !== undefined && vh !== null && Number(vh) >= 0) {
               if (shift === 'pm' && s2 && outLog.id === s2.id) return 0;
               if (shift === 'ot' && ((s2 && outLog.id === s2.id) || (s4 && outLog.id === s4.id))) return 0;
               return Number(vh) * 3600000;
             }
-            if (outLog.rendered_hours !== undefined && outLog.rendered_hours !== null && Number(outLog.rendered_hours) >= 0) {
-              if (shift === 'pm' && s2 && outLog.id === s2.id) return 0;
-              if (shift === 'ot' && ((s2 && outLog.id === s2.id) || (s4 && outLog.id === s4.id))) return 0;
-              return Number(outLog.rendered_hours) * 3600000;
-            }
-            if ((outLog as any).official_time_in && (outLog as any).official_time_out) {
+            // Do not use rendered_hours for totals
+            // Use frozen official snapshot ONLY if the pair is approved/validated
+            if (inOk && outOk && (outLog as any).official_time_in && (outLog as any).official_time_out) {
               try {
                 const dateBase = new Date(inLog.timestamp);
                 const parseTime = (t: string) => {

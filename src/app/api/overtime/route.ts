@@ -149,3 +149,105 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
+
+export async function PUT(req: Request) {
+  try {
+    const admin = getSupabaseAdmin();
+    if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
+
+    const body = await req.json();
+    const { date, start, end, supervisor_id, student_id, id } = body;
+
+    if ((!id && (!date || !student_id || !supervisor_id)) || !start || !end) {
+      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+    }
+
+    // Resolve supervisor internal ID if provided as idnumber
+    let supId: number | null = null;
+    if (supervisor_id) {
+      const { data: sup } = await admin.from("users_supervisors").select("id").eq("idnumber", supervisor_id).maybeSingle();
+      supId = sup?.id ?? null;
+    }
+
+    // Resolve student internal ID if provided as idnumber
+    let stuId: number | null = null;
+    if (student_id) {
+      if (typeof student_id === "string" && isNaN(Number(student_id))) {
+        const { data: st } = await admin.from("users_students").select("id").eq("idnumber", student_id).maybeSingle();
+        stuId = st?.id ?? null;
+      } else {
+        stuId = Number(student_id);
+      }
+    }
+
+    const payload = {
+      overtime_start: new Date(start).toISOString(),
+      overtime_end: new Date(end).toISOString(),
+    };
+
+    let query = admin.from("overtime_shifts").update(payload);
+
+    if (id) {
+      query = query.eq("id", id as any);
+    } else {
+      if (!date || !stuId || !supId) {
+        return NextResponse.json({ error: "Missing keys for update" }, { status: 400 });
+      }
+      query = query
+        .eq("effective_date", String(date))
+        .eq("student_id", stuId)
+        .eq("created_by_id", supId)
+        .eq("created_by_role", "supervisor");
+    }
+
+    const { error } = await query;
+    if (error) throw error;
+
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Unexpected error";
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}
+
+export async function DELETE(req: Request) {
+  try {
+    const admin = getSupabaseAdmin();
+    if (!admin) return NextResponse.json({ error: "Supabase admin not configured" }, { status: 500 });
+
+    const { searchParams } = new URL(req.url);
+    const idParam = searchParams.get("id");
+    const date = searchParams.get("date");
+    const student_id = searchParams.get("student_id");
+    const supervisor_id = searchParams.get("supervisor_id");
+
+    let del = admin.from("overtime_shifts").delete();
+
+    if (idParam) {
+      del = del.eq("id", Number(idParam));
+    } else {
+      if (!date || !student_id || !supervisor_id) {
+        return NextResponse.json({ error: "Missing keys for delete" }, { status: 400 });
+      }
+      // Resolve supervisor and student internal IDs
+      const { data: sup } = await admin.from("users_supervisors").select("id").eq("idnumber", supervisor_id).maybeSingle();
+      const { data: stu } = await admin.from("users_students").select("id").eq("idnumber", student_id).maybeSingle();
+      if (!sup?.id || !stu?.id) {
+        return NextResponse.json({ error: "Supervisor or student not found" }, { status: 404 });
+      }
+      del = del
+        .eq("effective_date", date)
+        .eq("student_id", stu.id)
+        .eq("created_by_id", sup.id)
+        .eq("created_by_role", "supervisor");
+    }
+
+    const { error } = await del;
+    if (error) throw error;
+
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Unexpected error";
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}

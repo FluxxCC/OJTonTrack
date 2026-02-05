@@ -20,10 +20,10 @@ export async function POST(req: Request) {
 
     const activeSyId = await getActiveSchoolYearId(admin);
 
-    // Hash the password
+    // Hash the password (kept for potential future immediate account creation)
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Check if user exists in students table
+    // Block if already approved
     const { data: existing } = await admin
       .from("users_students")
       .select("id, signup_status")
@@ -33,50 +33,41 @@ export async function POST(req: Request) {
     if (existing) {
       if (existing.signup_status === 'APPROVED') {
         return NextResponse.json({ error: "Account already exists and is approved." }, { status: 409 });
-      } else if (existing.signup_status === 'PENDING') {
-        return NextResponse.json({ error: "Account application is still under review." }, { status: 409 });
-      } else if (existing.signup_status === 'REJECTED') {
-        // Reuse rejected account
-        const { error: updateError } = await admin.from("users_students").update({
-          signup_status: 'PENDING',
-          password: hashedPassword,
-          firstname: firstname,
-          lastname: lastname,
-          course_id: courseId,
-          section_id: sectionId,
-          school_year_id: activeSyId,
-          updated_at: new Date().toISOString()
-        }).eq('id', existing.id);
-
-        if (updateError) {
-          return NextResponse.json({ error: updateError.message }, { status: 500 });
-        }
-
-        return NextResponse.json({ success: true, message: "Application resubmitted successfully.", user: { id: existing.id, idnumber } });
-      } else {
-        return NextResponse.json({ error: "User with this ID number or Email already exists" }, { status: 409 });
       }
     }
 
-    // Insert new student
-    const { data: user, error } = await admin.from("users_students").insert({
-      idnumber,
-      email,
-      password: hashedPassword, 
-      role: 'student',
-      firstname,
-      lastname,
-      course_id: courseId,
-      section_id: sectionId,
-      signup_status: 'PENDING',
-      school_year_id: activeSyId
-    }).select().single();
+    // Check latest pending request
+    const { data: latestReq } = await admin
+      .from("student_approval_requests")
+      .select("*")
+      .or(`email.eq.${String(email).toLowerCase()},school_id.eq.${idnumber}`)
+      .order("requested_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (latestReq && latestReq.status === "pending") {
+      return NextResponse.json({ error: "Application already pending review." }, { status: 409 });
     }
 
-    return NextResponse.json({ success: true, message: "Registration successful", user: { id: user.id, idnumber: user.idnumber } });
+    const fullName = `${firstname} ${lastname}`.trim();
+    const { data: reqRow, error: reqErr } = await admin
+      .from("student_approval_requests")
+      .insert({
+        email: String(email).toLowerCase(),
+        full_name: fullName,
+        school_id: idnumber,
+        course_id: Number(courseId),
+        section_id: Number(sectionId),
+        status: "pending",
+      })
+      .select()
+      .single();
+
+    if (reqErr) {
+      return NextResponse.json({ error: reqErr.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true, message: "Application submitted", request: { id: reqRow.id } });
 
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unexpected error";

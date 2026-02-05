@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabaseClient";
-import { buildSchedule, calculateSessionDuration, determineShift, calculateHoursWithinOfficialTime } from "@/lib/attendance";
+import { buildSchedule, determineShift } from "@/lib/attendance";
 import { getActiveSchoolYearId } from "../../../../lib/school-year";
 
 type AttendanceEvent = {
@@ -13,6 +13,7 @@ type AttendanceEvent = {
   rendered_hours?: number;
   official_time_in?: string | null;
   official_time_out?: string | null;
+  slot?: 'AM' | 'PM' | 'OT' | null;
 };
 
 export const dynamic = 'force-dynamic';
@@ -50,13 +51,11 @@ export async function GET(req: Request) {
 
     // ---------------------------------------------------------
     // NEW: Merge with validated_hours Ledger
+    // - Primary key: student_id + date + shift_id
+    // - Fallback: student_id + date (pick best match by highest hours)
     // ---------------------------------------------------------
     if (data && data.length > 0) {
         const studentIds = Array.from(new Set(data.map((d: any) => d.student_id)));
-        
-        // Fetch validated hours for these students
-        // Note: For large datasets, this might be heavy. Ideally we filter by school year if validated_hours has it.
-        // But validated_hours doesn't seem to have school_year_id. We rely on student_id matching.
         const { data: ledgerData } = await admin
           .from('validated_hours')
           .select('*')
@@ -64,20 +63,35 @@ export async function GET(req: Request) {
         
         if (ledgerData && ledgerData.length > 0) {
             const ledgerMap = new Map<string, any>();
+            const ledgerByDate = new Map<string, any[]>();
             ledgerData.forEach((l: any) => {
                 ledgerMap.set(`${l.student_id}-${l.date}-${l.shift_id}`, l);
+                const dk = `${l.student_id}-${l.date}`;
+                const arr = ledgerByDate.get(dk) || [];
+                arr.push(l);
+                ledgerByDate.set(dk, arr);
             });
 
             data.forEach((row: any) => {
-                if (row.type === 'out' && row.shift_id) {
-                    const key = `${row.student_id}-${row.attendance_date}-${row.shift_id}`;
-                    if (ledgerMap.has(key)) {
-                        const ledgerEntry = ledgerMap.get(key);
-                        // row.rendered_hours = Number(ledgerEntry.hours); // Don't overwrite legacy
-                        row.validated_hours = Number(ledgerEntry.hours);
-                        row.official_time_in = ledgerEntry.official_time_in;
-                        row.official_time_out = ledgerEntry.official_time_out;
-                    }
+                if (row.type !== 'out') return;
+                const primaryKey = `${row.student_id}-${row.attendance_date}-${row.shift_id}`;
+                if (row.shift_id && ledgerMap.has(primaryKey)) {
+                    const ledgerEntry = ledgerMap.get(primaryKey);
+                    row.validated_hours = Number(ledgerEntry.hours);
+                    row.official_time_in = ledgerEntry.official_time_in;
+                    row.official_time_out = ledgerEntry.official_time_out;
+                    row.slot = ledgerEntry.slot;
+                    return;
+                }
+                const dateKey = `${row.student_id}-${row.attendance_date}`;
+                const arr = ledgerByDate.get(dateKey);
+                if (arr && arr.length > 0) {
+                    // Choose the entry with highest hours as the best match
+                    const best = [...arr].sort((a, b) => Number(b.hours) - Number(a.hours))[0];
+                    row.validated_hours = Number(best.hours);
+                    row.official_time_in = best.official_time_in;
+                    row.official_time_out = best.official_time_out;
+                    row.slot = best.slot;
                 }
             });
         }
@@ -110,7 +124,8 @@ export async function GET(req: Request) {
       rendered_hours: row.rendered_hours,
       validated_hours: row.validated_hours,
       official_time_in: row.official_time_in,
-      official_time_out: row.official_time_out
+      official_time_out: row.official_time_out,
+      slot: row.slot
     });
     // Collect recent attendance (last 7 days)
     const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -345,26 +360,15 @@ export async function GET(req: Request) {
         if (!isApproved(log)) continue;
 
         if (log.type === 'in') {
-            if (currentIn) {
-                // Previous session incomplete
-                if (isPastDate) {
-                    const shift = determineShift(currentIn.ts, schedule);
-                    // Virtual Auto-Close Logic matching Frontend
-                    const outTs = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
-                    
-                    // Validated for calculation
-                    totalMs += calculateSessionDuration(currentIn.ts, outTs, 'am', schedule);
-                    totalMs += calculateSessionDuration(currentIn.ts, outTs, 'pm', schedule);
-                    totalMs += calculateSessionDuration(currentIn.ts, outTs, 'ot', schedule);
+                if (currentIn) {
                 }
-            }
             currentIn = log;
         } else if (log.type === 'out') {
             if (currentIn) {
                 // Pair found
-                if (log.rendered_hours != null && Number(log.rendered_hours) >= 0) {
-                    totalMs += Number(log.rendered_hours) * 3600000;
-                } else if (log.official_time_in && log.official_time_out) {
+                    if (log.validated_hours != null && Number(log.validated_hours) >= 0) {
+                        totalMs += Number(log.validated_hours) * 3600000;
+                    } else if (log.official_time_in && log.official_time_out) {
                      try {
                          const dateBase = new Date(currentIn.ts);
                          const parseTime = (t: string) => {
@@ -377,36 +381,35 @@ export async function GET(req: Request) {
                          const offOut = parseTime(log.official_time_out);
                          if (offOut.getTime() < offIn.getTime()) offOut.setDate(offOut.getDate() + 1);
                          
-                         totalMs += calculateHoursWithinOfficialTime(
-                             new Date(currentIn.ts), 
-                             new Date(log.ts), 
-                             offIn, 
-                             offOut
-                         );
+                         const start = Math.max(currentIn.ts, offIn.getTime());
+                         const end = Math.min(log.ts, offOut.getTime());
+                         totalMs += Math.max(0, end - start);
                      } catch (e) {
-                        totalMs += calculateSessionDuration(currentIn.ts, log.ts, 'am', schedule);
-                        totalMs += calculateSessionDuration(currentIn.ts, log.ts, 'pm', schedule);
-                        totalMs += calculateSessionDuration(currentIn.ts, log.ts, 'ot', schedule);
+                        const inTs = currentIn.ts;
+                        const outTs = log.ts;
+                        const shift = determineShift(inTs, schedule);
+                        const officialStart = shift === 'am' ? schedule.amIn : shift === 'pm' ? schedule.pmIn : schedule.otStart;
+                        const officialEnd = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
+                        const start = Math.max(inTs, officialStart);
+                        const end = Math.min(outTs, officialEnd);
+                        totalMs += Math.max(0, end - start);
                      }
                 } else {
-                    totalMs += calculateSessionDuration(currentIn.ts, log.ts, 'am', schedule);
-                    totalMs += calculateSessionDuration(currentIn.ts, log.ts, 'pm', schedule);
-                    totalMs += calculateSessionDuration(currentIn.ts, log.ts, 'ot', schedule);
+                    const inTs = currentIn.ts;
+                    const outTs = log.ts;
+                    const shift = determineShift(inTs, schedule);
+                    const officialStart = shift === 'am' ? schedule.amIn : shift === 'pm' ? schedule.pmIn : schedule.otStart;
+                    const officialEnd = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
+                    const start = Math.max(inTs, officialStart);
+                    const end = Math.min(outTs, officialEnd);
+                    totalMs += Math.max(0, end - start);
                 }
                 currentIn = null;
             }
         }
       }
 
-      // Handle trailing IN (Validated)
-      if (currentIn && isPastDate) {
-           const shift = determineShift(currentIn.ts, schedule);
-           const outTs = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
-           
-           totalMs += calculateSessionDuration(currentIn.ts, outTs, 'am', schedule);
-           totalMs += calculateSessionDuration(currentIn.ts, outTs, 'pm', schedule);
-           totalMs += calculateSessionDuration(currentIn.ts, outTs, 'ot', schedule);
-      }
+      if (currentIn && isPastDate) {}
 
       // 2. All Logs (Including Pending)
       let currentInAll: AttendanceEvent | null = null;
@@ -414,21 +417,12 @@ export async function GET(req: Request) {
         // No isApproved check
         if (log.type === 'in') {
             if (currentInAll) {
-                if (isPastDate) {
-                    const shift = determineShift(currentInAll.ts, schedule);
-                    const outTs = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
-                    allMs += calculateSessionDuration(currentInAll.ts, outTs, 'am', schedule);
-                    allMs += calculateSessionDuration(currentInAll.ts, outTs, 'pm', schedule);
-                    allMs += calculateSessionDuration(currentInAll.ts, outTs, 'ot', schedule);
-                }
             }
             currentInAll = log;
         } else if (log.type === 'out') {
             if (currentInAll) {
                 if (log.validated_hours != null && Number(log.validated_hours) >= 0) {
                     allMs += Number(log.validated_hours) * 3600000;
-                } else if (log.rendered_hours != null && Number(log.rendered_hours) >= 0) {
-                    allMs += Number(log.rendered_hours) * 3600000;
                 } else if (log.official_time_in && log.official_time_out) {
                      try {
                          const dateBase = new Date(currentInAll.ts);
@@ -442,35 +436,35 @@ export async function GET(req: Request) {
                          const offOut = parseTime(log.official_time_out);
                          if (offOut.getTime() < offIn.getTime()) offOut.setDate(offOut.getDate() + 1);
                          
-                         allMs += calculateHoursWithinOfficialTime(
-                             new Date(currentInAll.ts), 
-                             new Date(log.ts), 
-                             offIn, 
-                             offOut
-                         );
+                         const start = Math.max(currentInAll.ts, offIn.getTime());
+                         const end = Math.min(log.ts, offOut.getTime());
+                         allMs += Math.max(0, end - start);
                      } catch (e) {
-                        allMs += calculateSessionDuration(currentInAll.ts, log.ts, 'am', schedule);
-                        allMs += calculateSessionDuration(currentInAll.ts, log.ts, 'pm', schedule);
-                        allMs += calculateSessionDuration(currentInAll.ts, log.ts, 'ot', schedule);
+                        const inTs = currentInAll.ts;
+                        const outTs = log.ts;
+                        const shift = determineShift(inTs, schedule);
+                        const officialStart = shift === 'am' ? schedule.amIn : shift === 'pm' ? schedule.pmIn : schedule.otStart;
+                        const officialEnd = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
+                        const start = Math.max(inTs, officialStart);
+                        const end = Math.min(outTs, officialEnd);
+                        allMs += Math.max(0, end - start);
                      }
                 } else {
-                    allMs += calculateSessionDuration(currentInAll.ts, log.ts, 'am', schedule);
-                    allMs += calculateSessionDuration(currentInAll.ts, log.ts, 'pm', schedule);
-                    allMs += calculateSessionDuration(currentInAll.ts, log.ts, 'ot', schedule);
+                    const inTs = currentInAll.ts;
+                    const outTs = log.ts;
+                    const shift = determineShift(inTs, schedule);
+                    const officialStart = shift === 'am' ? schedule.amIn : shift === 'pm' ? schedule.pmIn : schedule.otStart;
+                    const officialEnd = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
+                    const start = Math.max(inTs, officialStart);
+                    const end = Math.min(outTs, officialEnd);
+                    allMs += Math.max(0, end - start);
                 }
                 currentInAll = null;
             }
         }
       }
       
-      // Handle trailing IN (All)
-      if (currentInAll && isPastDate) {
-           const shift = determineShift(currentInAll.ts, schedule);
-           const outTs = shift === 'am' ? schedule.amOut : shift === 'pm' ? schedule.pmOut : schedule.otEnd;
-           allMs += calculateSessionDuration(currentInAll.ts, outTs, 'am', schedule);
-           allMs += calculateSessionDuration(currentInAll.ts, outTs, 'pm', schedule);
-           allMs += calculateSessionDuration(currentInAll.ts, outTs, 'ot', schedule);
-      }
+      if (currentInAll && isPastDate) {}
     });
 
     const approvedEvents = events.filter(e => isApproved(e));

@@ -28,6 +28,7 @@ import { supabase } from "@/lib/supabaseClient";
 // --- Types ---
 
 export type User = {
+  [x: string]: any;
   id: number;
   idnumber: string;
   role: "student" | "instructor" | "supervisor" | "coordinator" | "superadmin";
@@ -77,9 +78,10 @@ type AdminAttendanceLog = {
   official_time_out?: string | null;
 };
 
-function getLogStatus(entry?: { status?: string | null } | null): "Pending" | "Approved" | "Rejected" {
+function getLogStatus(entry?: { status?: string | null } | null): "Pending" | "Approved" | "Rejected" | "Adjusted" {
   if (!entry || !entry.status || entry.status === "RAW") return "Pending";
-  if (entry.status === "Approved" || entry.status === "VALIDATED" || entry.status === "OFFICIAL" || entry.status === "ADJUSTED") return "Approved";
+  if (entry.status === "Approved" || entry.status === "VALIDATED" || entry.status === "OFFICIAL") return "Approved";
+  if (entry.status === "ADJUSTED") return "Adjusted";
   if (entry.status === "Rejected" || entry.status === "REJECTED") return "Rejected";
   return "Pending";
 }
@@ -89,6 +91,7 @@ function formatLogStatusLabel(entry: { status?: string | null; validated_by?: st
   const status = getLogStatus(entry);
   if (status === "Approved") return "Validated";
   if (status === "Rejected") return "Unvalidated";
+  if (status === "Adjusted") return "Adjusted";
   return "Pending";
 }
 
@@ -97,6 +100,7 @@ function getLogStatusColorClass(entry?: { status?: string | null; validated_by?:
   const status = getLogStatus(entry);
   if (status === "Approved") return "text-green-600";
   if (status === "Rejected") return "text-red-600";
+  if (status === "Adjusted") return "text-blue-600";
   return "text-yellow-600";
 }
 
@@ -194,7 +198,16 @@ export function SuperAdminHeader() {
 }
 
 export function EditTimeEntryModal({ entry, studentName, onClose, onSave }: { entry: any, studentName?: string, onClose: () => void, onSave: () => void }) {
-  const [ts, setTs] = useState<string>(entry.ts ? new Date(entry.ts).toISOString().slice(0, 16) : "");
+  const toLocalInputValue = (date: Date) => {
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const y = date.getFullYear();
+    const m = pad(date.getMonth() + 1);
+    const d = pad(date.getDate());
+    const hh = pad(date.getHours());
+    const mm = pad(date.getMinutes());
+    return `${y}-${m}-${d}T${hh}:${mm}`;
+  };
+  const [ts, setTs] = useState<string>(entry.ts ? toLocalInputValue(new Date(entry.ts)) : "");
   const [type, setType] = useState<string>(entry.type);
   const [status, setStatus] = useState<string>(() => {
       if (entry.status) return entry.status;
@@ -774,13 +787,7 @@ export function TimeEntryView() {
                 return Number(outLog.validated_hours) * 3600000;
             }
 
-            // Priority: Frozen rendered_hours (History)
-            if (outLog.rendered_hours !== undefined && outLog.rendered_hours !== null && Number(outLog.rendered_hours) >= 0) {
-                // Avoid double counting if s4/s6 is same as s2/s4 (though unlikely with smart pairing)
-                if (shift === 'pm' && outLog.id === s2?.id) return 0;
-                if (shift === 'ot' && (outLog.id === s2?.id || outLog.id === s4?.id)) return 0;
-                return Number(outLog.rendered_hours) * 3600000;
-            }
+            // Do not use rendered_hours for totals; rely on validated_hours or snapshot/clamp
 
             // Priority: Use Snapshot Rules if available (Ledger Logic)
             // This ensures historical calculations remain consistent even if global schedule changes.
@@ -856,9 +863,34 @@ export function TimeEntryView() {
         totalMsAll += total;
         totalValidatedMsAll += validatedTotal;
 
-        // Check for Lates
-        if (s1 && isLate((s1 as AdminAttendanceLog).ts, dailySchedule.amIn)) { (s1 as AdminAttendanceLog).is_late = true; (s1 as AdminAttendanceLog).late_minutes = Math.floor(((s1 as AdminAttendanceLog).ts - dailySchedule.amIn)/60000); }
-        if (s3 && isLate((s3 as AdminAttendanceLog).ts, dailySchedule.pmIn)) { (s3 as AdminAttendanceLog).is_late = true; (s3 as AdminAttendanceLog).late_minutes = Math.floor(((s3 as AdminAttendanceLog).ts - dailySchedule.pmIn)/60000); }
+        const toDate = (t: string, baseTs: number) => {
+            const d = new Date(baseTs);
+            const parts = t.split(":").map(Number);
+            d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+            return d.getTime();
+        };
+        if (s1) {
+            const baseTs = (s1 as AdminAttendanceLog).ts;
+            let officialInTs = dailySchedule.amIn;
+            if (s2 && (s2 as any).official_time_in) {
+                officialInTs = toDate((s2 as any).official_time_in, baseTs);
+            }
+            if (officialInTs && isLate(baseTs, officialInTs)) {
+                (s1 as AdminAttendanceLog).is_late = true;
+                (s1 as AdminAttendanceLog).late_minutes = Math.floor((baseTs - officialInTs)/60000);
+            }
+        }
+        if (s3) {
+            const baseTs = (s3 as AdminAttendanceLog).ts;
+            let officialInTs = dailySchedule.pmIn;
+            if (s4 && (s4 as any).official_time_in) {
+                officialInTs = toDate((s4 as any).official_time_in, baseTs);
+            }
+            if (officialInTs && isLate(baseTs, officialInTs)) {
+                (s3 as AdminAttendanceLog).is_late = true;
+                (s3 as AdminAttendanceLog).late_minutes = Math.floor((baseTs - officialInTs)/60000);
+            }
+        }
 
         return { 
             date: day.date, 
@@ -891,7 +923,7 @@ export function TimeEntryView() {
   );
   
   const statusCounts = useMemo(() => {
-    const counts = { Pending: 0, Approved: 0, Rejected: 0 };
+    const counts = { Pending: 0, Approved: 0, Rejected: 0, Adjusted: 0 };
     logs.forEach(log => {
         const status = getLogStatus(log);
         counts[status]++;
@@ -1973,6 +2005,7 @@ export function EditUserForm({
     firstname: user.firstname || "",
     middlename: user.middlename || "",
     lastname: user.lastname || "",
+    email: user.email || "",
     course: user.course || "",
     section: user.section || "",
     courseIds: user.courseIds || [],
@@ -2005,6 +2038,7 @@ export function EditUserForm({
         firstname: form.firstname,
         middlename: form.middlename,
         lastname: form.lastname,
+        email: form.email,
         role: user.role, // Include role to ensure correct table update
       };
 
@@ -2171,15 +2205,26 @@ export function EditUserForm({
         )}
 
         {user.role === "coordinator" && (
-          <label className="grid gap-1.5 md:col-span-2">
-            <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Assigned Courses</span>
-            <MultiSelect
-              options={availableCourses}
-              value={form.courseIds}
-              onChange={(ids) => setForm({ ...form, courseIds: ids })}
-              placeholder="Select courses to manage"
-            />
-          </label>
+          <>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Email</span>
+              <input
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
+                placeholder="Email address"
+              />
+            </label>
+            <label className="grid gap-1.5 md:col-span-2">
+              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Assigned Courses</span>
+              <MultiSelect
+                options={availableCourses}
+                value={form.courseIds}
+                onChange={(ids) => setForm({ ...form, courseIds: ids })}
+                placeholder="Select courses to manage"
+              />
+            </label>
+          </>
         )}
 
         {(user.role === "instructor" || user.role === "supervisor") && (
@@ -2275,6 +2320,7 @@ export function UserManagementView({
       if (query.trim()) params.set("search", query.trim());
       if (courseFilter) params.set("course", courseFilter);
       if (sectionFilter) params.set("section", sectionFilter);
+      if (filter === "student") params.set("approvedOnly", "true");
 
       const res = await fetch(`/api/users?${params.toString()}`);
       const data = await res.json();

@@ -1,10 +1,11 @@
 "use client";
 import React, { useState, useMemo, useEffect } from "react";
+import { MultiSelect } from "@/app/portal/superadmin/ui";
 import { Search, Users, Clock } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import { calculateSessionDuration, buildSchedule, formatHours } from "@/lib/attendance";
 
-export type RoleType = "student" | "instructor" | "supervisor" | "approval" | "assign" | "settings" | "academic-catalog" | "scheduling";
+export type RoleType = "student" | "instructor" | "supervisor" | "approval" | "assign" | "settings" | "academic-catalog" | "scheduling" | "profile";
 
 export interface User {
   id: number;
@@ -37,6 +38,10 @@ export interface Section {
   course_id: number;
 }
 
+type ConfirmAction =
+  | { type: "single" | "bulk"; id?: number; action: "approve" | "reject" }
+  | null;
+
 function formatCourseSection(courseStr?: string, sectionStr?: string): string {
   if (!courseStr) return "";
   if (!sectionStr) return courseStr;
@@ -66,7 +71,7 @@ export function Modal({ children, onClose, className }: { children: React.ReactN
       </div>
     </div>
   );
-}
+};
 
 function ConfirmationModal({ 
   message, 
@@ -179,62 +184,276 @@ function ConfirmationModal({
     </Modal>
   );
 }
+ 
+export function CoordinatorProfileView() {
+  const [loading, setLoading] = useState(false);
+  const [myProfile, setMyProfile] = useState<any>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
 
-export const ApprovalsView = ({ users, onView, onRefresh }: { 
-  users: User[]; 
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      try {
+        const idnumber = localStorage.getItem("idnumber") || "";
+        if (!idnumber) {
+          setMessage("Unable to load profile.");
+          return;
+        }
+        const res = await fetch(`/api/users?idnumber=${encodeURIComponent(idnumber)}&role=coordinator`);
+        const json = await res.json();
+        if (Array.isArray(json.users) && json.users.length > 0) {
+          setMyProfile(json.users[0]);
+        } else {
+          setMessage("Profile not found.");
+        }
+      } catch (e) {
+        setMessage("Failed to load profile.");
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, []);
+
+  const changePassword = async () => {
+    setMessage(null);
+    if (!myProfile?.idnumber) { setMessage("Unable to identify user."); return; }
+    if (!currentPassword) { setMessage("Current password is required."); return; }
+    if (!newPassword || newPassword.length < 6) { setMessage("Password must be at least 6 characters."); return; }
+    if (newPassword !== confirmPassword) { setMessage("Passwords do not match."); return; }
+    setLoading(true);
+    try {
+      const res = await fetch("/api/profile/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          idnumber: myProfile.idnumber, 
+          currentPassword, 
+          newPassword 
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Failed to update password");
+      setMessage("Password updated successfully.");
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to update password";
+      setMessage(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-in fade-in duration-500 p-6">
+      <div className="lg:col-span-2 space-y-6">
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden h-full">
+          <div className="h-40 bg-gradient-to-r from-orange-400 to-orange-600 relative">
+            <div className="absolute inset-0 bg-black/10"></div>
+          </div>
+          <div className="px-8 pb-8 relative">
+            <div className="flex flex-col sm:flex-row items-center sm:items-end gap-6 -mt-16 mb-6">
+              <div className="h-32 w-32 rounded-2xl border-4 border-white bg-white shadow-md flex items-center justify-center text-4xl font-bold text-gray-800 shrink-0">
+                {(myProfile?.firstname?.[0] || myProfile?.lastname?.[0] || "C").toUpperCase()}
+              </div>
+              <div className="text-center sm:text-left mb-2">
+                <h1 className="text-2xl font-bold text-gray-900">
+                  {myProfile ? `${myProfile.firstname || ""} ${myProfile.middlename ? myProfile.middlename + " " : ""}${myProfile.lastname || ""}`.trim() : "Coordinator"}
+                </h1>
+                <p className="text-gray-500 font-medium">{myProfile?.idnumber || ""}</p>
+              </div>
+            </div>
+            <div className="border-t border-gray-100 pt-8">
+              <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide mb-6 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                Personal Information
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-6 gap-x-8">
+                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
+                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">First Name</label>
+                  <div className="text-gray-900 font-semibold">{myProfile?.firstname || "-"}</div>
+                </div>
+                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
+                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Last Name</label>
+                  <div className="text-gray-900 font-semibold">{myProfile?.lastname || "-"}</div>
+                </div>
+                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
+                  <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Role</label>
+                  <div className="text-gray-900 font-semibold capitalize">Coordinator</div>
+                </div>
+              </div>
+            </div>
+            <div className="border-t border-gray-100 pt-8 mt-8">
+              <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide mb-6 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
+                Assigned Classes
+              </h3>
+              <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
+                <div className="flex flex-wrap gap-2">
+                  {myProfile?.course ? (
+                    formatCourseSection(myProfile.course, myProfile.section).split(", ").map((cls, idx) => (
+                      <span key={idx} className="px-3 py-1.5 bg-orange-50 text-orange-700 rounded-lg text-sm font-semibold border border-orange-100 shadow-sm">
+                        {cls}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-sm text-gray-500">No classes assigned</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="space-y-6">
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden sticky top-8">
+          <div className="p-6 border-b border-gray-100 bg-gray-50/50">
+            <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F97316]"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+              Security
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">Manage your account password.</p>
+          </div>
+          <div className="p-6 space-y-4">
+            {message && (
+              <div className={`text-sm rounded-xl p-4 border ${message.includes("success") ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200"}`}>
+                <span>{message}</span>
+              </div>
+            )}
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">Current Password</label>
+                <input
+                  type="password"
+                  value={currentPassword}
+                  onChange={e => setCurrentPassword(e.target.value)}
+                  className="w-full rounded-xl border border-gray-300 bg-white text-black placeholder:text-gray-600 focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all shadow-sm px-4 py-2.5 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">New Password</label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={e => setNewPassword(e.target.value)}
+                  className="w-full rounded-xl border border-gray-300 bg-white text-black placeholder:text-gray-600 focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all shadow-sm px-4 py-2.5 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">Confirm New Password</label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={e => setConfirmPassword(e.target.value)}
+                  className="w-full rounded-xl border border-gray-300 bg-white text-black placeholder:text-gray-600 focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all shadow-sm px-4 py-2.5 text-sm"
+                />
+              </div>
+            </div>
+            <div>
+              <button
+                onClick={changePassword}
+                disabled={loading}
+                className="inline-flex items-center justify-center gap-2 bg-[#F97316] text-white px-4 py-2 rounded-xl hover:bg-[#EA580C] transition-colors font-semibold shadow-sm active:scale-95 text-sm disabled:opacity-50"
+              >
+                Save Password
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type ApprovalsViewProps = {
+  users: User[];
   onView: (user: User) => void;
   onRefresh: () => void;
-}) => {
-  const students = useMemo(() => users.filter(u => u.role === "student"), [users]);
+};
+
+export function ApprovalsView({ users, onView, onRefresh }: ApprovalsViewProps) {
+  type RequestItem = {
+    id: number;
+    full_name: string;
+    email: string;
+    school_id: string;
+    course?: string;
+    section?: string;
+    status: "pending" | "approved" | "rejected";
+  };
+  const [requests, setRequests] = useState<RequestItem[]>([]);
+  useEffect(() => {
+    const fetchRequests = async () => {
+      try {
+        const res = await fetch("/api/student-approval-requests?limit=2000&status=pending");
+        const json = await res.json();
+        if (res.ok && Array.isArray(json.requests)) {
+          setRequests(json.requests);
+        } else {
+          setRequests([]);
+        }
+      } catch {
+        setRequests([]);
+      }
+    };
+    fetchRequests();
+  }, [onRefresh]);
   const [searchTerm, setSearchTerm] = useState("");
   const [filterCourse, setFilterCourse] = useState("");
   const [filterSection, setFilterSection] = useState("");
   const [filterStatus, setFilterStatus] = useState("PENDING");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [actionLoading, setActionLoading] = useState(null as number | null);
   const [isBulkApproving, setIsBulkApproving] = useState(false);
-  const [confirmAction, setConfirmAction] = useState<{
-    type: "single" | "bulk";
-    id?: number;
-    action: "approve" | "reject";
-  } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [rejectionNote, setRejectionNote] = useState("");
 
-  const uniqueCourses = useMemo(
-    () =>
-      Array.from(
-        new Set(students.map(s => s.course).filter((c): c is string => !!c))
-      ).sort(),
-    [students]
-  );
+  const uniqueCourses = useMemo(() => {
+    const courses = requests.map(s => s.course).filter(c => !!c) as string[];
+    return Array.from(new Set(courses)).sort();
+  }, [requests]);
 
   const uniqueSections = useMemo(() => {
-    const subset = filterCourse ? students.filter(s => s.course === filterCourse) : students;
-    return Array.from(
-      new Set(subset.map(s => s.section).filter((s): s is string => !!s))
-    ).sort();
-  }, [students, filterCourse]);
+    const subset = filterCourse ? requests.filter(s => s.course === filterCourse) : requests;
+    const sections = subset.map(s => s.section).filter(s => !!s) as string[];
+    return Array.from(new Set(sections)).sort();
+  }, [requests, filterCourse]);
 
   const filteredStudents = useMemo(() => {
     const normalize = (s: string) => s.toLowerCase().trim();
-    return students
+    return requests
       .filter(s => {
         const search = normalize(searchTerm);
-        const name = normalize(`${s.firstname || ""} ${s.lastname || ""}`);
-        const id = normalize(s.idnumber);
+        const name = normalize(s.full_name || "");
+        const id = normalize(s.school_id || "");
         const matchesSearch = !search || name.includes(search) || id.includes(search);
 
         const matchesCourse = !filterCourse || s.course === filterCourse;
         const matchesSection = !filterSection || s.section === filterSection;
 
-        const status = s.signup_status || "APPROVED";
+        const status = String(s.status || "pending").toUpperCase();
         const matchesStatus =
           filterStatus === "ALL" ? true : status === filterStatus;
 
         return matchesSearch && matchesCourse && matchesSection && matchesStatus;
       })
-      .sort((a, b) => (a.lastname || "").localeCompare(b.lastname || ""));
-  }, [students, searchTerm, filterCourse, filterSection, filterStatus]);
+      .sort((a, b) => {
+        const lnameA = (a.full_name || "").trim().split(" ").slice(-1)[0] || "";
+        const lnameB = (b.full_name || "").trim().split(" ").slice(-1)[0] || "";
+        const fnameA = (a.full_name || "").trim().split(" ")[0] || "";
+        const fnameB = (b.full_name || "").trim().split(" ")[0] || "";
+        return (
+          lnameA.localeCompare(lnameB, undefined, { sensitivity: "base" }) ||
+          fnameA.localeCompare(fnameB, undefined, { sensitivity: "base" }) ||
+          (a.school_id || "").localeCompare(b.school_id || "", undefined, { sensitivity: "base" })
+        );
+      });
+  }, [requests, searchTerm, filterCourse, filterSection, filterStatus]);
 
   const toggleSelection = (id: number) => {
     setSelectedIds(prev => {
@@ -246,9 +465,7 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
   };
 
   const toggleAll = () => {
-    const pendingStudents = filteredStudents.filter(
-      s => (s.signup_status || "APPROVED") !== "APPROVED"
-    );
+    const pendingStudents = filteredStudents.filter(s => String(s.status).toUpperCase() === "PENDING");
     if (pendingStudents.length === 0) {
       setSelectedIds(new Set());
       return;
@@ -274,27 +491,32 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
 
       await Promise.all(
         ids.map(id =>
-          fetch(`/api/users/${id}`, {
-            method: "PUT",
+          fetch(`/api/student-approval-requests/${id}/${action}`, {
+            method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              signup_status: action === "approve" ? "APPROVED" : "REJECTED",
               actorId,
               actorRole: "coordinator",
-              reason: `Coordinator ${action}`,
-              rejectionNote: action === "reject" ? note || "" : undefined,
+              actorName: `${localStorage.getItem("firstname") || ""} ${localStorage.getItem("lastname") || ""}`.trim(),
+              note: action === "reject" ? note || "" : undefined,
             }),
           }).then(async res => {
             if (!res.ok) {
               const err = await res.json().catch(() => ({}));
-              throw new Error(err.error || `Failed to ${action} ${id}`);
+              throw new Error(err.error || `Failed to ${action} request ${id}`);
             }
             return res;
           })
         )
       );
 
-      onRefresh();
+      try {
+        const res = await fetch("/api/student-approval-requests?limit=2000&status=pending");
+        const json = await res.json();
+        if (res.ok && Array.isArray(json.requests)) {
+          setRequests(json.requests);
+        }
+      } catch {}
       setSelectedIds(new Set());
     } catch (e: any) {
       alert(e.message || `Failed to ${action} one or more students`);
@@ -377,7 +599,7 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto bg-white">
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden bg-white custom-scrollbar">
         <div className="h-full">
             <table className="w-full text-xs text-left">
               <thead className="bg-gray-50 text-gray-500 font-medium border-b border-gray-100 sticky top-0 z-10">
@@ -388,17 +610,17 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                       className="rounded border-gray-300 text-orange-600 focus:ring-orange-500 w-3.5 h-3.5"
                       onChange={toggleAll}
                       checked={
-                        filteredStudents.some(s => (s.signup_status || "APPROVED") !== "APPROVED") &&
+                        filteredStudents.some(s => String(s.status).toUpperCase() === "PENDING") &&
                         selectedIds.size ===
-                          filteredStudents.filter(s => (s.signup_status || "APPROVED") !== "APPROVED").length &&
-                        filteredStudents.filter(s => (s.signup_status || "APPROVED") !== "APPROVED").length > 0
+                          filteredStudents.filter(s => String(s.status).toUpperCase() === "PENDING").length &&
+                        filteredStudents.filter(s => String(s.status).toUpperCase() === "PENDING").length > 0
                       }
                     />
                   </th>
                   <th className="px-3 py-1.5">Student</th>
                   <th className="px-3 py-1.5">ID Number</th>
+                  <th className="px-3 py-1.5">Email</th>
                   <th className="px-3 py-1.5">Course & Section</th>
-                  <th className="px-3 py-1.5">Status</th>
                   <th className="px-3 py-1.5">Action</th>
                 </tr>
               </thead>
@@ -411,7 +633,7 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                   </tr>
                 ) : (
                   filteredStudents.map(s => {
-                    const isPending = (s.signup_status || "APPROVED") !== "APPROVED";
+                    const isPending = String(s.status).toUpperCase() === "PENDING";
                     const isSelected = selectedIds.has(s.id);
                     return (
                       <tr
@@ -431,28 +653,26 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                         <td className="px-3 py-1 font-medium text-gray-900">
                           <button
                             type="button"
-                            onClick={() => onView(s)}
+                            onClick={() => onView({
+                              id: s.id,
+                              idnumber: s.school_id,
+                              role: "student",
+                              firstname: s.full_name.split(" ")[0],
+                              lastname: s.full_name.split(" ").slice(-1)[0],
+                              email: s.email,
+                              course: s.course,
+                              section: s.section,
+                              signup_status: "PENDING",
+                            })}
                             className="hover:text-orange-600 hover:underline text-left font-semibold"
                           >
-                            {s.firstname} {s.lastname}
+                            {s.full_name.trim().split(" ").slice(-1)[0] || ""}{", "}{s.full_name.trim().split(" ")[0] || ""}
                           </button>
                         </td>
-                        <td className="px-3 py-1 text-gray-600">{s.idnumber}</td>
+                        <td className="px-3 py-1 text-gray-600">{s.school_id}</td>
+                        <td className="px-3 py-1 text-gray-600">{s.email ? s.email : "-"}</td>
                         <td className="px-3 py-1 text-gray-600">
                           {formatCourseSection(s.course, s.section)}
-                        </td>
-                        <td className="px-3 py-1">
-                          <span
-                            className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium border ${
-                              !isPending
-                                ? "bg-green-50 text-green-700 border-green-200"
-                                : s.signup_status === "REJECTED"
-                                ? "bg-red-50 text-red-700 border-red-200"
-                                : "bg-yellow-50 text-yellow-700 border-yellow-200"
-                            }`}
-                          >
-                            {s.signup_status || "APPROVED"}
-                          </span>
                         </td>
                         <td className="px-3 py-1">
                           {isPending && (
@@ -492,7 +712,6 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                 )}
               </tbody>
             </table>
-          </div>
 
           <div className="md:hidden">
             {filteredStudents.length === 0 ? (
@@ -502,7 +721,7 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
             ) : (
               <div className="divide-y divide-gray-100">
                 {filteredStudents.map(s => {
-                  const isPending = (s.signup_status || "APPROVED") !== "APPROVED";
+                  const isPending = String(s.status).toUpperCase() === "PENDING";
                   const isSelected = selectedIds.has(s.id);
                   return (
                     <div
@@ -512,30 +731,29 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex-1">
                           <button
-                            onClick={() => onView(s)}
+                            onClick={() => onView({
+                              id: s.id,
+                              idnumber: s.school_id,
+                              role: "student",
+                              firstname: s.full_name.split(" ")[0],
+                              lastname: s.full_name.split(" ").slice(-1)[0],
+                              email: s.email,
+                              course: s.course,
+                              section: s.section,
+                              signup_status: "PENDING",
+                            })}
                             className="text-sm font-bold text-gray-900 hover:text-orange-600 hover:underline text-left"
                           >
-                            {s.firstname} {s.lastname}
+                            {s.full_name.trim().split(" ").slice(-1)[0] || ""}{", "}{s.full_name.trim().split(" ")[0] || ""}
                           </button>
                           <div className="text-xs text-gray-600 mt-0.5">
-                            {s.idnumber}
+                            {s.school_id}
                           </div>
                           <div className="text-xs text-gray-500 mt-0.5">
                             {formatCourseSection(s.course, s.section)}
                           </div>
                         </div>
                         <div className="flex items-center gap-3">
-                          <span
-                            className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border ${
-                              !isPending
-                                ? "bg-green-50 text-green-700 border-green-200"
-                                : s.signup_status === "REJECTED"
-                                ? "bg-red-50 text-red-700 border-red-200"
-                                : "bg-yellow-50 text-yellow-700 border-yellow-200"
-                            }`}
-                          >
-                            {s.signup_status || "APPROVED"}
-                          </span>
                           {isPending && (
                             <input
                               type="checkbox"
@@ -632,106 +850,12 @@ export const ApprovalsView = ({ users, onView, onRefresh }: {
             isLoading={actionLoading !== null || isBulkApproving}
           />
         )}
+      </div>
     </div>
   );
 }
 
-const MultiSelect = ({ options, value, onChange, placeholder }: { options: {id: number, name: string}[], value: number[], onChange: (val: number[]) => void, placeholder: string }) => {
-  const [open, setOpen] = useState(false);
-  const containerRef = React.useRef<HTMLDivElement>(null);
-
-  React.useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-
-    if (open) {
-      document.addEventListener("mousedown", handleClickOutside);
-    }
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
-  }, [open]);
-
-  return (
-    <div className="relative" ref={containerRef}>
-      <button 
-        type="button" 
-        onClick={() => setOpen(!open)} 
-        className="w-full text-left rounded-lg border border-gray-300 px-3 py-1.5 text-[#1F2937] bg-white flex justify-between items-center focus:ring-2 focus:ring-[#F97316]/20 transition-all hover:border-gray-400 group"
-      >
-        <span className={`text-xs ${value.length > 0 ? 'text-gray-900 font-medium' : 'text-gray-500'}`}>
-          {value.length > 0 ? `${value.length} selected` : placeholder}
-        </span>
-        <span className="text-[10px] text-gray-400 group-hover:text-gray-600 transition-colors">▼</span>
-      </button>
-
-      {open && (
-        <div className="absolute z-50 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-xl p-1.5 flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100">
-          {options.map(opt => {
-            const isSelected = value.includes(opt.id);
-            return (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => {
-                  if (isSelected) {
-                    onChange(value.filter(v => v !== opt.id));
-                  } else {
-                    onChange([...value, opt.id]);
-                  }
-                }}
-                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors text-left group/item ${isSelected ? 'bg-orange-50' : 'hover:bg-gray-50'}`}
-              >
-                <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${isSelected ? 'border-orange-500 bg-orange-500' : 'border-gray-300 bg-white group-hover/item:border-orange-300'}`}>
-                  {isSelected && (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                  )}
-                </div>
-                <span className={`text-xs font-medium ${isSelected ? 'text-orange-900' : 'text-[#1F2937]'}`}>{opt.name}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {value.length > 0 && (
-        <div className="mt-2 animate-in fade-in slide-in-from-top-2 duration-300">
-          <div className="flex items-center justify-between mb-1.5 px-1">
-            <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-widest">Assigned Classes</span>
-            <button 
-              type="button"
-              onClick={() => onChange([])}
-              className="text-[10px] font-extrabold text-red-500 uppercase tracking-widest hover:text-red-700 transition-colors flex items-center gap-1"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>
-              Clear All
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {options.filter(o => value.includes(o.id)).map(o => (
-              <span key={o.id} className="inline-flex items-center px-2 py-1 rounded-md bg-orange-50 text-orange-700 text-[10px] font-bold border border-orange-100 shadow-sm transition-all hover:bg-orange-100 hover:border-orange-200 group/tag">
-                {o.name}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onChange(value.filter(v => v !== o.id));
-                  }}
-                  className="ml-2 p-0.5 hover:bg-orange-200 rounded-full text-orange-400 group-hover/tag:text-orange-600 transition-colors"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                </button>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
+ 
 
 // --- Forms ---
 
@@ -1180,7 +1304,7 @@ export function AddUserForm({ role, onSuccess, onClose, availableCourses, availa
       )}
     </div>
   );
-}
+};
 
 export function EditUserForm({ user, onSuccess, onClose, availableCourses, availableSections, users }: { user: User; onSuccess: () => void; onClose: () => void; availableCourses: Course[]; availableSections: Section[]; users: User[] }) {
   const [form, setForm] = useState({
@@ -1731,6 +1855,10 @@ export function ViewUserDetails({ user, users, onClose }: { user: User; users: U
           <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
             <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Full Name</p>
             <p className="text-xs font-semibold text-gray-900">{user.firstname} {user.middlename ? user.middlename + " " : ""}{user.lastname}</p>
+          </div>
+          <div className="p-2.5 bg-white border border-gray-100 rounded-lg shadow-sm">
+            <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wide mb-0.5">Email</p>
+            <p className="text-xs font-semibold text-gray-900">{user.email || "N/A"}</p>
           </div>
 
           {user.role === "student" && (
@@ -2436,7 +2564,7 @@ export function UsersView({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto bg-white">
+      <div className="flex-1 bg-white">
 
         {pendingUsers.length > 0 && (
           <div className="animate-in fade-in slide-in-from-top-4 duration-500">

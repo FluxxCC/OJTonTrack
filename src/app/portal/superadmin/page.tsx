@@ -10,7 +10,8 @@ import {
   Menu, 
   LogOut,
   ChevronRight,
-  BookOpen
+  BookOpen,
+  Calendar
 } from "lucide-react";
 import { 
   UserManagementView, 
@@ -22,6 +23,7 @@ import {
   Section 
 } from "./ui";
 import { AcademicCatalogView } from "./AcademicCatalogView";
+import { SchedulingView } from "../coordinator/SchedulingView";
 
 export default function SuperAdminPage() {
   const router = useRouter();
@@ -36,7 +38,7 @@ export default function SuperAdminPage() {
 
   // Layout state
   const [isSidebarOpen, setSidebarOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"view-account" | "new-account" | "time-entry" | "system-logs" | "academic-catalog">("view-account");
+  const [activeTab, setActiveTab] = useState<"view-account" | "new-account" | "time-entry" | "system-logs" | "academic-catalog" | "scheduling">("view-account");
   const [isMobile, setIsMobile] = useState(false);
 
   // Mobile check
@@ -163,6 +165,7 @@ export default function SuperAdminPage() {
     { id: "time-entry", label: "Time Entry", icon: Clock },
     { id: "system-logs", label: "System Logs", icon: ShieldCheck },
     { id: "academic-catalog", label: "Academic Catalog", icon: BookOpen },
+    { id: "scheduling", label: "Scheduling", icon: Calendar },
   ];
 
   return (
@@ -293,6 +296,14 @@ export default function SuperAdminPage() {
              {activeTab === 'system-logs' && <SystemLogsView />}
 
              {activeTab === 'academic-catalog' && <AcademicCatalogView />}
+             
+             {activeTab === 'scheduling' && (
+               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
+                 <div className="p-4 sm:p-6">
+                   <SchedulingView courses={availableCourses} />
+                 </div>
+               </div>
+             )}
            </div>
         </main>
       </div>

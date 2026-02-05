@@ -36,7 +36,7 @@ import * as XLSX from 'xlsx-js-style';
 type ShiftSchedule = LibShiftSchedule;
 
 // --- Types ---
-export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; photourl?: string; photoUrl?: string; status?: "Pending" | "Approved" | "Rejected" | "Validated" | "VALIDATED" | "OFFICIAL" | "ADJUSTED" | "Official" | "REJECTED"; validatedAt?: number; idnumber?: string; studentId?: number; validated_by?: string | null; is_overtime?: boolean; rendered_hours?: number; official_time_in?: string; official_time_out?: string; };
+export type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; photourl?: string; photoUrl?: string; status?: "Pending" | "Approved" | "Rejected" | "Validated" | "VALIDATED" | "OFFICIAL" | "ADJUSTED" | "Official" | "REJECTED"; validatedAt?: number; idnumber?: string; studentId?: number; validated_by?: string | null; is_overtime?: boolean; rendered_hours?: number; validated_hours?: number; official_time_in?: string; official_time_out?: string; slot?: "AM" | "PM" | "OT"; };
 export type DateOverride = {
   date: string; // YYYY-MM-DD
   am?: { start: string; end: string };
@@ -1013,6 +1013,8 @@ export function StudentAttendanceDetailView({
   const [otHours, setOtHours] = useState(0);
   const [otMinutes, setOtMinutes] = useState(0);
   const [isSavingOt, setIsSavingOt] = useState(false);
+  const [isEditOt, setIsEditOt] = useState(false);
+  const [editingOtDateStr, setEditingOtDateStr] = useState<string | null>(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   // scheduleSettings state removed, using props instead
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -1315,27 +1317,77 @@ export function StudentAttendanceDetailView({
         const durationMs = (otHours * 60 * 60 * 1000) + (otMinutes * 60 * 1000);
         const tsOut = new Date(tsIn.getTime() + durationMs);
         
-        await fetch("/api/overtime", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                date: overtimeModal.date.toISOString().split('T')[0],
-                start: tsIn.getTime(),
-                end: tsOut.getTime(),
-                supervisor_id: supervisorId
-            })
+        const method = isEditOt ? "PUT" : "POST";
+        const res = await fetch("/api/overtime", {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            date: overtimeModal.date.toISOString().split('T')[0],
+            start: tsIn.getTime(),
+            end: tsOut.getTime(),
+            supervisor_id: supervisorId,
+            student_id: student.idnumber
+          })
         });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json.error || "Failed to save overtime");
+        }
 
         setShowSuccessModal(true);
         setOvertimeModal({ isOpen: false, date: null });
         setOtInTime("");
         setOtHours(0);
         setOtMinutes(0);
+        setIsEditOt(false);
+        setEditingOtDateStr(null);
         if (onRefresh) onRefresh();
     } catch (e) {
         alert("Failed to save overtime");
     } finally {
         setIsSavingOt(false);
+    }
+  };
+
+  const openEditOvertime = async (date: Date) => {
+    try {
+      const dateStr = toDateKey(date);
+      const res = await fetch(`/api/overtime?student_id=${encodeURIComponent(student.idnumber)}&date=${encodeURIComponent(dateStr)}`);
+      const json = await res.json();
+      const item = Array.isArray(json.overtime_shifts) ? json.overtime_shifts[0] : null;
+      if (!item) {
+        alert("No authorized overtime found for this date.");
+        return;
+      }
+      const start = new Date(Number(item.overtime_start));
+      const end = new Date(Number(item.overtime_end));
+      const inStr = start.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      const diffMs = Math.max(0, end.getTime() - start.getTime());
+      const hrs = Math.floor(diffMs / (60 * 60 * 1000));
+      const mins = Math.round((diffMs % (60 * 60 * 1000)) / (60 * 1000));
+      setOtInTime(inStr);
+      setOtHours(hrs);
+      setOtMinutes(mins);
+      setIsEditOt(true);
+      setEditingOtDateStr(dateStr);
+      setOvertimeModal({ isOpen: true, date, defaultStart: inStr });
+    } catch (e) {
+      alert("Failed to load overtime details");
+    }
+  };
+
+  const deleteAuthorizedOvertime = async (date: Date) => {
+    try {
+      const dateStr = toDateKey(date);
+      const supervisorId = localStorage.getItem("idnumber") || "";
+      const res = await fetch(`/api/overtime?date=${encodeURIComponent(dateStr)}&student_id=${encodeURIComponent(student.idnumber)}&supervisor_id=${encodeURIComponent(supervisorId)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || "Failed to delete overtime");
+      }
+      if (onRefresh) onRefresh();
+    } catch (e: any) {
+      alert(e.message || "Failed to delete overtime");
     }
   };
 
@@ -1519,18 +1571,7 @@ export function StudentAttendanceDetailView({
                     if (shift === 'ot' && (outLog.id === s2?.id || outLog.id === s4?.id)) return 0;
                     return Number(vh) * 3600000;
                 }
-                if (outLog.rendered_hours !== undefined && outLog.rendered_hours !== null && Number(outLog.rendered_hours) >= 0) {
-                    // If requireApproved is true, ensure status is approved/validated
-                    if (requireApproved) {
-                         const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
-                         const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
-                         if (!inOk || !outOk) return 0;
-                    }
-                    // Avoid double counting if s4/s6 is same as s2/s4 (though unlikely with smart pairing)
-                    if (shift === 'pm' && outLog.id === s2?.id) return 0;
-                    if (shift === 'ot' && (outLog.id === s2?.id || outLog.id === s4?.id)) return 0;
-                    return Number(outLog.rendered_hours) * 3600000;
-                }
+                // Do not use rendered_hours; rely on validated_hours or snapshot/clamp
 
                 if (requireApproved) {
                     const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
@@ -1580,39 +1621,78 @@ export function StudentAttendanceDetailView({
                       oOutTs = schedule.otEnd;
                   }
 
-                  // Safety check: if schedule is invalid (e.g. 0), return 0
-                  if (!oInTs || !oOutTs) return 0;
+                  // Safety check: if schedule is invalid (e.g. 0), return raw fallback for tracked view
+                  if (!oInTs || !oOutTs) {
+                      if (!requireApproved) {
+                          const raw = (new Date(outLog.timestamp).getTime() - new Date(inLog.timestamp).getTime());
+                          return raw > 0 ? raw : 0;
+                      }
+                      return 0;
+                  }
 
-                  return calculateHoursWithinOfficialTime(
+                  const clamped = calculateHoursWithinOfficialTime(
                       new Date(inLog.timestamp), 
                       new Date(outLog.timestamp), 
                       new Date(oInTs), 
                       new Date(oOutTs)
                   );
+                  
+                  if (clamped === 0 && !requireApproved && !outLog.official_time_in && !outLog.official_time_out) {
+                      const raw = (new Date(outLog.timestamp).getTime() - new Date(inLog.timestamp).getTime());
+                      return raw > 0 ? raw : 0;
+                  }
+                  
+                  return clamped;
               };
 
               let dayTotalMs = 0;
               let dayValidatedMs = 0;
               
+              // Tracked (all logs, regardless of approval)
               dayTotalMs += calc(s1, s2, 'am', false);
               dayTotalMs += calc(s3, s4, 'pm', false);
-              let otVal = calc(s5, s6, 'ot', false);
-              dayTotalMs += otVal;
-              const ledgerHrs = [s2, s4, s6].reduce((acc, out) => {
-                  const v = out ? (out as any).validated_hours : undefined;
-                  const num = v !== undefined && v !== null ? Number(v) : NaN;
-                  return acc + (isNaN(num) ? 0 : num * 3600000);
-              }, 0);
-              dayValidatedMs = ledgerHrs;
+              const otTracked = calc(s5, s6, 'ot', false);
+              dayTotalMs += otTracked;
+
+              // Validated (approved-only; uses ledger snapshot first)
+              dayValidatedMs += calc(s1, s2, 'am', true);
+              dayValidatedMs += calc(s3, s4, 'pm', true);
+              dayValidatedMs += calc(s5, s6, 'ot', true);
               
-              const overtimeMs = otVal;
+              const overtimeMs = otTracked;
 
               totalMsAll += dayTotalMs;
               totalValidatedMsAll += dayValidatedMs;
 
-              // Check for Lates
-              if (s1 && isLate((s1 as any).timestamp, schedule.amIn)) { (s1 as any).is_late = true; (s1 as any).late_minutes = Math.floor(((s1 as any).timestamp - schedule.amIn)/60000); }
-              if (s3 && isLate((s3 as any).timestamp, schedule.pmIn)) { (s3 as any).is_late = true; (s3 as any).late_minutes = Math.floor(((s3 as any).timestamp - schedule.pmIn)/60000); }
+              // Check for Lates (freeze using ledger snapshot when available)
+              const toDate = (t: string, baseTs: number) => {
+                  const d = new Date(baseTs);
+                  const parts = t.split(":").map(Number);
+                  d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                  return d.getTime();
+              };
+              if (s1) {
+                  const baseTs = (s1 as any).timestamp;
+                  let officialInTs = schedule.amIn;
+                  if (s2 && (s2 as any).official_time_in) {
+                      officialInTs = toDate((s2 as any).official_time_in, baseTs);
+                  }
+                  if (officialInTs && isLate(baseTs, officialInTs)) {
+                      (s1 as any).is_late = true; 
+                      (s1 as any).late_minutes = Math.floor((baseTs - officialInTs)/60000);
+                  }
+              }
+              if (s3) {
+                  const baseTs = (s3 as any).timestamp;
+                  let officialInTs = schedule.pmIn;
+                  if (s4 && (s4 as any).official_time_in) {
+                      officialInTs = toDate((s4 as any).official_time_in, baseTs);
+                  }
+                  if (officialInTs && isLate(baseTs, officialInTs)) {
+                      (s3 as any).is_late = true; 
+                      (s3 as any).late_minutes = Math.floor((baseTs - officialInTs)/60000);
+                  }
+              }
 
               return { date: day.date, s1, s2, s3, s4, s5, s6, dayTotalMs, dayValidatedMs, overtimeMs, otAuthLog, schedule };
           });
@@ -1771,7 +1851,7 @@ export function StudentAttendanceDetailView({
         fmt(day.s5),                   // OVERTIME IN
         fmtOut(day.s6),                // OVERTIME OUT
         pmStatus,                      // STATUS (PM/OT)
-        formatHours(day.dayTotalMs)    // TOTAL HOURS
+        formatHours(day.dayValidatedMs)    // TOTAL HOURS
       ];
     });
 
@@ -1867,7 +1947,7 @@ export function StudentAttendanceDetailView({
                 <div>
                     <p className="text-[9px] font-bold text-blue-600 uppercase tracking-wider mb-0.5">Total Tracked</p>
                     <p className="text-base font-bold text-blue-900">{formatHours(overallTotal)}</p>
-                    <p className="text-[9px] text-gray-600 mt-0.5">Pending + Validated</p>
+                    <p className="text-[9px] text-gray-600 mt-0.5">Frozen by Ledger</p>
                 </div>
                 <div className="p-1 bg-blue-100 rounded-md">
                     <Clock className="text-blue-600" size={12} />
@@ -1889,7 +1969,6 @@ export function StudentAttendanceDetailView({
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
             <div className="flex flex-wrap items-center justify-between gap-1.5 px-2 py-1 border-b border-gray-100 bg-gray-50">
                 <div className="flex flex-col gap-0.5">
-                  <div className="text-[10px] font-bold text-gray-800">Account Monitoring</div>
                   <div className="flex flex-wrap gap-1 text-[9px]">
                     <span className="px-1.5 py-0.5 rounded-full border border-gray-200 bg-gray-50 text-gray-700 font-medium">
                       Pending: {statusCounts.Pending}
@@ -2020,10 +2099,17 @@ export function StudentAttendanceDetailView({
                                    const pairSelected = isSlotPairSelected(pairIn, pairOut);
 
                                    let isLateTime = false;
-                                   if (slot && slot.type === 'in' && day.schedule) {
-                                       if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.amIn);
-                                       if (idx === 2) isLateTime = isLate(slot.timestamp, day.schedule.pmIn);
-                                       if (idx === 4) isLateTime = isLate(slot.timestamp, day.schedule.otStart);
+                                   if (slot && slot.type === 'in') {
+                                       const toDate = (t: string, baseTs: number) => {
+                                           const d = new Date(baseTs);
+                                           const parts = t.split(":").map(Number);
+                                           d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                                           return d.getTime();
+                                       };
+                                       if (pairOut && (pairOut as any).official_time_in) {
+                                           const offInTs = toDate((pairOut as any).official_time_in, slot.timestamp);
+                                           isLateTime = isLate(slot.timestamp, offInTs);
+                                       }
                                    }
 
                                    return (
@@ -2139,8 +2225,8 @@ export function StudentAttendanceDetailView({
                                         </td>
                                     );
                                 })}
-                <td className="px-1.5 py-1 text-right font-bold text-gray-900 whitespace-nowrap">
-                                    {formatHours(day.dayValidatedMs || day.dayTotalMs)}
+                                <td className="px-1.5 py-1 text-right font-bold text-gray-900 whitespace-nowrap">
+                                    {formatHours(day.dayTotalMs)}
                                 </td>
                             </tr>
                         ))}
@@ -2176,8 +2262,17 @@ export function StudentAttendanceDetailView({
                                                 const isAutoTimeOut = slot?.type === 'out' && (valBy === 'SYSTEM_AUTO_CLOSE' || valBy === 'AUTO TIME OUT');
 
                                                 let isLateTime = false;
-                                                if (slot && slot.type === 'in' && day.schedule) {
-                                                    if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.amIn);
+                                                if (slot && slot.type === 'in') {
+                                                    const toDate = (t: string, baseTs: number) => {
+                                                        const d = new Date(baseTs);
+                                                        const parts = t.split(":").map(Number);
+                                                        d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                                                        return d.getTime();
+                                                    };
+                                                    if (pairOut && (pairOut as any).official_time_in) {
+                                                        const offInTs = toDate((pairOut as any).official_time_in, slot.timestamp);
+                                                        isLateTime = isLate(slot.timestamp, offInTs);
+                                                    }
                                                 }
 
                                                 return (
@@ -2256,8 +2351,17 @@ export function StudentAttendanceDetailView({
                                                 const isAutoTimeOut = slot?.type === 'out' && (valBy === 'SYSTEM_AUTO_CLOSE' || valBy === 'AUTO TIME OUT');
 
                                                 let isLateTime = false;
-                                                if (slot && slot.type === 'in' && day.schedule) {
-                                                    if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.pmIn);
+                                                if (slot && slot.type === 'in') {
+                                                    const toDate = (t: string, baseTs: number) => {
+                                                        const d = new Date(baseTs);
+                                                        const parts = t.split(":").map(Number);
+                                                        d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                                                        return d.getTime();
+                                                    };
+                                                    if (pairOut && (pairOut as any).official_time_in) {
+                                                        const offInTs = toDate((pairOut as any).official_time_in, slot.timestamp);
+                                                        isLateTime = isLate(slot.timestamp, offInTs);
+                                                    }
                                                 }
 
                                                 return (
@@ -2360,7 +2464,23 @@ export function StudentAttendanceDetailView({
                                             <div className="text-[9px] font-semibold text-gray-500 uppercase tracking-wide">Overtime</div>
                                             {!day.s5 && (
                                                 (day as any).otAuthLog ? (
-                                                    <span className="text-[9px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded">Authorized</span>
+                                                    <div className="flex items-center gap-1">
+                                                      <span className="text-[9px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded">Authorized</span>
+                                                      <button
+                                                        onClick={() => openEditOvertime(day.date)}
+                                                        className="text-[9px] text-orange-600 font-semibold hover:underline"
+                                                        title="Edit Overtime"
+                                                      >
+                                                        Edit
+                                                      </button>
+                                                      <button
+                                                        onClick={() => deleteAuthorizedOvertime(day.date)}
+                                                        className="text-[9px] text-red-600 font-semibold hover:underline"
+                                                        title="Delete Overtime"
+                                                      >
+                                                        Delete
+                                                      </button>
+                                                    </div>
                                                 ) : (
                                                 <button
                                                     onClick={() => {
@@ -2387,8 +2507,17 @@ export function StudentAttendanceDetailView({
                                                 const isAutoTimeOut = slot?.type === 'out' && (valBy === 'SYSTEM_AUTO_CLOSE' || valBy === 'AUTO TIME OUT');
 
                                                 let isLateTime = false;
-                                                if (slot && slot.type === 'in' && day.schedule) {
-                                                    if (idx === 0) isLateTime = isLate(slot.timestamp, day.schedule.otStart);
+                                                if (slot && slot.type === 'in') {
+                                                    const toDate = (t: string, baseTs: number) => {
+                                                        const d = new Date(baseTs);
+                                                        const parts = t.split(":").map(Number);
+                                                        d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                                                        return d.getTime();
+                                                    };
+                                                    if (pairOut && (pairOut as any).official_time_in) {
+                                                        const offInTs = toDate((pairOut as any).official_time_in, slot.timestamp);
+                                                        isLateTime = isLate(slot.timestamp, offInTs);
+                                                    }
                                                 }
 
                                                 return (
@@ -3235,6 +3364,10 @@ export function DashboardView({
           validatedAt: e.validated_at ? Number(new Date(e.validated_at).getTime()) : undefined,
           validated_by: e.validated_by,
           rendered_hours: e.rendered_hours,
+          validated_hours: e.validated_hours,
+          official_time_in: e.official_time_in,
+          official_time_out: e.official_time_out,
+          slot: e.slot
         };
       });
 
@@ -3271,7 +3404,8 @@ export function DashboardView({
     isOpen: boolean;
     selectedStudentIds: Set<string>;
     date: Date | null;
-  }>({ isOpen: false, selectedStudentIds: new Set(), date: null });
+    mode?: "create" | "edit";
+  }>({ isOpen: false, selectedStudentIds: new Set(), date: null, mode: "create" });
   
   const [otInTime, setOtInTime] = useState("");
   const [otHours, setOtHours] = useState(1);
@@ -3309,6 +3443,53 @@ export function DashboardView({
     });
   };
 
+  const openEditOvertimeForStudent = async (studentIdnumber: string) => {
+    try {
+      const dateStr = toLocalDateKey(selectedDate);
+      const res = await fetch(`/api/overtime?student_id=${encodeURIComponent(studentIdnumber)}&date=${encodeURIComponent(dateStr)}`);
+      const json = await res.json();
+      const item = Array.isArray(json.overtime_shifts) ? json.overtime_shifts[0] : null;
+      if (!item) {
+        alert("No authorized overtime found for this date.");
+        return;
+      }
+      const start = new Date(Number(item.overtime_start));
+      const end = new Date(Number(item.overtime_end));
+      const inStr = start.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+      const diffMs = Math.max(0, end.getTime() - start.getTime());
+      const hrs = Math.floor(diffMs / (60 * 60 * 1000));
+      const mins = Math.round((diffMs % (60 * 60 * 1000)) / (60 * 1000));
+      setOtInTime(inStr);
+      setOtHours(hrs);
+      setOtMinutes(mins);
+      setBulkOvertimeModal({
+        isOpen: true,
+        selectedStudentIds: new Set([studentIdnumber]),
+        date: new Date(selectedDate),
+        mode: "edit",
+      });
+    } catch (e) {
+      alert("Failed to load overtime details");
+    }
+  };
+
+  const deleteOvertimeForStudent = async (studentIdnumber: string) => {
+    try {
+      const supId = myIdnumber || localStorage.getItem("idnumber") || "";
+      const dateStr = toLocalDateKey(selectedDate);
+      const res = await fetch(
+        `/api/overtime?date=${encodeURIComponent(dateStr)}&student_id=${encodeURIComponent(studentIdnumber)}&supervisor_id=${encodeURIComponent(supId)}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || "Failed to delete overtime");
+      }
+      setInternalRefresh((x) => x + 1);
+    } catch (e: any) {
+      alert(e.message || "Failed to delete overtime");
+    }
+  };
   const isPairSelected = (entryIn?: AttendanceEntry | null, entryOut?: AttendanceEntry | null) => {
     const ids: number[] = [];
     if (entryIn && entryIn.id != null) ids.push(Number(entryIn.id));
@@ -3432,6 +3613,57 @@ export function DashboardView({
     }
   };
 
+  const handleEditSaveOvertime = async () => {
+    // Edit mode expects exactly one student selected
+    if (bulkOvertimeModal.selectedStudentIds.size !== 1 || !bulkOvertimeModal.date || !otInTime || (otHours === 0 && otMinutes === 0)) return;
+    setIsSavingOt(true);
+    try {
+      const supervisorId = myIdnumber || localStorage.getItem("idnumber") || "";
+      if (!supervisorId) {
+        throw new Error("Supervisor ID not found. Please log in again.");
+      }
+      const studentIdnumber = Array.from(bulkOvertimeModal.selectedStudentIds)[0];
+
+      const [inH, inM] = otInTime.split(":").map(Number);
+      const tsIn = new Date(bulkOvertimeModal.date);
+      tsIn.setHours(inH, inM, 0, 0);
+
+      const durationMs = otHours * 60 * 60 * 1000 + otMinutes * 60 * 1000;
+      const tsOut = new Date(tsIn.getTime() + durationMs);
+
+      const y = bulkOvertimeModal.date.getFullYear();
+      const m = String(bulkOvertimeModal.date.getMonth() + 1).padStart(2, "0");
+      const d = String(bulkOvertimeModal.date.getDate()).padStart(2, "0");
+      const dateStr = `${y}-${m}-${d}`;
+
+      const res = await fetch("/api/overtime", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: dateStr,
+          start: tsIn.getTime(),
+          end: tsOut.getTime(),
+          supervisor_id: supervisorId,
+          student_id: studentIdnumber,
+        }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || "Failed to update overtime");
+      }
+
+      setShowSuccessModal(true);
+      setBulkOvertimeModal({ isOpen: false, selectedStudentIds: new Set(), date: null, mode: "create" });
+      setOtInTime("");
+      setOtHours(0);
+      setOtMinutes(0);
+      setInternalRefresh((x) => x + 1);
+    } catch (e: any) {
+      alert(e.message || "Failed to update overtime");
+    } finally {
+      setIsSavingOt(false);
+    }
+  };
   const studentSummaries = useMemo(() => {
     const byStudentId: Record<string, AttendanceEntry[]> = {};
     const byStudentIdNumber: Record<string, AttendanceEntry[]> = {};
@@ -3642,11 +3874,58 @@ export function DashboardView({
           };
 
           const dayRaw = calcTracked();
-          const dayVal = [s2, s4, s6].reduce((acc, out) => {
-              const v = out ? (out as any).validated_hours : undefined;
-              const num = v !== undefined && v !== null ? Number(v) : NaN;
-              return acc + (isNaN(num) ? 0 : num * 3600000);
-          }, 0);
+          const calcApproved = (inLog: AttendanceEntry | null, outLog: AttendanceEntry | null, shift: 'am' | 'pm' | 'ot') => {
+              if (!inLog || !outLog) return 0;
+              if ((inLog.status || "") === 'Rejected' || (outLog.status || "") === 'Rejected') return 0;
+              const inOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inLog.status || "");
+              const outOk = ["Approved", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outLog.status || "");
+              if (!inOk || !outOk) return 0;
+              const vh = (outLog as any).validated_hours;
+              if (vh !== undefined && vh !== null && Number(vh) >= 0) {
+                  return Number(vh) * 3600000;
+              }
+              if ((outLog as any).official_time_in && (outLog as any).official_time_out) {
+                  const base = new Date(inLog.timestamp);
+                  const toDate = (t: string) => {
+                      const [h, m, s] = t.split(":").map(Number);
+                      const d = new Date(base);
+                      d.setHours(h, m, s || 0, 0);
+                      return d;
+                  };
+                  const offIn = toDate((outLog as any).official_time_in);
+                  const offOut = toDate((outLog as any).official_time_out);
+                  if (offOut.getTime() < offIn.getTime()) offOut.setDate(offOut.getDate() + 1);
+                  return calculateHoursWithinOfficialTime(new Date(inLog.timestamp), new Date(outLog.timestamp), offIn, offOut);
+              }
+              return 0;
+          };
+          const dayVal = calcApproved(s1, s2, 'am') + calcApproved(s3, s4, 'pm') + calcApproved(s5, s6, 'ot');
+          
+          // Ledger-only, approval-agnostic frozen total for display
+          const calcFrozen = (inLog: AttendanceEntry | null, outLog: AttendanceEntry | null) => {
+              if (!inLog || !outLog) return 0;
+              const vh = (outLog as any).validated_hours;
+              if (vh !== undefined && vh !== null && Number(vh) >= 0) {
+                  return Number(vh) * 3600000;
+              }
+              const offInStr = (outLog as any).official_time_in;
+              const offOutStr = (outLog as any).official_time_out;
+              if (offInStr && offOutStr) {
+                  const base = new Date(inLog.timestamp);
+                  const toDate = (t: string) => {
+                      const [h, m, s] = t.split(":").map(Number);
+                      const d = new Date(base);
+                      d.setHours(h, m, s || 0, 0);
+                      return d;
+                  };
+                  const offIn = toDate(offInStr);
+                  const offOut = toDate(offOutStr);
+                  if (offOut.getTime() < offIn.getTime()) offOut.setDate(offOut.getDate() + 1);
+                  return calculateHoursWithinOfficialTime(new Date(inLog.timestamp), new Date(outLog.timestamp), offIn, offOut);
+              }
+              return 0;
+          };
+          const dayFrozenMs = calcFrozen(s1, s2) + calcFrozen(s3, s4) + calcFrozen(s5, s6);
           
           totalValidatedMs += dayVal;
           totalRawMs += dayRaw;
@@ -3663,11 +3942,37 @@ export function DashboardView({
 
              const isOvertimeAuthorized = !!overtimeLookup[`${student.idnumber}_${targetDateISO}`];
 
-             todaySlots = { 
-                 s1, s2, s3, s4, s5, s6, 
-                 todayTotalMs: dayRaw, otAuthLog, isOvertimeAuthorized,
-                 schedule
-             };
+            type Session = { in: AttendanceEntry; out: AttendanceEntry | null };
+            const sessions: Session[] = [];
+            let currentIn: AttendanceEntry | null = null;
+            for (const log of sortedLogs) {
+                const t = (log.type || "").toLowerCase();
+                if (t === "in") {
+                    currentIn = log;
+                } else if (t === "out") {
+                    if (currentIn) {
+                        sessions.push({ in: currentIn, out: log });
+                        currentIn = null;
+                    }
+                }
+            }
+            const mapSessionToSlots = (shiftSessions: Session[]) => {
+               if (shiftSessions.length === 0) return { in: null, out: null };
+               const firstSession = shiftSessions[0];
+               const lastSession = shiftSessions[shiftSessions.length - 1];
+               return { in: firstSession.in, out: lastSession.out };
+            };
+            const amSlots = mapSessionToSlots(sessions.filter(s => (s.out as any)?.slot === 'AM'));
+            const pmSlots = mapSessionToSlots(sessions.filter(s => (s.out as any)?.slot === 'PM'));
+            const otSlots = mapSessionToSlots(sessions.filter(s => ((s.out as any)?.slot === 'OT') || s.in.is_overtime));
+
+            todaySlots = { 
+                s1: amSlots.in || s1, s2: amSlots.out || s2, 
+                s3: pmSlots.in || s3, s4: pmSlots.out || s4, 
+                s5: otSlots.in || s5, s6: otSlots.out || s6, 
+                todayTotalMs: dayFrozenMs, otAuthLog, isOvertimeAuthorized,
+                schedule
+            };
           }
       });
 
@@ -3743,8 +4048,9 @@ export function DashboardView({
        validated_by: e.validated_by,
        is_overtime: e.is_overtime,
        rendered_hours: e.rendered_hours,
-       validated_hours: e.validated_hours
-     }});
+      validated_hours: e.validated_hours,
+      slot: e.slot
+    }});
      
      // Sort by timestamp to optimize downstream processing
      mapped.sort((a, b) => a.timestamp - b.timestamp);
@@ -3860,8 +4166,7 @@ export function DashboardView({
     <div className="space-y-6 animate-in fade-in duration-500">
       {/* Header */}
       <div>
-         <h1 className="text-2xl font-bold text-gray-900">Attendance Monitoring</h1>
-         <p className="text-gray-500">Overview of total hours per student.</p>
+         
       </div>
 
       {/* Toolbar */}
@@ -3917,39 +4222,6 @@ export function DashboardView({
                className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-orange-500 bg-orange-500 text-white hover:bg-orange-600 hover:border-orange-600 transition-colors"
              >
                Authorize Overtime
-            </button>
-            <button
-              onClick={async () => {
-                try {
-                  const res = await fetch("/api/push/test", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ idnumber: myIdnumber || localStorage.getItem("idnumber") })
-                  });
-                  const json = await res.json();
-                if (json.success) {
-                  alert(`Test notification sent! (Found ${json.subs_found} devices)`);
-                } else {
-                  let msg = "Failed: " + (json.error || "Unknown error");
-                  if (json.env && (!json.env.has_public || !json.env.has_private)) {
-                    msg += "\n[Server Error] Missing VAPID Keys in .env";
-                  }
-                  if (json.subs_found === 0) {
-                    msg += "\n[Error] No subscribed devices found for this account. Try refreshing the page and clicking 'Allow' on the prompt.";
-                  }
-                  if (json.push_attempts && json.push_attempts.length > 0) {
-                     const errs = json.push_attempts.filter((a: any) => a.status === 'failed').map((a: any) => `${a.code}: ${a.error}`).join('\n');
-                     if (errs) msg += `\n[Push Errors]:\n${errs}`;
-                  }
-                  alert(msg);
-                }
-              } catch (e: any) {
-                  alert("Error: " + e.message);
-                }
-              }}
-              className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 transition-colors"
-            >
-              Test Notification
             </button>
              <button
                onClick={selectAllPending}
@@ -4056,14 +4328,6 @@ export function DashboardView({
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="px-4 py-2 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
-          <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">
-            Selected Date
-          </span>
-          <span className="text-sm font-semibold text-gray-900">
-            {displayDateLabel}
-          </span>
-        </div>
         <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead className="bg-gray-50 border-b border-gray-200">
@@ -4103,7 +4367,7 @@ export function DashboardView({
               ) : (
                 studentSummaries.map(({ student, totalMs, totalRawMs, todaySlots, logsCount }) => {
                   const todayMs = todaySlots?.todayTotalMs || 0;
-                  const displayTotal = totalMs > 0 ? totalMs : todayMs;
+                  const displayTotal = todayMs;
                   const renderSlot = (
                     slot: AttendanceEntry | null,
                     pairIn?: AttendanceEntry | null,
@@ -4117,8 +4381,24 @@ export function DashboardView({
                         // Check if Auth Log exists or Overtime Shift is present
                         if (todaySlots?.otAuthLog || todaySlots?.isOvertimeAuthorized) {
                              return (
-                                 <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-green-600 font-bold bg-green-50">
-                                     Authorized
+                                 <td className="px-2 py-3 text-center border-r border-gray-50 text-xs bg-green-50">
+                                   <div className="flex items-center justify-center gap-2">
+                                     <span className="font-bold text-green-600">Authorized</span>
+                                     <button
+                                       onClick={() => openEditOvertimeForStudent(student.idnumber)}
+                                       className="text-[10px] font-semibold text-orange-600 hover:underline"
+                                       title="Edit Overtime"
+                                     >
+                                       Edit
+                                     </button>
+                                     <button
+                                       onClick={() => deleteOvertimeForStudent(student.idnumber)}
+                                       className="text-[10px] font-semibold text-red-600 hover:underline"
+                                       title="Delete Overtime"
+                                     >
+                                       Delete
+                                     </button>
+                                   </div>
                                  </td>
                              );
                         }
@@ -4153,7 +4433,16 @@ export function DashboardView({
                       );
                     }
 
-                    const isLateTime = isInCell && slot.type === 'in' && officialStart ? isLate(slot.timestamp, officialStart) : false;
+                    const toDate = (t: string, baseTs: number) => {
+                      const d = new Date(baseTs);
+                      const parts = t.split(":").map(Number);
+                      d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                      return d.getTime();
+                    };
+                    const snapshotStart = pairOut && (pairOut as any).official_time_in 
+                      ? toDate((pairOut as any).official_time_in, slot.timestamp) 
+                      : officialStart;
+                    const isLateTime = isInCell && slot.type === 'in' && snapshotStart ? isLate(slot.timestamp, snapshotStart) : false;
 
                     const status = slot.status as "Pending" | "Approved" | "Rejected" | undefined;
                     let statusLabel = "Pending";
@@ -4294,7 +4583,7 @@ export function DashboardView({
           ) : (
             studentSummaries.map(({ student, totalMs, totalRawMs, todaySlots }) => {
               const todayMs = todaySlots?.todayTotalMs || 0;
-              const displayTotal = totalMs > 0 ? totalMs : todayMs;
+              const displayTotal = todayMs;
               const courseSection = [
                 student.course || "",
                 student.section || ""
@@ -4533,13 +4822,13 @@ export function DashboardView({
 
               <div className="p-3 border-t border-gray-100 bg-gray-50 flex justify-end gap-2">
                 <button 
-                  onClick={() => setBulkOvertimeModal(prev => ({ ...prev, isOpen: false }))}
+                  onClick={() => setBulkOvertimeModal(prev => ({ ...prev, isOpen: false, mode: "create" }))}
                   className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                 >
                   Cancel
                 </button>
                 <button 
-                  onClick={handleBulkSaveOvertime}
+                  onClick={bulkOvertimeModal.mode === "edit" ? handleEditSaveOvertime : handleBulkSaveOvertime}
                   disabled={isSavingOt || bulkOvertimeModal.selectedStudentIds.size === 0 || !otInTime || (otHours === 0 && otMinutes === 0)}
                   className="px-3 py-1.5 text-xs font-bold text-white bg-orange-600 rounded-lg hover:bg-orange-700 shadow-md shadow-orange-200 transition-all disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                 >

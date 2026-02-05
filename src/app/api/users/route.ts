@@ -141,6 +141,7 @@ export async function GET(req: Request) {
   const course = searchParams.get('course'); 
   const section = searchParams.get('section'); 
   const idnumber = searchParams.get('idnumber');
+  const approvedOnly = searchParams.get('approvedOnly') === 'true';
 
   let tableName = "users_students"; 
   if (role) {
@@ -157,7 +158,7 @@ export async function GET(req: Request) {
   if (tableName === "users_students") {
     selectQuery = `
       *,
-      courses:course_id (name),
+      courses:course_id (name, required_ojt_hours),
       sections:section_id (name),
       users_supervisors:supervisor_id (idnumber, firstname, lastname, company, location)
     `;
@@ -187,6 +188,9 @@ export async function GET(req: Request) {
       const activeSyId = await getActiveSchoolYearId(admin);
       if (activeSyId) {
           query = query.eq('school_year_id', activeSyId);
+      }
+      if (approvedOnly) {
+          query = query.eq('signup_status', 'APPROVED');
       }
   }
 
@@ -288,7 +292,8 @@ export async function GET(req: Request) {
       email_verified: u.email_verified,
       signup_status: u.signup_status,
       avatar_url: u.avatar_url,
-      school_year_id: u.school_year_id
+      school_year_id: u.school_year_id,
+      target_hours: (u.courses && typeof u.courses.required_ojt_hours === 'number') ? Number(u.courses.required_ojt_hours) : undefined
     };
   });
 

@@ -1,5 +1,6 @@
 "use client";
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
+import { Search } from "lucide-react";
 
 export type RoleType = "student" | "instructor" | "supervisor";
 
@@ -234,6 +235,585 @@ export function AlertModal({
   );
 }
 
+type ConfirmAction =
+  | { type: "single" | "bulk"; id?: number; action: "approve" | "reject" }
+  | null;
+
+function formatCourseSection(courseStr?: string, sectionStr?: string): string {
+  if (!courseStr) return "";
+  if (!sectionStr) return courseStr;
+  const courses = courseStr.split(",").map(s => s.trim());
+  const sections = sectionStr.split(",").map(s => s.trim());
+  if (courses.length > 0 && courses.length === sections.length) {
+    return courses.map((c, i) => `${c}-${sections[i]}`).join(", ");
+  }
+  return `${courseStr} - ${sectionStr}`;
+}
+
+type ApprovalsViewProps = {
+  users: User[];
+  onView: (user: User) => void;
+  onRefresh: () => void;
+  profileCourse?: string;
+  profileSection?: string;
+  profileSectionIds?: number[];
+};
+
+let cachedApprovalRequests: any[] | null = null;
+
+export function ApprovalsView({ users, onView, onRefresh, profileCourse, profileSection, profileSectionIds }: ApprovalsViewProps) {
+  type RequestItem = {
+    id: number;
+    full_name: string;
+    email: string;
+    school_id: string;
+    course?: string;
+    section?: string;
+    course_id?: number | null;
+    section_id?: number | null;
+    status: "pending" | "approved" | "rejected";
+  };
+  const [requests, setRequests] = useState<RequestItem[]>(() => (cachedApprovalRequests as RequestItem[] | null) || []);
+  const [resolvedSectionIds, setResolvedSectionIds] = useState<number[]>(Array.isArray(profileSectionIds) ? profileSectionIds : []);
+  const [resolvedSectionNames, setResolvedSectionNames] = useState<string[]>(
+    (profileSection || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean)
+  );
+  useEffect(() => {
+    const fetchRequests = async () => {
+      try {
+        const idnumber = typeof window !== "undefined" ? localStorage.getItem("idnumber") || "" : "";
+        const url = idnumber
+          ? `/api/student-approval-requests?limit=2000&status=pending&instructorIdnumber=${encodeURIComponent(idnumber)}`
+          : `/api/student-approval-requests?limit=2000&status=pending`;
+        const res = await fetch(url);
+        const json = await res.json();
+        if (res.ok && Array.isArray(json.requests)) {
+          setRequests(json.requests);
+          cachedApprovalRequests = json.requests;
+        } else {
+          setRequests([]);
+        }
+      } catch {
+        setRequests([]);
+      }
+    };
+    fetchRequests();
+  }, [onRefresh]);
+  useEffect(() => {
+    const names = (profileSection || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+    const ids = Array.isArray(profileSectionIds) ? profileSectionIds : [];
+    setResolvedSectionNames(names);
+    setResolvedSectionIds(ids);
+  }, [profileSection, profileSectionIds]);
+  useEffect(() => {
+    const shouldFetch = resolvedSectionIds.length === 0 && resolvedSectionNames.length === 0;
+    if (!shouldFetch) return;
+    const idnumber = typeof window !== "undefined" ? localStorage.getItem("idnumber") || "" : "";
+    if (!idnumber) return;
+    (async () => {
+      try {
+        const resMe = await fetch(`/api/users?role=instructor&idnumber=${encodeURIComponent(idnumber)}`, { cache: "no-store" });
+        const jsonMe = await resMe.json();
+        if (Array.isArray(jsonMe.users) && jsonMe.users.length > 0) {
+          const me = jsonMe.users[0];
+          const ids = Array.isArray(me.sectionIds) ? me.sectionIds : [];
+          const names = String(me.section || "").split(",").map((s: string) => s.trim().toLowerCase()).filter(Boolean);
+          if (ids.length > 0) setResolvedSectionIds(ids);
+          if (names.length > 0) setResolvedSectionNames(names);
+        }
+      } catch {}
+    })();
+  }, [resolvedSectionIds.length, resolvedSectionNames.length]);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [filterCourse, setFilterCourse] = useState("");
+  const [filterSection, setFilterSection] = useState("");
+  const [filterStatus, setFilterStatus] = useState("PENDING");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [actionLoading, setActionLoading] = useState(null as number | null);
+  const [isBulkApproving, setIsBulkApproving] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
+  const [rejectionNote, setRejectionNote] = useState("");
+
+  const uniqueCourses = useMemo(() => {
+    const normalize = (s: string) => s.toLowerCase().trim();
+    const mySectionNames = resolvedSectionNames;
+    const allowedSectionIds = resolvedSectionIds;
+    const hasSectionAssignment = mySectionNames.length > 0 || allowedSectionIds.length > 0;
+    const allowedRequests = hasSectionAssignment
+      ? requests.filter(s => {
+          const sSections = (s.section || "").split(",").map(normalize).filter(Boolean);
+          const idSectionMatch = allowedSectionIds.length > 0 && typeof s.section_id === "number" && allowedSectionIds.includes(Number(s.section_id));
+          const nameSectionMatch = mySectionNames.length > 0 && sSections.some(ss => mySectionNames.includes(ss));
+          return idSectionMatch || nameSectionMatch;
+        })
+      : requests;
+    const courses = allowedRequests.map(s => s.course).filter(c => !!c) as string[];
+    return Array.from(new Set(courses)).sort();
+  }, [requests, resolvedSectionNames, resolvedSectionIds]);
+
+  const uniqueSections = useMemo(() => {
+    const normalize = (s: string) => s.toLowerCase().trim();
+    const mySectionNames = resolvedSectionNames;
+    const allowedSectionIds = resolvedSectionIds;
+    const hasSectionAssignment = mySectionNames.length > 0 || allowedSectionIds.length > 0;
+    const gated = hasSectionAssignment
+      ? requests.filter(s => {
+          const sSections = (s.section || "").split(",").map(normalize).filter(Boolean);
+          const idSectionMatch = allowedSectionIds.length > 0 && typeof s.section_id === "number" && allowedSectionIds.includes(Number(s.section_id));
+          const nameSectionMatch = mySectionNames.length > 0 && sSections.some(ss => mySectionNames.includes(ss));
+          return idSectionMatch || nameSectionMatch;
+        })
+      : requests;
+    const subset = filterCourse ? gated.filter(s => s.course === filterCourse) : gated;
+    const sections = subset.map(s => s.section).filter(s => !!s) as string[];
+    return Array.from(new Set(sections)).sort();
+  }, [requests, filterCourse, resolvedSectionNames, resolvedSectionIds]);
+
+  const filteredStudents = useMemo(() => {
+    const normalize = (s: string) => s.toLowerCase().trim();
+    const myCourseNames = (profileCourse || "").split(",").map(normalize).filter(Boolean);
+    const mySectionNames = resolvedSectionNames;
+    const allowedSectionIds = resolvedSectionIds;
+    const hasSectionAssignment = mySectionNames.length > 0 || allowedSectionIds.length > 0;
+    const allowedRequests = (hasSectionAssignment ? requests.filter(s => {
+      const sSections = (s.section || "").split(",").map(normalize).filter(Boolean);
+      const idSectionMatch = allowedSectionIds.length > 0 && typeof s.section_id === "number" && allowedSectionIds.includes(Number(s.section_id));
+      const nameSectionMatch = mySectionNames.length > 0 && sSections.some(ss => mySectionNames.includes(ss));
+      return idSectionMatch || nameSectionMatch;
+    }) : requests);
+    return allowedRequests
+      .filter(s => {
+        const search = normalize(searchTerm);
+        const name = normalize(s.full_name || "");
+        const id = normalize(s.school_id || "");
+        const matchesSearch = !search || name.includes(search) || id.includes(search);
+        const matchesCourse = !filterCourse || s.course === filterCourse;
+        const matchesSection = !filterSection || s.section === filterSection;
+        const sCourses = (s.course || "").split(",").map(normalize).filter(Boolean);
+        const sSections = (s.section || "").split(",").map(normalize).filter(Boolean);
+        const idSectionMatch = allowedSectionIds.length > 0 && typeof s.section_id === "number" && allowedSectionIds.includes(Number(s.section_id));
+        const courseMatches = sCourses.some(sc => myCourseNames.includes(sc));
+        const sectionMatches = sSections.some(ss => mySectionNames.includes(ss));
+        let isAllowed = false;
+        if (allowedSectionIds.length > 0) {
+          isAllowed ||= idSectionMatch;
+        }
+        if (mySectionNames.length > 0) {
+          isAllowed ||= sectionMatches;
+        }
+        if (!isAllowed && mySectionNames.length === 0 && myCourseNames.length > 0) {
+          isAllowed ||= courseMatches;
+        }
+        if (!isAllowed) return false;
+        const status = String(s.status || "pending").toUpperCase();
+        const matchesStatus =
+          filterStatus === "ALL" ? true : status === filterStatus;
+        return matchesSearch && matchesCourse && matchesSection && matchesStatus;
+      })
+      .sort((a, b) => {
+        const lnameA = (a.full_name || "").trim().split(" ").slice(-1)[0] || "";
+        const lnameB = (b.full_name || "").trim().split(" ").slice(-1)[0] || "";
+        const fnameA = (a.full_name || "").trim().split(" ")[0] || "";
+        const fnameB = (b.full_name || "").trim().split(" ")[0] || "";
+        return (
+          lnameA.localeCompare(lnameB, undefined, { sensitivity: "base" }) ||
+          fnameA.localeCompare(fnameB, undefined, { sensitivity: "base" }) ||
+          (a.school_id || "").localeCompare(b.school_id || "", undefined, { sensitivity: "base" })
+        );
+      });
+  }, [requests, searchTerm, filterCourse, filterSection, filterStatus, resolvedSectionNames, resolvedSectionIds, profileCourse]);
+
+  const toggleSelection = (id: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    const pendingStudents = filteredStudents.filter(s => String(s.status).toUpperCase() === "PENDING");
+    if (pendingStudents.length === 0) {
+      setSelectedIds(new Set());
+      return;
+    }
+    const allSelected =
+      selectedIds.size === pendingStudents.length && pendingStudents.length > 0;
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(pendingStudents.map(s => s.id)));
+    }
+  };
+
+  const performAction = async (ids: number[], action: "approve" | "reject", note?: string) => {
+    try {
+      const actorId =
+        typeof window !== "undefined"
+          ? localStorage.getItem("idnumber") || "SYSTEM"
+          : "SYSTEM";
+      if (ids.length === 1) setActionLoading(ids[0]);
+      else setIsBulkApproving(true);
+      await Promise.all(
+        ids.map(id =>
+          fetch(`/api/student-approval-requests/${id}/${action}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              actorId,
+              actorRole: "instructor",
+              actorName: `${localStorage.getItem("firstname") || ""} ${localStorage.getItem("lastname") || ""}`.trim(),
+              note: action === "reject" ? note || "" : undefined,
+            }),
+          }).then(async res => {
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.error || `Failed to ${action} request ${id}`);
+            }
+            return res;
+          })
+        )
+      );
+      try {
+        const res = await fetch("/api/student-approval-requests?limit=2000&status=pending");
+        const json = await res.json();
+        if (res.ok && Array.isArray(json.requests)) {
+          setRequests(json.requests);
+          cachedApprovalRequests = json.requests;
+        }
+        } catch {}
+      setSelectedIds(new Set());
+    } catch (e: any) {
+      alert(e.message || `Failed to ${action} one or more students`);
+    } finally {
+      setActionLoading(null);
+      setIsBulkApproving(false);
+      setConfirmAction(null);
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-full bg-white overflow-hidden pt-4">
+      <div className="px-3 py-2 border-b border-gray-100 flex flex-wrap items-center gap-2 bg-white">
+        <h2 className="text-sm font-bold text-gray-900 whitespace-nowrap mr-auto">Account Approvals</h2>
+        <div className="relative w-full sm:w-48">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" size={12} />
+          <input
+            type="text"
+            placeholder="Search..."
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            className="w-full pl-8 pr-3 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] transition-all"
+          />
+        </div>
+        <div className="flex gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+          <select
+            value={filterCourse}
+            onChange={e => {
+              setFilterCourse(e.target.value);
+              setFilterSection("");
+            }}
+            className="px-2 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[80px]"
+          >
+            <option value="">Course</option>
+            {uniqueCourses.map(c => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+          <select
+            value={filterSection}
+            onChange={e => setFilterSection(e.target.value)}
+            className="px-2 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[60px]"
+          >
+            <option value="">Section</option>
+            {uniqueSections.map(s => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+          <select
+            value={filterStatus}
+            onChange={e => setFilterStatus(e.target.value)}
+            className="px-2 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[80px]"
+          >
+            <option value="ALL">Status</option>
+            <option value="PENDING">Pending</option>
+            <option value="APPROVED">Approved</option>
+            <option value="REJECTED">Rejected</option>
+          </select>
+        </div>
+        {selectedIds.size > 0 && (
+          <div className="flex items-center gap-1.5 animate-in fade-in zoom-in duration-200">
+            <button
+              onClick={() => setConfirmAction({ type: "bulk", action: "approve" })}
+              disabled={isBulkApproving}
+              className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-colors disabled:opacity-50 whitespace-nowrap"
+            >
+              {isBulkApproving ? "..." : `Approve (${selectedIds.size})`}
+            </button>
+            <button
+              onClick={() => setConfirmAction({ type: "bulk", action: "reject" })}
+              disabled={isBulkApproving}
+              className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-colors disabled:opacity-50 whitespace-nowrap"
+            >
+              {isBulkApproving ? "..." : `Reject (${selectedIds.size})`}
+            </button>
+          </div>
+        )}
+      </div>
+      <div className="flex-1 min-h-0 overflow-y-scroll overflow-x-hidden bg-white custom-scrollbar">
+        <div className="h-full">
+          <table className="w-full text-xs text-left">
+            <thead className="bg-gray-50 text-gray-500 font-medium border-b border-gray-100 sticky top-0 z-10">
+              <tr>
+                <th className="px-3 py-1.5 w-8">
+                  <input
+                    type="checkbox"
+                    className="rounded border-gray-300 text-orange-600 focus:ring-orange-500 w-3.5 h-3.5"
+                    onChange={toggleAll}
+                    checked={
+                      filteredStudents.some(s => String(s.status).toUpperCase() === "PENDING") &&
+                      selectedIds.size ===
+                        filteredStudents.filter(s => String(s.status).toUpperCase() === "PENDING").length &&
+                      filteredStudents.filter(s => String(s.status).toUpperCase() === "PENDING").length > 0
+                    }
+                  />
+                </th>
+                <th className="px-3 py-1.5">Student</th>
+                <th className="px-3 py-1.5">ID Number</th>
+                <th className="px-3 py-1.5">Email</th>
+                <th className="px-3 py-1.5">Course & Section</th>
+                <th className="px-3 py-1.5">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {filteredStudents.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-6 text-center text-gray-500">
+                    No students found
+                  </td>
+                </tr>
+              ) : (
+                filteredStudents.map(s => {
+                  const isPending = String(s.status).toUpperCase() === "PENDING";
+                  const isSelected = selectedIds.has(s.id);
+                  return (
+                    <tr
+                      key={s.id}
+                      className={`hover:bg-gray-50/50 ${isSelected ? "bg-orange-50/30" : ""}`}
+                    >
+                      <td className="px-3 py-1">
+                        {isPending && (
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSelection(s.id)}
+                            className="rounded border-gray-300 text-orange-600 focus:ring-orange-500 w-3.5 h-3.5"
+                          />
+                        )}
+                      </td>
+                      <td className="px-3 py-1 font-medium text-gray-900">
+                        <button
+                          type="button"
+                          onClick={() => onView({
+                            id: s.id,
+                            idnumber: s.school_id,
+                            role: "student",
+                            firstname: s.full_name.split(" ")[0],
+                            lastname: s.full_name.split(" ").slice(-1)[0],
+                            email: s.email,
+                            course: s.course,
+                            section: s.section,
+                            signup_status: "PENDING",
+                          })}
+                          className="hover:text-orange-600 hover:underline text-left font-semibold"
+                        >
+                          {s.full_name.trim().split(" ").slice(-1)[0] || ""}{", "}{s.full_name.trim().split(" ")[0] || ""}
+                        </button>
+                      </td>
+                      <td className="px-3 py-1 text-gray-600">{s.school_id}</td>
+                      <td className="px-3 py-1 text-gray-600">{s.email ? s.email : "-"}</td>
+                      <td className="px-3 py-1 text-gray-600">
+                        {formatCourseSection(s.course, s.section)}
+                      </td>
+                      <td className="px-3 py-1">
+                        {isPending && (
+                          <div className="flex gap-1.5">
+                            <button
+                              onClick={() =>
+                                setConfirmAction({
+                                  type: "single",
+                                  id: s.id,
+                                  action: "approve",
+                                })
+                              }
+                              disabled={actionLoading === s.id}
+                              className="px-2 py-0.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-colors disabled:opacity-50"
+                            >
+                              {actionLoading === s.id ? "..." : "Approve"}
+                            </button>
+                            <button
+                              onClick={() =>
+                                setConfirmAction({
+                                  type: "single",
+                                  id: s.id,
+                                  action: "reject",
+                                })
+                              }
+                              disabled={actionLoading === s.id}
+                              className="px-2 py-0.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-colors disabled:opacity-50"
+                            >
+                              {actionLoading === s.id ? "..." : "Reject"}
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+          <div className="md:hidden">
+            {filteredStudents.length === 0 ? (
+              <div className="px-4 py-8 text-center text-gray-500 text-sm">
+                No students found
+              </div>
+            ) : (
+              <div className="divide-y divide-gray-100">
+                {filteredStudents.map(s => {
+                  const isPending = String(s.status).toUpperCase() === "PENDING";
+                  const isSelected = selectedIds.has(s.id);
+                  return (
+                    <div
+                      key={s.id}
+                      className={`p-3 ${isSelected ? "bg-orange-50/30" : ""}`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1">
+                          <button
+                            onClick={() => onView({
+                              id: s.id,
+                              idnumber: s.school_id,
+                              role: "student",
+                              firstname: s.full_name.split(" ")[0],
+                              lastname: s.full_name.split(" ").slice(-1)[0],
+                              email: s.email,
+                              course: s.course,
+                              section: s.section,
+                              signup_status: "PENDING",
+                            })}
+                            className="text-sm font-bold text-gray-900 hover:text-orange-600 hover:underline text-left"
+                          >
+                            {s.full_name.trim().split(" ").slice(-1)[0] || ""}{", "}{s.full_name.trim().split(" ")[0] || ""}
+                          </button>
+                          <div className="text-xs text-gray-600 mt-0.5">
+                            {s.school_id}
+                          </div>
+                          <div className="text-xs text-gray-500 mt-0.5">
+                            {formatCourseSection(s.course, s.section)}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          {isPending && (
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleSelection(s.id)}
+                              className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                              aria-label="Select for bulk action"
+                            />
+                          )}
+                        </div>
+                      </div>
+                      {isPending && (
+                        <div className="mt-3 flex items-center gap-2">
+                          <button
+                            onClick={() =>
+                              setConfirmAction({
+                                type: "single",
+                                id: s.id,
+                                action: "approve",
+                              })
+                            }
+                            disabled={actionLoading === s.id}
+                            className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
+                          >
+                            {actionLoading === s.id ? "..." : "Approve"}
+                          </button>
+                          <button
+                            onClick={() =>
+                              setConfirmAction({
+                                type: "single",
+                                id: s.id,
+                                action: "reject",
+                              })
+                            }
+                            disabled={actionLoading === s.id}
+                            className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
+                          >
+                            {actionLoading === s.id ? "..." : "Reject"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+        {confirmAction && (
+          <ConfirmationModal
+            title={
+              confirmAction.action === "approve"
+                ? "Approve Student Account(s)?"
+                : "Reject Student Account(s)?"
+            }
+            message={
+              confirmAction.type === "bulk"
+                ? `Are you sure you want to ${confirmAction.action} ${selectedIds.size} selected student(s)?`
+                : `Are you sure you want to ${confirmAction.action} this student account?`
+            }
+            confirmLabel={`Yes, ${
+              confirmAction.action === "approve" ? "Approve" : "Reject"
+            }`}
+            variant={confirmAction.action === "approve" ? "warning" : "danger"}
+            noteLabel={confirmAction.action === "reject" ? "Rejection note" : undefined}
+            noteRequired={confirmAction.action === "reject"}
+            noteValue={confirmAction.action === "reject" ? rejectionNote : ""}
+            onNoteChange={value => {
+              if (confirmAction.action === "reject") {
+                setRejectionNote(value);
+              }
+            }}
+            onConfirm={() => {
+              if (
+                confirmAction.action === "reject" &&
+                (!rejectionNote || !rejectionNote.trim())
+              ) {
+                return;
+              }
+              if (confirmAction.type === "bulk") {
+                performAction(Array.from(selectedIds), confirmAction.action, rejectionNote);
+              } else if (confirmAction.id) {
+                performAction([confirmAction.id], confirmAction.action, rejectionNote);
+              }
+              if (confirmAction.action === "reject") {
+                setRejectionNote("");
+              }
+            }}
+            onCancel={() => {
+              setConfirmAction(null);
+              setRejectionNote("");
+            }}
+            isLoading={actionLoading !== null || isBulkApproving}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
 const MultiSelect = ({ options, value, onChange, placeholder }: { options: {id: number, name: string}[], value: number[], onChange: (val: number[]) => void, placeholder: string }) => {
   const [open, setOpen] = useState(false);
   return (
@@ -852,6 +1432,10 @@ export function ViewUserDetails({ user, users, onClose }: { user: User; users: U
           <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
             <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">ID Number</p>
             <p className="text-base font-semibold text-gray-900">{user.idnumber}</p>
+          </div>
+          <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
+            <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Email</p>
+            <p className="text-base font-semibold text-gray-900">{(user as any).email || "N/A"}</p>
           </div>
           <div className="p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
             <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-1">Full Name</p>

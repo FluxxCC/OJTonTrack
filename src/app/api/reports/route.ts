@@ -79,10 +79,42 @@ export async function GET(req: Request) {
     }
 
     if (idnumber) {
-      // Look up student ID first
-      const { data: student } = await admin.from("users_students").select("id").eq("idnumber", idnumber).single();
-      if (student) {
-        query = query.eq("student_id", student.id);
+      // Look up student ID first (robust, ignoring spaces/hyphens)
+      const normalize = (s: string) => String(s || "").toLowerCase().replace(/[\s\-]/g, "");
+      let studentIdResolved: number | null = null;
+      const { data: exact } = await admin.from("users_students").select("id, idnumber").eq("idnumber", idnumber).maybeSingle();
+      if (exact?.id) {
+        studentIdResolved = exact.id;
+      } else {
+        const { data: ci } = await admin.from("users_students").select("id, idnumber").ilike("idnumber", idnumber).maybeSingle();
+        if (ci?.id) {
+          studentIdResolved = ci.id;
+        } else {
+          const upper = idnumber.toUpperCase();
+          const lower = idnumber.toLowerCase();
+          const { data: up } = await admin.from("users_students").select("id, idnumber").eq("idnumber", upper).maybeSingle();
+          if (up?.id) {
+            studentIdResolved = up.id;
+          } else {
+            const { data: low } = await admin.from("users_students").select("id, idnumber").eq("idnumber", lower).maybeSingle();
+            if (low?.id) {
+              studentIdResolved = low.id;
+            } else {
+              const { data: candidates } = await admin
+                .from("users_students")
+                .select("id, idnumber")
+                .ilike("idnumber", `%${idnumber.slice(0, Math.max(3, Math.min(6, idnumber.length))) }%`)
+                .limit(200);
+              if (Array.isArray(candidates)) {
+                const target = candidates.find((c: any) => normalize(c.idnumber) === normalize(idnumber));
+                if (target?.id) studentIdResolved = target.id;
+              }
+            }
+          }
+        }
+      }
+      if (studentIdResolved) {
+        query = query.eq("student_id", studentIdResolved);
       } else {
         return NextResponse.json({ reports: [], drafts: [] });
       }
@@ -313,6 +345,7 @@ export async function POST(req: Request) {
     const body = await req.json();
     const { 
         idnumber, 
+        studentId,
         title, 
         body: content, 
         fileName, 
@@ -326,16 +359,72 @@ export async function POST(req: Request) {
         id // draft id if updating
     } = body;
 
-    if (!idnumber) return NextResponse.json({ error: "Student ID required" }, { status: 400 });
+    const normalizedId = String(idnumber || "").trim();
+    if (!normalizedId && !(studentId && Number(studentId) > 0)) {
+        return NextResponse.json({ error: "Student ID required" }, { status: 400 });
+    }
 
     // Get Student ID
-    const { data: student, error: studentError } = await admin
-        .from("users_students")
-        .select("id, company, supervisor, supervisorid, firstname, lastname")
-        .eq("idnumber", idnumber)
-        .single();
+    let student: any = null;
+    const normalize = (s: string) => String(s || "").toLowerCase().replace(/[\s\-]/g, "");
+    try {
+      if (studentId && Number(studentId) > 0) {
+        const { data } = await admin
+          .from("users_students")
+          .select("id, company, supervisor_id, firstname, lastname, course_id, section_id")
+          .eq("id", Number(studentId))
+          .maybeSingle();
+        student = data;
+      }
+      if (!student && normalizedId) {
+        const { data } = await admin
+          .from("users_students")
+          .select("id, company, supervisor_id, firstname, lastname, course_id, section_id")
+          .eq("idnumber", normalizedId)
+          .maybeSingle();
+        student = data;
+      }
+      if (!student && normalizedId) {
+        const { data } = await admin
+          .from("users_students")
+          .select("id, company, supervisor_id, firstname, lastname, course_id, section_id")
+          .ilike("idnumber", normalizedId)
+          .maybeSingle();
+        student = data;
+      }
+      if (!student && normalizedId) {
+        const upper = normalizedId.toUpperCase();
+        const { data } = await admin
+          .from("users_students")
+          .select("id, company, supervisor_id, firstname, lastname, course_id, section_id")
+          .eq("idnumber", upper)
+          .maybeSingle();
+        student = data;
+      }
+      if (!student && normalizedId) {
+        const lower = normalizedId.toLowerCase();
+        const { data } = await admin
+          .from("users_students")
+          .select("id, company, supervisor_id, firstname, lastname, course_id, section_id")
+          .eq("idnumber", lower)
+          .maybeSingle();
+        student = data;
+      }
+      // Fallback: match ignoring spaces/hyphens
+      if (!student && normalizedId) {
+        const { data: candidates } = await admin
+          .from("users_students")
+          .select("id, idnumber, company, supervisor_id, firstname, lastname, course_id, section_id")
+          .ilike("idnumber", `%${normalizedId.slice(0, Math.max(3, Math.min(6, normalizedId.length))) }%`)
+          .limit(200);
+        if (Array.isArray(candidates)) {
+          const target = candidates.find((c: any) => normalize(c.idnumber) === normalize(normalizedId));
+          if (target) student = target;
+        }
+      }
+    } catch {}
     
-    if (studentError || !student) {
+    if (!student) {
         return NextResponse.json({ error: "Student not found" }, { status: 404 });
     }
 
@@ -428,6 +517,8 @@ export async function POST(req: Request) {
         files: uploadedFiles,
         status: isDraft ? 'draft' : 'submitted',
         school_year_id: syId,
+        course_id: student.course_id,
+        section_id: student.section_id,
         submitted_at: isDraft ? null : new Date().toISOString()
     };
 

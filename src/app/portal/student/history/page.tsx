@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import * as XLSX from "xlsx-js-style";
 import { StudentBottomNav, StudentHeader, User } from "../ui";
-import { formatHours, calculateSessionDuration, buildSchedule } from "@/lib/attendance";
+import { formatHours, calculateSessionDuration, buildSchedule, calculateHoursWithinOfficialTime, determineShift } from "@/lib/attendance";
 
 type AttendanceEntry = { id?: number; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" | "Official"; is_overtime?: boolean; validated_by?: string; validated_hours?: number; rendered_hours?: number; official_time_in?: string; official_time_out?: string };
 type ServerAttendanceEntry = { id?: number; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null; validated_hours?: number | null; rendered_hours?: number | null; official_time_in?: string | null; official_time_out?: string | null };
@@ -70,6 +70,127 @@ export default function StudentHistoryPage() {
     });
   }, [attendance]);
 
+  const totals = useMemo(() => {
+    const grouped = new Map<string, AttendanceEntry[]>();
+    uniqueAttendance.forEach(log => {
+      const d = new Date(log.timestamp);
+      const key = d.toLocaleDateString();
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)!.push(log);
+    });
+    let totalMsAll = 0;
+    let totalValidatedMsAll = 0;
+    Array.from(grouped.values()).forEach(dayLogs => {
+      const dayDate = new Date(dayLogs[0].timestamp);
+      dayDate.setHours(0,0,0,0);
+      const sorted = dayLogs.slice().sort((a,b) => a.timestamp - b.timestamp);
+      const cfg = schedule || { amIn: "09:00", amOut: "12:00", pmIn: "13:00", pmOut: "17:00", otIn: "17:00", otOut: "18:00" };
+      const daySchedule = buildSchedule(dayDate, cfg);
+      const nonOtLogs = sorted.filter(l => !l.is_overtime);
+      const otLogs = sorted.filter(l => l.is_overtime);
+      let s1: AttendanceEntry | null = null;
+      let s2: AttendanceEntry | null = null;
+      let s3: AttendanceEntry | null = null;
+      let s4: AttendanceEntry | null = null;
+      let s5: AttendanceEntry | null = null;
+      let s6: AttendanceEntry | null = null;
+      const today = new Date(); today.setHours(0,0,0,0);
+      const isPastDate = dayDate < today;
+      const sessions: { in: AttendanceEntry; out: AttendanceEntry }[] = [];
+      let currentIn: AttendanceEntry | null = null;
+      for (const log of nonOtLogs) {
+        if (log.type === "in") {
+          if (!currentIn) currentIn = log;
+        } else if (log.type === "out") {
+          if (currentIn && log.timestamp > currentIn.timestamp) {
+            sessions.push({ in: currentIn, out: log });
+            currentIn = null;
+          }
+        }
+      }
+      if (currentIn && isPastDate) {
+        const shift = determineShift(currentIn.timestamp, daySchedule);
+        const outTs = shift === 'am' ? daySchedule.amOut : daySchedule.pmOut;
+        const finalOutTs = outTs > currentIn.timestamp ? outTs : currentIn.timestamp + 60000;
+        s2 = { id: currentIn.id ? -currentIn.id : -Math.floor(Math.random()*1000000), type: "out", timestamp: finalOutTs, photoDataUrl: "", status: "Pending", validated_by: "AUTO TIME OUT" };
+        sessions.push({ in: currentIn, out: s2 });
+      }
+      const amSessions = sessions.filter(s => determineShift(s.in.timestamp, daySchedule) === 'am');
+      const pmSessions = sessions.filter(s => determineShift(s.in.timestamp, daySchedule) === 'pm');
+      if (amSessions.length > 0) {
+        amSessions.sort((a, b) => a.in.timestamp - b.in.timestamp);
+        s1 = amSessions[0].in;
+        const amSortedByOut = [...amSessions].sort((a, b) => b.out!.timestamp - a.out!.timestamp);
+        s2 = amSortedByOut[0].out;
+      }
+      if (pmSessions.length > 0) {
+        pmSessions.sort((a, b) => a.in.timestamp - b.in.timestamp);
+        s3 = pmSessions[0].in;
+        const pmSortedByOut = [...pmSessions].sort((a, b) => b.out!.timestamp - a.out!.timestamp);
+        s4 = pmSortedByOut[0].out;
+      }
+      s5 = otLogs.find(l => l.type === "in") || null;
+      if (s5) {
+        const otCandidates = otLogs.filter(l => l.type === "out" && l.timestamp > s5!.timestamp);
+        s6 = otCandidates.length ? otCandidates.sort((a, b) => b.timestamp - a.timestamp)[0] : null;
+        if (!s6 && isPastDate) {
+          s6 = { id: s5.id ? -s5.id : -Math.floor(Math.random()*1000000), type: "out", timestamp: Math.max(daySchedule.otEnd || (s5.timestamp + 60000), s5.timestamp + 60000), photoDataUrl: "", status: "Pending", validated_by: "AUTO TIME OUT" };
+        }
+      }
+      const calcSession = (inEntry: AttendanceEntry | null, outEntry: AttendanceEntry | null, shift: 'am' | 'pm' | 'ot') => {
+        if (!inEntry || !outEntry) return 0;
+        const vh = (outEntry as any)?.validated_hours;
+        if (vh !== undefined && vh !== null && Number(vh) >= 0) {
+          return Number(vh) * 3600000;
+        }
+        const offInStr = (outEntry as any)?.official_time_in;
+        const offOutStr = (outEntry as any)?.official_time_out;
+        if (offInStr && offOutStr) {
+          const base = new Date(inEntry.timestamp);
+          const toDate = (t: string) => {
+            const [h, m, s] = t.split(":").map(Number);
+            const d = new Date(base);
+            d.setHours(h, m, s || 0, 0);
+            return d;
+          };
+          const offIn = toDate(offInStr);
+          const offOut = toDate(offOutStr);
+          if (offOut.getTime() < offIn.getTime()) offOut.setDate(offOut.getDate() + 1);
+          return calculateHoursWithinOfficialTime(
+            new Date(inEntry.timestamp),
+            new Date(outEntry.timestamp),
+            offIn,
+            offOut
+          );
+        }
+        return 0;
+      };
+      const dayTotalMs = calcSession(s1, s2, 'am') + calcSession(s3, s4, 'pm') + calcSession(s5, s6, 'ot');
+      const ledgerValidatedMs = [s2, s4, s6].reduce((acc, out) => {
+        const v = out ? (out as any).validated_hours : undefined;
+        const num = v !== undefined && v !== null ? Number(v) : NaN;
+        return acc + (isNaN(num) ? 0 : num * 3600000);
+      }, 0);
+      try {
+        const dbg = {
+          date: dayDate.toLocaleDateString(),
+          s1: s1 ? { id: s1.id, ts: new Date(s1.timestamp).toLocaleTimeString(), status: s1.status } : null,
+          s2: s2 ? { id: s2.id, ts: new Date(s2.timestamp).toLocaleTimeString(), vh: (s2 as any).validated_hours, offIn: (s2 as any).official_time_in, offOut: (s2 as any).official_time_out, status: s2.status } : null,
+          s3: s3 ? { id: s3.id, ts: new Date(s3.timestamp).toLocaleTimeString(), status: s3.status } : null,
+          s4: s4 ? { id: s4.id, ts: new Date(s4.timestamp).toLocaleTimeString(), vh: (s4 as any).validated_hours, offIn: (s4 as any).official_time_in, offOut: (s4 as any).official_time_out, status: s4.status } : null,
+          s5: s5 ? { id: s5.id, ts: new Date(s5.timestamp).toLocaleTimeString(), status: s5.status } : null,
+          s6: s6 ? { id: s6.id, ts: new Date(s6.timestamp).toLocaleTimeString(), vh: (s6 as any).validated_hours, offIn: (s6 as any).official_time_in, offOut: (s6 as any).official_time_out, status: s6.status } : null,
+          dayTotalMs,
+          ledgerValidatedMs
+        };
+        console.debug("[StudentHistory] Freeze debug:", dbg);
+      } catch {}
+      totalMsAll += dayTotalMs;
+      totalValidatedMsAll += ledgerValidatedMs;
+    });
+    return { total: formatHours(totalMsAll), validated: formatHours(totalValidatedMsAll) };
+  }, [uniqueAttendance, schedule]);
+
   useEffect(() => {
     if (!idnumber) return;
     let active = true;
@@ -94,8 +215,22 @@ export default function StudentHistoryPage() {
               rendered_hours: e.rendered_hours != null ? Number(e.rendered_hours) : undefined,
               official_time_in: e.official_time_in || undefined,
               official_time_out: e.official_time_out || undefined,
+              is_overtime: (e as any).is_overtime || undefined,
             };
           }) as AttendanceEntry[];
+          try {
+            const outs = mapped.filter(m => m.type === "out");
+            const withLedger = outs.filter(o => typeof (o as any).validated_hours === "number");
+            const sample = withLedger.slice(0, 3).map(o => ({
+              id: o.id,
+              ts: o.timestamp,
+              vh: (o as any).validated_hours,
+              offIn: (o as any).official_time_in,
+              offOut: (o as any).official_time_out,
+              status: o.status
+            }));
+            console.debug("[StudentHistory] Fetched OUT entries:", outs.length, "with ledger:", withLedger.length, "samples:", sample);
+          } catch {}
           setAttendance(mapped);
         }
       } catch {}
@@ -157,31 +292,47 @@ export default function StudentHistoryPage() {
         const today = new Date(); today.setHours(0,0,0,0);
         const isPastDate = dayDate < today;
 
-        // s1: first IN
-        s1 = nonOtLogs.find(l => l.type === "in") || null;
-        // s2: first OUT after s1
-        if (s1) {
-          s2 = nonOtLogs.find(l => l.type === "out" && l.timestamp > s1!.timestamp) || null;
-          if (!s2 && isPastDate) {
-            s2 = { id: s1.id ? -s1.id : -Math.floor(Math.random()*1000000), type: "out", timestamp: Math.max(daySchedule.amOut || (s1.timestamp + 60000), s1.timestamp + 60000), photoDataUrl: "", status: "Pending", validated_by: "AUTO TIME OUT" };
+        const sessions: { in: AttendanceEntry; out: AttendanceEntry }[] = [];
+        let currentIn: AttendanceEntry | null = null;
+        for (const log of nonOtLogs) {
+          if (log.type === "in") {
+            if (!currentIn) currentIn = log;
+          } else if (log.type === "out") {
+            if (currentIn && log.timestamp > currentIn.timestamp) {
+              sessions.push({ in: currentIn, out: log });
+              currentIn = null;
+            }
           }
         }
+        if (currentIn && isPastDate) {
+          const shift = determineShift(currentIn.timestamp, daySchedule);
+          const outTs = shift === 'am' ? daySchedule.amOut : daySchedule.pmOut;
+          const finalOutTs = outTs > currentIn.timestamp ? outTs : currentIn.timestamp + 60000;
+          s2 = { id: currentIn.id ? -currentIn.id : -Math.floor(Math.random()*1000000), type: "out", timestamp: finalOutTs, photoDataUrl: "", status: "Pending", validated_by: "AUTO TIME OUT" };
+          sessions.push({ in: currentIn, out: s2 });
+        }
+        
+        const amSessions = sessions.filter(s => determineShift(s.in.timestamp, daySchedule) === 'am');
+        const pmSessions = sessions.filter(s => determineShift(s.in.timestamp, daySchedule) === 'pm');
 
-        // s3: next IN after s2 (or after s1 if s2 missing)
-        const afterTsForS3 = s2 ? s2.timestamp : (s1 ? s1.timestamp : 0);
-        s3 = nonOtLogs.find(l => l.type === "in" && l.timestamp > afterTsForS3) || null;
-        // s4: first OUT after s3
-        if (s3) {
-          s4 = nonOtLogs.find(l => l.type === "out" && l.timestamp > s3!.timestamp) || null;
-          if (!s4 && isPastDate) {
-            s4 = { id: s3.id ? -s3.id : -Math.floor(Math.random()*1000000), type: "out", timestamp: Math.max(daySchedule.pmOut || (s3.timestamp + 60000), s3.timestamp + 60000), photoDataUrl: "", status: "Pending", validated_by: "AUTO TIME OUT" };
-          }
+        if (amSessions.length > 0) {
+          amSessions.sort((a, b) => a.in.timestamp - b.in.timestamp);
+          s1 = amSessions[0].in;
+          const amSortedByOut = [...amSessions].sort((a, b) => b.out!.timestamp - a.out!.timestamp);
+          s2 = amSortedByOut[0].out;
+        }
+        if (pmSessions.length > 0) {
+          pmSessions.sort((a, b) => a.in.timestamp - b.in.timestamp);
+          s3 = pmSessions[0].in;
+          const pmSortedByOut = [...pmSessions].sort((a, b) => b.out!.timestamp - a.out!.timestamp);
+          s4 = pmSortedByOut[0].out;
         }
 
         // s5/s6: OT pair
         s5 = otLogs.find(l => l.type === "in") || null;
         if (s5) {
-          s6 = otLogs.find(l => l.type === "out" && l.timestamp > s5!.timestamp) || null;
+          const otCandidates = otLogs.filter(l => l.type === "out" && l.timestamp > s5!.timestamp);
+          s6 = otCandidates.length ? otCandidates.sort((a, b) => b.timestamp - a.timestamp)[0] : null;
           if (!s6 && isPastDate) {
             s6 = { id: s5.id ? -s5.id : -Math.floor(Math.random()*1000000), type: "out", timestamp: Math.max(daySchedule.otEnd || (s5.timestamp + 60000), s5.timestamp + 60000), photoDataUrl: "", status: "Pending", validated_by: "AUTO TIME OUT" };
           }
@@ -197,27 +348,40 @@ export default function StudentHistoryPage() {
             return Number((outEntry as any).validated_hours) * 3600000;
           }
 
-          // 2. Check Rendered Hours (Legacy)
-          if ((outEntry as any).rendered_hours !== undefined && (outEntry as any).rendered_hours !== null && Number((outEntry as any).rendered_hours) >= 0) {
-            return Number((outEntry as any).rendered_hours) * 3600000;
-          }
+           // Do not use rendered_hours here to avoid rounding discrepancies
 
-          return calculateSessionDuration(inEntry.timestamp, outEntry.timestamp, shift, daySchedule2);
+           if ((outEntry as any).official_time_in && (outEntry as any).official_time_out) {
+             const base = new Date(inEntry.timestamp);
+             const toDate = (t: string) => {
+               const [h, m, s] = t.split(":").map(Number);
+               const d = new Date(base);
+               d.setHours(h, m, s || 0, 0);
+               return d;
+             };
+             const offIn = toDate((outEntry as any).official_time_in);
+             const offOut = toDate((outEntry as any).official_time_out);
+             if (offOut.getTime() < offIn.getTime()) offOut.setDate(offOut.getDate() + 1);
+             return calculateHoursWithinOfficialTime(
+               new Date(inEntry.timestamp),
+               new Date(outEntry.timestamp),
+               offIn,
+               offOut
+             );
+           }
+
+         return 0;
            };
 
         const dayTotalMs = calcSession(s1, s2, 'am') + calcSession(s3, s4, 'pm') + calcSession(s5, s6, 'ot');
         overallTotal += dayTotalMs;
-        
-        const isAmValidated = (s1?.status === 'Approved' || s2?.status === 'Approved');
-        const isPmValidated = (s3?.status === 'Approved' || s4?.status === 'Approved');
-        const isOtValidated = (s5?.status === 'Approved' || s6?.status === 'Approved');
-        
-        let dayValidatedMs = 0;
-        if (isAmValidated) dayValidatedMs += calcSession(s1, s2, 'am');
-        if (isPmValidated) dayValidatedMs += calcSession(s3, s4, 'pm');
-        if (isOtValidated) dayValidatedMs += calcSession(s5, s6, 'ot');
-        
-        overallValidated += dayValidatedMs;
+
+        const ledgerValidatedMs = [s2, s4, s6].reduce((acc, out) => {
+          const v = out ? (out as any).validated_hours : undefined;
+          const num = v !== undefined && v !== null ? Number(v) : NaN;
+          return acc + (isNaN(num) ? 0 : num * 3600000);
+        }, 0);
+
+        overallValidated += ledgerValidatedMs;
 
         return {
            date: dayDate,
@@ -368,7 +532,13 @@ export default function StudentHistoryPage() {
         <div className="mx-auto w-full max-w-7xl">
           <div className="rounded-3xl bg-white border border-gray-200 shadow-sm p-4 sm:p-6">
             <div className="flex justify-between items-center mb-4">
-              <div className="text-sm font-semibold text-gray-700 uppercase tracking-wide">Attendance History</div>
+              <div>
+                <div className="text-sm font-semibold text-gray-700 uppercase tracking-wide">Attendance History</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  <span className="font-semibold">Total Hours:</span> {totals.total} &nbsp; • &nbsp;
+                  <span className="font-semibold">Total Validated Hours:</span> {totals.validated}
+                </div>
+              </div>
               <button
                 onClick={handleDownloadExcel}
                 disabled={uniqueAttendance.length === 0}

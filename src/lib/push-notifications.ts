@@ -51,7 +51,7 @@ export async function sendPushNotification(
     }
 
     webPush.setVapidDetails(
-      "mailto:onboarding@ojtontrack.site",
+      "mailto:onboarding@ojtontrak.online",
       pub,
       priv
     );
@@ -140,7 +140,7 @@ export async function sendBatchPushNotification(
     }
 
     webPush.setVapidDetails(
-      "mailto:onboarding@ojtontrack.site",
+      "mailto:onboarding@ojtontrak.online",
       pub,
       priv
     );

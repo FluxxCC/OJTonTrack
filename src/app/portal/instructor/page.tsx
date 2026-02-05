@@ -40,7 +40,7 @@ import {
   Tooltip
 } from 'recharts';
 import { AttendanceDetailsModal } from "@/components/AttendanceDetailsModal";
-import { UsersView, AddUserForm, EditUserForm, ViewUserDetails, Modal, ConfirmationModal, SuccessModal, AlertModal } from './ui';
+import { UsersView, AddUserForm, EditUserForm, ViewUserDetails, Modal, ConfirmationModal, SuccessModal, AlertModal, ApprovalsView } from './ui';
 import { calculateSessionDuration, determineShift, ShiftSchedule as LibShiftSchedule, buildSchedule, formatHours, calculateTotalDuration, BUFFER_START_MS, BUFFER_END_MS, calculateShiftDurations, isLate, calculateHoursWithinOfficialTime } from "@/lib/attendance";
 import * as XLSX from 'xlsx-js-style';
 
@@ -59,7 +59,7 @@ const REPORT_SECTIONS = [
 
 // --- Types ---
 
-type AttendanceEntry = { id?: number; idnumber: string; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" | "Validated" | "VALIDATED" | "OFFICIAL" | "ADJUSTED" | "Official" | "REJECTED"; validatedAt?: number; validatedBy?: string; validated_by?: string; is_overtime?: boolean; official_time_in?: string | null; official_time_out?: string | null; rendered_hours?: number | null; };
+type AttendanceEntry = { id?: number; idnumber: string; type: "in" | "out"; timestamp: number; photoDataUrl: string; status?: "Pending" | "Approved" | "Rejected" | "Validated" | "VALIDATED" | "OFFICIAL" | "ADJUSTED" | "Official" | "REJECTED"; validatedAt?: number; validatedBy?: string; validated_by?: string; is_overtime?: boolean; official_time_in?: string | null; official_time_out?: string | null; rendered_hours?: number | null; validated_hours?: number | null; slot?: "AM" | "PM" | "OT"; };
 type ServerAttendanceEntry = { id?: number; idnumber: string; type: "in" | "out"; ts: number; photourl: string; status?: string; validated_by?: string | null; validated_at?: string | null; is_overtime?: boolean; official_time_in?: string | null; official_time_out?: string | null; rendered_hours?: number | null };
 type ReportEntry = { id: number; title?: string; body?: string; text?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string; idnumber?: string; isViewedByInstructor?: boolean; week?: number; photos?: any[] };
 type ReportFile = { name?: string; type?: string } | null;
@@ -71,6 +71,7 @@ type User = {
   firstname?: string;
   middlename?: string;
   lastname?: string;
+  email?: string;
   course?: string;
   section?: string;
   company?: string;
@@ -84,10 +85,24 @@ type User = {
 
 type Course = { id: number; name: string; name_key: string };
 type Section = { id: number; name: string; code: string; course_id: number };
-type TabId = "attendance" | "reports" | "approval" | "profile";
+type TabId = "validate" | "attendance" | "reports" | "approval" | "profile";
 type ReportRow = { id: number; idnumber: string; title?: string | null; text?: string | null; files?: ReportFiles; ts?: number | null; submittedat?: string | null; instructor_comment?: string | null; status?: string | null };
 type ApiReport = { id: number; title?: string; body?: string; fileName?: string; fileType?: string; fileUrl?: string; submittedAt: number; instructorComment?: string | null; status?: string };
 type EvaluationDetail = { createdAt: number; supervisorId?: string; comment?: string; interpretation?: string; criteria: Record<string, number>; overallScore?: number };
+
+type TodaySlots = {
+  s1: AttendanceEntry | null;
+  s2: AttendanceEntry | null;
+  s3: AttendanceEntry | null;
+  s4: AttendanceEntry | null;
+  s5: AttendanceEntry | null;
+  s6: AttendanceEntry | null;
+  todayTotalMs: number;
+  schedule: any;
+  otAuthLog?: AttendanceEntry | null;
+  isOvertimeAuthorized?: boolean;
+};
+type StudentSummary = { student: User; todaySlots: TodaySlots | null };
 
 function formatCourseSection(courseStr?: string, sectionStr?: string): string {
   if (!courseStr) return "";
@@ -101,6 +116,620 @@ function formatCourseSection(courseStr?: string, sectionStr?: string): string {
   }
   return `${courseStr} - ${sectionStr}`;
 }
+
+function toDateKey(d: Date) {
+  return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+}
+function toLocalDateKey(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+const ValidateAttendanceInstructorView = ({
+  students,
+  attendance,
+  scheduleConfigs,
+  overtimeShifts,
+  studentSchedules,
+  overridesData,
+  myIdnumber,
+  assignedCourses,
+  assignedSections
+}: {
+  students: User[];
+  attendance: AttendanceEntry[];
+  scheduleConfigs: { global: any; bySupervisor: Record<string, any> };
+  overtimeShifts: { student_id: string; date: string; start: number; end: number }[];
+  studentSchedules: Record<string, any>;
+  overridesData: Record<string, any>;
+  myIdnumber: string;
+  assignedCourses: string[];
+  assignedSections: string[];
+}) => {
+  const [filterCourse, setFilterCourse] = useState<string>("All Courses");
+  const [filterSection, setFilterSection] = useState<string>("All Sections");
+  const [searchTerm, setSearchTerm] = useState<string>("");
+  const [selectedDate, setSelectedDate] = useState<Date>(() => new Date());
+  const [selectedPairs, setSelectedPairs] = useState<Map<string, { in: AttendanceEntry | null; out: AttendanceEntry | null; studentIdnumber: string; shift: "am" | "pm" | "ot" }>>(new Map());
+  const [isBulkValidating, setIsBulkValidating] = useState(false);
+  const selectedCount = selectedPairs.size;
+  const [otModalOpen, setOtModalOpen] = useState(false);
+  const [otSelectedIds, setOtSelectedIds] = useState<Set<string>>(new Set());
+  const [otDate, setOtDate] = useState<Date | null>(new Date());
+  const [otStartTime, setOtStartTime] = useState<string>("");
+  const [otHours, setOtHours] = useState<number>(0);
+  const [otMinutes, setOtMinutes] = useState<number>(0);
+  const [otSaving, setOtSaving] = useState(false);
+  const [selectedStudentDetail, setSelectedStudentDetail] = useState<User | null>(null);
+  const uniqueCourses = useMemo(() => {
+    const allowed = assignedCourses && assignedCourses.length > 0 ? assignedCourses : Array.from(new Set(students.map(s => s.course).filter(Boolean)));
+    return ["All Courses", ...allowed];
+  }, [students, assignedCourses]);
+  const availableSections = useMemo(() => {
+    const allowedSections = assignedSections && assignedSections.length > 0 ? new Set(assignedSections) : null;
+    const sections = students
+      .filter(s => (filterCourse === "All Courses" || s.course === filterCourse))
+      .map(s => s.section)
+      .filter(Boolean) as string[];
+    const set = new Set(sections.filter(s => !allowedSections || allowedSections.has(s)));
+    return ["All Sections", ...Array.from(set)];
+  }, [students, filterCourse, assignedSections]);
+  const filteredStudents = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    return students.filter(s => {
+      const matchesSearch = q.length === 0 || `${s.lastname || ""}, ${s.firstname || ""}`.toLowerCase().includes(q) || (s.course || "").toLowerCase().includes(q) || (s.section || "").toLowerCase().includes(q);
+      const matchesCourse = filterCourse === "All Courses" || s.course === filterCourse;
+      const matchesSection = filterSection === "All Sections" || s.section === filterSection;
+      const isApproved = (s.signup_status || 'APPROVED') === 'APPROVED';
+      const inAssignedCourse = !assignedCourses || assignedCourses.length === 0 ? true : assignedCourses.includes(s.course || "");
+      const inAssignedSection = !assignedSections || assignedSections.length === 0 ? true : assignedSections.includes(s.section || "");
+      return matchesSearch && matchesCourse && matchesSection && isApproved && inAssignedCourse && inAssignedSection;
+    });
+  }, [students, searchTerm, filterCourse, filterSection, assignedCourses, assignedSections]);
+  const overtimeLookup = useMemo(() => {
+    const m = new Map<string, { start: number; end: number }>();
+    overtimeShifts.forEach(ot => {
+      m.set(`${ot.student_id}_${ot.date}`, { start: ot.start, end: ot.end });
+    });
+    return m;
+  }, [overtimeShifts]);
+  const dateLabel = useMemo(() => {
+    return selectedDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  }, [selectedDate]);
+  const studentSummaries = useMemo<StudentSummary[]>(() => {
+    return filteredStudents.map(student => {
+      const logs = attendance.filter(a => a.idnumber === student.idnumber);
+      const grouped = new Map<string, AttendanceEntry[]>();
+      logs.forEach(log => {
+        const d = new Date(log.timestamp);
+        const key = toDateKey(d);
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key)!.push(log);
+      });
+      const targetKey = toDateKey(selectedDate);
+      let todaySlots: TodaySlots | null = null;
+      const totalKeyed = Array.from(grouped.entries());
+      let totalValidatedMs = 0;
+      totalKeyed.forEach(([key, dayLogs]) => {
+        const dateParts = key.split("-");
+        const dateObj = new Date(Number(dateParts[0]), Number(dateParts[1]) - 1, Number(dateParts[2]));
+        const scheduleToUse = (() => {
+          const supId = student.supervisorid;
+          const base = {
+            amIn: scheduleConfigs.global?.amIn || "08:00",
+            amOut: scheduleConfigs.global?.amOut || "12:00",
+            pmIn: scheduleConfigs.global?.pmIn || "13:00",
+            pmOut: scheduleConfigs.global?.pmOut || "17:00",
+            otIn: scheduleConfigs.global?.otIn || "17:00",
+            otOut: scheduleConfigs.global?.otOut || "18:00",
+          };
+          const override = overridesData?.[supId || ""]?.[key] || null;
+          return {
+            amIn: override?.am?.start || base.amIn,
+            amOut: override?.am?.end || base.amOut,
+            pmIn: override?.pm?.start || base.pmIn,
+            pmOut: override?.pm?.end || base.pmOut,
+            otIn: base.otIn,
+            otOut: base.otOut
+          };
+        })();
+        const schedule = buildSchedule(dateObj, scheduleToUse);
+        const sortedLogs = dayLogs.slice().sort((a, b) => a.timestamp - b.timestamp);
+        let s1: AttendanceEntry | null = null, s2: AttendanceEntry | null = null, s3: AttendanceEntry | null = null, s4: AttendanceEntry | null = null, s5: AttendanceEntry | null = null, s6: AttendanceEntry | null = null;
+        let currentIn: AttendanceEntry | null = null;
+        const sessions: { in: AttendanceEntry; out: AttendanceEntry | null }[] = [];
+        for (const log of sortedLogs) {
+          const t = (log.type || "").toLowerCase();
+          if (t === "in") {
+            currentIn = log;
+          } else if (t === "out") {
+            if (currentIn) {
+              sessions.push({ in: currentIn, out: log });
+              currentIn = null;
+            }
+          }
+        }
+        const mapSessionToSlots = (shiftSessions: { in: AttendanceEntry; out: AttendanceEntry | null }[]) => {
+          if (shiftSessions.length === 0) return { in: null, out: null };
+          const first = shiftSessions[0];
+          const last = shiftSessions[shiftSessions.length - 1];
+          return { in: first.in, out: last.out };
+        };
+        const amSessions = sessions.filter(s => ((s.out as any)?.slot === "AM") || ((s.in as any)?.slot === "AM"));
+        const pmSessions = sessions.filter(s => ((s.out as any)?.slot === "PM") || ((s.in as any)?.slot === "PM"));
+        const otSessions = sessions.filter(s => ((s.out as any)?.slot === "OT") || (s.in as any)?.is_overtime);
+        const amSlots = mapSessionToSlots(amSessions);
+        const pmSlots = mapSessionToSlots(pmSessions);
+        const otSlots = mapSessionToSlots(otSessions);
+        s1 = amSlots.in; s2 = amSlots.out || null;
+        s3 = pmSlots.in; s4 = pmSlots.out || null;
+        s5 = otSlots.in; s6 = otSlots.out || null;
+        // Ledger snapshot total (validated_hours or official snapshot)
+        const toDate = (t: string, baseTs: number) => {
+          const d = new Date(baseTs);
+          const parts = t.split(":").map(Number);
+          d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+          return d;
+        };
+        const calcFrozen = (inLog: AttendanceEntry | null, outLog: AttendanceEntry | null) => {
+          if (!inLog || !outLog) return 0;
+          const vh = (outLog as any).validated_hours;
+          if (vh !== undefined && vh !== null && Number(vh) >= 0) {
+            return Number(vh) * 3600000;
+          }
+          const offInStr = (outLog as any).official_time_in;
+          const offOutStr = (outLog as any).official_time_out;
+          if (offInStr && offOutStr) {
+            const offIn = toDate(offInStr, inLog.timestamp);
+            const offOut = toDate(offOutStr, inLog.timestamp);
+            if (offOut.getTime() < offIn.getTime()) offOut.setDate(offOut.getDate() + 1);
+            return calculateHoursWithinOfficialTime(new Date(inLog.timestamp), new Date(outLog.timestamp), offIn, offOut);
+          }
+          return 0;
+        };
+        const dayFrozenMs = calcFrozen(s1, s2) + calcFrozen(s3, s4) + calcFrozen(s5, s6);
+        if (key === targetKey) {
+          const otAuthLog = dayLogs.find(l => l.photoDataUrl && l.photoDataUrl.startsWith("OT_AUTH:")) || null;
+          const isOvertimeAuthorized = !!overtimeLookup.get(`${student.idnumber}_${key}`);
+          todaySlots = { s1, s2, s3, s4, s5, s6, todayTotalMs: dayFrozenMs, schedule, otAuthLog, isOvertimeAuthorized };
+        }
+      });
+      return {
+        student,
+        todaySlots,
+      };
+    });
+  }, [filteredStudents, attendance, scheduleConfigs, overridesData, selectedDate]);
+  const renderTime = (e: AttendanceEntry | null) => {
+    if (!e) return "-";
+    return new Date(e.timestamp).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  };
+  const formatTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const selectedDateKey = toLocalDateKey(selectedDate);
+  const isPairSelected = (sid: string, shift: "am" | "pm" | "ot") => selectedPairs.has(`${sid}_${selectedDateKey}_${shift}`);
+  const togglePairSelection = (sid: string, shift: "am" | "pm" | "ot", pairIn: AttendanceEntry | null, pairOut: AttendanceEntry | null) => {
+    const key = `${sid}_${selectedDateKey}_${shift}`;
+    setSelectedPairs(prev => {
+      const next = new Map(prev);
+      if (next.has(key)) next.delete(key);
+      else next.set(key, { in: pairIn, out: pairOut, studentIdnumber: sid, shift });
+      return next;
+    });
+  };
+  const selectAllPending = () => {
+    const next = new Map<string, { in: AttendanceEntry | null; out: AttendanceEntry | null; studentIdnumber: string; shift: "am" | "pm" | "ot" }>();
+    studentSummaries.forEach(row => {
+      const sid = row.student.idnumber;
+      const t = row.todaySlots;
+      if (!t) return;
+      const addIfPending = (inLog: AttendanceEntry | null, outLog: AttendanceEntry | null, shift: "am" | "pm" | "ot") => {
+        const inStatus = inLog?.status;
+        const outStatus = outLog?.status;
+        const pairHasFinal = ["Approved", "Rejected", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(inStatus || "") || ["Approved", "Rejected", "Validated", "VALIDATED", "OFFICIAL", "ADJUSTED", "Official"].includes(outStatus || "");
+        if (!pairHasFinal && (inLog || outLog)) {
+          next.set(`${sid}_${selectedDateKey}_${shift}`, { in: inLog, out: outLog, studentIdnumber: sid, shift });
+        }
+      };
+      addIfPending(t.s1, t.s2, "am");
+      addIfPending(t.s3, t.s4, "pm");
+      addIfPending(t.s5, t.s6, "ot");
+    });
+    setSelectedPairs(next);
+  };
+  const bulkValidate = async (action: "approve" | "reject") => {
+    if (selectedPairs.size === 0) return;
+    setIsBulkValidating(true);
+    try {
+      const validatorId = myIdnumber || localStorage.getItem("idnumber") || "";
+      for (const [, pair] of selectedPairs) {
+        const doPatch = async (entry: AttendanceEntry | null) => {
+          if (!entry || typeof entry.id === "undefined") return;
+          const res = await fetch("/api/attendance", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: entry.id, approve: action === "approve", reject: action === "reject", validated_by: validatorId })
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || "Failed to update attendance");
+          }
+        };
+        await doPatch(pair.in);
+        await doPatch(pair.out);
+      }
+      setSelectedPairs(new Map());
+    } catch (e: any) {
+      alert(e.message || "Failed");
+    } finally {
+      setIsBulkValidating(false);
+    }
+  };
+  return (
+    <>
+    {!selectedStudentDetail ? (
+    <div className="space-y-6">
+      <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center gap-3">
+          <div className="flex gap-2 flex-1">
+            <select value={filterCourse} onChange={e => setFilterCourse(e.target.value)} className="px-3 py-2 bg-white border border-gray-300 rounded-xl text-sm font-medium text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-500/30">
+              {uniqueCourses.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <select value={filterSection} onChange={e => setFilterSection(e.target.value)} className="px-3 py-2 bg-white border border-gray-300 rounded-xl text-sm font-medium text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-500/30">
+              {availableSections.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="flex flex-1 items-center gap-3">
+            <div className="relative flex-1 md:max-w-xs">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+              <input type="text" placeholder="Filter by name..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-white border border-gray-300 rounded-xl text-sm font-medium text-gray-700 placeholder:text-gray-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-500/30" />
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-gray-100 md:border-t-0 md:pt-0">
+          <button onClick={() => setOtModalOpen(true)} className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-orange-500 bg-orange-500 text-white hover:bg-orange-600 hover:border-orange-600 transition-colors">
+            Authorize Overtime
+          </button>
+          <button onClick={selectAllPending} className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100 hover:border-orange-400 transition-colors">
+            Select all pending
+          </button>
+          <button onClick={() => setSelectedPairs(new Map())} disabled={selectedCount === 0} className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-medium rounded-md border border-gray-200 bg-white text-gray-600 hover:text-gray-800 hover:bg-gray-100 disabled:opacity-40 disabled:hover:bg-white disabled:hover:text-gray-600 transition-colors">
+            Clear
+          </button>
+          {selectedCount > 0 && (
+            <>
+              <span className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-medium rounded-md border border-gray-200 bg-gray-50 text-gray-700">
+                {selectedCount} selected
+              </span>
+              <button onClick={() => bulkValidate("approve")} disabled={isBulkValidating} className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-green-500 bg-green-500 text-white hover:bg-green-600 hover:border-green-600 transition-colors disabled:opacity-60">
+                {isBulkValidating ? "Processing..." : "Approve Selected"}
+              </button>
+              <button onClick={() => bulkValidate("reject")} disabled={isBulkValidating} className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-semibold rounded-md border border-red-400 bg-red-50 text-red-600 hover:bg-red-100 hover:border-red-500 transition-colors disabled:opacity-60">
+                Reject
+              </button>
+            </>
+          )}
+        </div>
+        {otModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-sm overflow-hidden flex flex-col">
+              <div className="px-3 py-1.5 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+                <h3 className="font-bold text-gray-900 text-sm">Authorize Overtime</h3>
+                <button onClick={() => setOtModalOpen(false)} className="p-1 hover:bg-gray-200 rounded-full text-gray-500">
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="p-3 space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-gray-700 uppercase">Date</label>
+                    <input
+                      type="date"
+                      value={otDate ? (() => { const d = otDate; const y = d.getFullYear(); const m = String(d.getMonth() + 1).padStart(2,'0'); const da = String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${da}`; })() : ""}
+                      onChange={e => {
+                        if (!e.target.value) setOtDate(null);
+                        else {
+                          const [y, m, d] = e.target.value.split("-").map(Number);
+                          setOtDate(new Date(y, m - 1, d));
+                        }
+                      }}
+                      className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs font-medium text-gray-900"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-gray-700 uppercase">Start Time</label>
+                    <input
+                      type="time"
+                      value={otStartTime}
+                      onChange={e => setOtStartTime(e.target.value)}
+                      className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs font-medium text-gray-900"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-gray-700 uppercase">Hours</label>
+                    <input
+                      type="number"
+                      min="0" max="12"
+                      value={otHours}
+                      onChange={e => setOtHours(Math.max(0, parseInt(e.target.value) || 0))}
+                      className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs font-medium text-gray-900"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-gray-700 uppercase">Minutes</label>
+                    <input
+                      type="number"
+                      min="0" max="59" step="15"
+                      value={otMinutes}
+                      onChange={e => setOtMinutes(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))}
+                      className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs font-medium text-gray-900"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-gray-600">Ends at: <span className="font-bold text-orange-600">{(() => {
+                    if (!otStartTime) return "--:--";
+                    const [h, m] = otStartTime.split(":").map(Number);
+                    const d = new Date();
+                    d.setHours(h, m, 0, 0);
+                    d.setMinutes(d.getMinutes() + otHours * 60 + otMinutes);
+                    return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+                  })()}</span></span>
+                  <button
+                    onClick={() => {
+                      const allIds = filteredStudents.map(s => String(s.idnumber));
+                      const allSelected = allIds.every(id => otSelectedIds.has(id));
+                      const next = new Set(otSelectedIds);
+                      if (allSelected) allIds.forEach(id => next.delete(id));
+                      else allIds.forEach(id => next.add(id));
+                      setOtSelectedIds(next);
+                    }}
+                    className="text-[10px] text-orange-600 font-medium hover:underline"
+                  >
+                    {filteredStudents.length > 0 && filteredStudents.every(s => otSelectedIds.has(String(s.idnumber))) ? "Deselect All" : "Select All"}
+                  </button>
+                </div>
+                <div className="border border-gray-200 rounded-lg h-40 overflow-y-auto divide-y divide-gray-100 custom-scrollbar bg-gray-50">
+                  {filteredStudents.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-gray-500">No students found.</div>
+                  ) : (
+                    filteredStudents.map(student => {
+                      const sid = String(student.idnumber);
+                      const isSelected = otSelectedIds.has(sid);
+                      return (
+                        <label key={sid} className="flex items-center gap-2 p-2 hover:bg-white cursor-pointer transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {
+                              const next = new Set(otSelectedIds);
+                              if (next.has(sid)) next.delete(sid); else next.add(sid);
+                              setOtSelectedIds(next);
+                            }}
+                            className="w-3.5 h-3.5 rounded text-orange-600 focus:ring-orange-500 border-gray-300"
+                          />
+                          <div className="text-xs">
+                            <div className="font-medium text-gray-900">{student.lastname}, {student.firstname}</div>
+                            <div className="text-[10px] text-gray-500">{student.course} • {student.section}</div>
+                          </div>
+                        </label>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+              <div className="p-3 border-t border-gray-100 bg-gray-50 flex justify-end gap-2">
+                <button onClick={() => setOtModalOpen(false)} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">Cancel</button>
+                <button
+                  onClick={async () => {
+                    if (!otDate || !otStartTime || (otHours === 0 && otMinutes === 0) || otSelectedIds.size === 0) return;
+                    setOtSaving(true);
+                    try {
+                      const [h, m] = otStartTime.split(":").map(Number);
+                      const d = new Date(otDate.getFullYear(), otDate.getMonth(), otDate.getDate(), h, m, 0, 0);
+                      const tsIn = d.getTime();
+                      const tsOut = tsIn + (otHours * 60 + otMinutes) * 60 * 1000;
+                      const dateStr = d.toLocaleDateString('en-CA');
+                      const errors: string[] = [];
+                      await Promise.all(Array.from(otSelectedIds).map(async sid => {
+                        const student = filteredStudents.find(s => String(s.idnumber) === String(sid));
+                        const supervisorId = student?.supervisorid;
+                        if (!supervisorId) { errors.push(`Missing supervisor for ${sid}`); return; }
+                        const res = await fetch("/api/overtime", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            date: dateStr,
+                            start: tsIn,
+                            end: tsOut,
+                            supervisor_id: supervisorId,
+                            student_id: sid
+                          })
+                        });
+                        if (!res.ok) {
+                          const j = await res.json().catch(() => ({}));
+                          errors.push(j.error || `Failed for ${sid}`);
+                        }
+                      }));
+                      if (errors.length > 0) {
+                        alert(`Some authorizations failed:\n${errors.join("\n")}`);
+                      } else {
+                        setOtModalOpen(false);
+                        setOtSelectedIds(new Set());
+                        setOtStartTime("");
+                        setOtHours(0);
+                        setOtMinutes(0);
+                      }
+                    } finally {
+                      setOtSaving(false);
+                    }
+                  }}
+                  disabled={otSaving || !otDate || !otStartTime || otSelectedIds.size === 0 || (otHours === 0 && otMinutes === 0)}
+                  className="px-3 py-1.5 text-xs font-bold text-white bg-orange-600 rounded-lg hover:bg-orange-700 shadow-md transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {otSaving ? "Saving..." : "Authorize Overtime"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      
+      <div className="bg-white p-2 rounded-2xl border border-gray-200 shadow-sm flex items-center justify-between">
+        <button onClick={() => setSelectedDate(new Date())} className="px-4 py-2 text-sm font-semibold text-orange-600 bg-orange-50 hover:bg-orange-100 rounded-xl transition-colors">
+          Today
+        </button>
+        <div className="flex items-center gap-2 md:gap-4">
+          <button onClick={() => { const d = new Date(selectedDate); d.setDate(d.getDate() - 1); setSelectedDate(d); }} className="p-2 hover:bg-gray-100 rounded-xl text-gray-500 transition-colors">
+            <ChevronLeft size={20} />
+          </button>
+          <div className="flex flex-col items-center">
+            <span className="text-sm md:text-lg font-bold text-gray-900">{selectedDate.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</span>
+            <span className="text-xs text-gray-500 font-medium md:hidden">{selectedDate.getFullYear()}</span>
+          </div>
+          <button onClick={() => { const d = new Date(selectedDate); d.setDate(d.getDate() + 1); setSelectedDate(d); }} className="p-2 hover:bg-gray-100 rounded-xl text-gray-500 transition-colors">
+            <ChevronRight size={20} />
+          </button>
+        </div>
+        <button className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 hover:text-gray-900 rounded-xl border border-gray-200 transition-all shadow-sm hover:shadow">
+          <Calendar size={18} />
+          <span className="hidden md:inline">Calendar</span>
+        </button>
+      </div>
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="hidden md:block overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead className="bg-gray-50 border-b border-gray-200">
+              <tr>
+                <th rowSpan={2} className="px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider border-r border-gray-200 text-left bg-gray-50 sticky left-0 z-10">Name / Course</th>
+                <th colSpan={2} className="px-4 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider border-r border-gray-200 text-center bg-gray-100">Morning</th>
+                <th colSpan={2} className="px-4 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider border-r border-gray-200 text-center bg-gray-100">Afternoon</th>
+                <th colSpan={2} className="px-4 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider border-r border-gray-200 text-center bg-gray-100">Overtime</th>
+                <th rowSpan={2} className="px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-center">Total Hours</th>
+              </tr>
+              <tr>
+                <th className="px-2 py-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-r border-gray-200 text-center bg-gray-50">Time In</th>
+                <th className="px-2 py-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-r border-gray-200 text-center bg-gray-50">Time Out</th>
+                <th className="px-2 py-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-r border-gray-200 text-center bg-gray-50">Time In</th>
+                <th className="px-2 py-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-r border-gray-200 text-center bg-gray-50">Time Out</th>
+                <th className="px-2 py-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-r border-gray-200 text-center bg-gray-50">Time In</th>
+                <th className="px-2 py-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-r border-gray-200 text-center bg-gray-50">Time Out</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {studentSummaries.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="px-6 py-12 text-center text-gray-500">No students found.</td>
+                </tr>
+              ) : (
+                studentSummaries.map(({ student, todaySlots }) => {
+                  const displayTotal = todaySlots?.todayTotalMs || 0;
+                  const renderCell = (slot: AttendanceEntry | null, pairIn: AttendanceEntry | null, pairOut: AttendanceEntry | null, isInCell: boolean, shift: "am" | "pm" | "ot", officialStart?: number) => {
+                    if (!slot) {
+                      if (shift === "ot" && isInCell) {
+                        if (todaySlots?.otAuthLog || todaySlots?.isOvertimeAuthorized) {
+                          return (
+                            <td className="px-2 py-3 text-center border-r border-gray-50 text-xs bg-green-50">
+                              <div className="flex items-center justify-center gap-2">
+                                <span className="font-bold text-green-600">Authorized</span>
+                              </div>
+                            </td>
+                          );
+                        }
+                        return <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-gray-300">-</td>;
+                      }
+                      return <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-gray-300">-</td>;
+                    }
+                    const snapshotStart = officialStart;
+                    const isLateTime = isInCell && slot.type === "in" && snapshotStart ? isLate(slot.timestamp, snapshotStart) : false;
+                    const status = slot.status as "Pending" | "Approved" | "Rejected" | undefined;
+                    let statusLabel = "Pending";
+                    let statusClass = "text-yellow-600";
+                    const valBy = (slot.validated_by || "").trim();
+                    if (valBy === "SYSTEM_AUTO_CLOSE" || valBy === "AUTO TIME OUT") {
+                      return <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-gray-700"></td>;
+                    } else if (status === "Approved") {
+                      statusLabel = "Validated";
+                      statusClass = "text-green-600";
+                    } else if (status === "Rejected") {
+                      statusLabel = "Unvalidated";
+                      statusClass = "text-red-600";
+                    }
+                    const inS = pairIn?.status;
+                    const outS = pairOut?.status;
+                    const pairHasFinal = ["Approved", "Rejected"].includes(inS || "") || ["Approved", "Rejected"].includes(outS || "");
+                    return (
+                      <td className="px-2 py-3 text-center border-r border-gray-50 text-xs text-gray-700">
+                        <div className="flex flex-col items-center gap-1">
+                          <div className="flex items-center gap-1">
+                            {(!pairHasFinal && isInCell) ? (
+                              <input type="checkbox" className="w-3.5 h-3.5 rounded border-gray-300 text-green-600 focus:ring-green-500" checked={isPairSelected(student.idnumber, shift)} onChange={() => togglePairSelection(student.idnumber, shift, pairIn, pairOut)} />
+                            ) : null}
+                            <div className="flex flex-col items-center justify-center">
+                              <div className={`font-medium whitespace-nowrap text-center ${isLateTime ? "text-red-600 font-bold" : ""}`}>{formatTime(slot.timestamp)}</div>
+                              {isLateTime ? <div className="text-[7px] font-bold text-red-500 leading-none mt-0.5 text-center">LATE</div> : <div className="text-[7px] font-bold text-transparent leading-none mt-0.5 invisible text-center">LATE</div>}
+                            </div>
+                          </div>
+                          {slot.photoDataUrl ? (
+                            <div className="w-8 h-8 rounded-lg overflow-hidden bg-gray-100 border border-gray-200">
+                              <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                            </div>
+                          ) : null}
+                          <span className={`text-[11px] font-semibold ${statusClass}`}>{statusLabel}</span>
+                        </div>
+                      </td>
+                    );
+                  };
+                  return (
+                    <tr key={student.idnumber} className="hover:bg-gray-50 transition-colors">
+                      <td className="px-4 py-3 border-r border-gray-50 sticky left-0 bg-white hover:bg-gray-50 z-10">
+                        <div className="flex items-center gap-3">
+                          <div className="flex-shrink-0 h-9 w-9 rounded-full overflow-hidden bg-gray-100 border border-gray-200">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-full h-full text-gray-400"><path fillRule="evenodd" d="M18.685 19.097A9.723 9.723 0 0021.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12a9.723 9.723 0 003.065 7.097A9.716 9.716 0 0012 21.75a9.716 9.716 0 006.685-2.653zm-12.54-1.285A7.486 7.486 0 0112 15a7.486 7.486 0 015.855 2.812A8.224 8.224 0 0112 20.25a8.224 8.224 0 01-5.855-2.438zM15.75 9a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" clipRule="evenodd" /></svg>
+                          </div>
+                          <div className="min-w-0">
+                            <button onClick={() => setSelectedStudentDetail(student)} className="font-bold text-sm text-gray-900 truncate hover:underline text-left">{student.lastname}, {student.firstname}</button>
+                            <div className="text-xs text-gray-500 truncate">{[student.course || "", student.section || ""].filter(Boolean).join(" • ")}</div>
+                          </div>
+                        </div>
+                      </td>
+                      {renderCell(todaySlots?.s1 || null, todaySlots?.s1 || null, todaySlots?.s2 || null, true, "am", todaySlots?.schedule?.amIn)}
+                      {renderCell(todaySlots?.s2 || null, todaySlots?.s1 || null, todaySlots?.s2 || null, false, "am")}
+                      {renderCell(todaySlots?.s3 || null, todaySlots?.s3 || null, todaySlots?.s4 || null, true, "pm", todaySlots?.schedule?.pmIn)}
+                      {renderCell(todaySlots?.s4 || null, todaySlots?.s3 || null, todaySlots?.s4 || null, false, "pm")}
+                      {renderCell(todaySlots?.s5 || null, todaySlots?.s5 || null, todaySlots?.s6 || null, true, "ot", todaySlots?.schedule?.otStart)}
+                      {renderCell(todaySlots?.s6 || null, todaySlots?.s5 || null, todaySlots?.s6 || null, false, "ot")}
+                      <td className="px-4 py-3 text-center">
+                        <div className="flex flex-col items-center">
+                          <span className="font-bold text-gray-900">{formatHours(displayTotal)}</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    ) : (
+      <StudentAttendanceDetailView
+        student={selectedStudentDetail}
+        attendance={attendance}
+        overtimeShifts={overtimeShifts}
+        supervisorSchedule={selectedStudentDetail.supervisorid ? (scheduleConfigs.bySupervisor[selectedStudentDetail.supervisorid] || null) : null}
+        globalSchedule={scheduleConfigs.global}
+        studentSchedule={studentSchedules[selectedStudentDetail.idnumber]}
+        overrides={selectedStudentDetail.supervisorid ? (overridesData?.[selectedStudentDetail.supervisorid] || null) : null}
+        onBack={() => setSelectedStudentDetail(null)}
+        evaluationStatuses={{}}
+        toggleEvaluation={() => {}}
+      />
+    )}
+    </>
+  );
+};
 
 // --- Helper Components ---
 
@@ -402,12 +1031,12 @@ const AttendanceChart = React.memo(({ attendance, selected, activeStart, now: pr
             const calc = (inLog: AttendanceEntry | null, outLog: AttendanceEntry | null, shift: 'am' | 'pm' | 'ot') => {
                 if (!inLog || !outLog) return 0;
                 
-                // Priority: Frozen rendered_hours
-                if (outLog.rendered_hours !== undefined && outLog.rendered_hours !== null && Number(outLog.rendered_hours) >= 0) {
-                    // Avoid double counting if s4/s6 is same as s2/s4 (though unlikely with smart pairing)
+                // Do not use rendered_hours; rely on validated_hours snapshot or clamp
+                const vh = (outLog as any).validated_hours;
+                if (vh !== undefined && vh !== null && Number(vh) >= 0) {
                     if (shift === 'pm' && outLog.id === s2?.id) return 0;
                     if (shift === 'ot' && (outLog.id === s2?.id || outLog.id === s4?.id)) return 0;
-                    return Number(outLog.rendered_hours) * 3600000;
+                    return Number(vh) * 3600000;
                 }
 
                 // Priority: Snapshot Rules
@@ -912,9 +1541,26 @@ const StudentDetailsPanel = ({
                             };
                             const sched = buildSchedule(new Date(entry.timestamp), config);
                             const shift = determineShift(entry.timestamp, sched);
-                            if (shift === 'am') isLateTime = isLate(entry.timestamp, sched.amIn);
-                            else if (shift === 'pm') isLateTime = isLate(entry.timestamp, sched.pmIn);
-                            else if (shift === 'ot') isLateTime = isLate(entry.timestamp, sched.otStart);
+                            const toDate = (t: string, baseTs: number) => {
+                                const d = new Date(baseTs);
+                                const parts = t.split(":").map(Number);
+                                d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                                return d.getTime();
+                            };
+                            let snapshotStart: number | undefined = undefined;
+                            if (shift === 'am') {
+                                const pairedOut = processedAttendance.find(e => e.type === 'out' && Math.abs(e.timestamp - entry.timestamp) < 12 * 60 * 60 * 1000);
+                                if (pairedOut && (pairedOut as any).official_time_in) snapshotStart = toDate((pairedOut as any).official_time_in, entry.timestamp);
+                                isLateTime = isLate(entry.timestamp, snapshotStart ?? sched.amIn);
+                            } else if (shift === 'pm') {
+                                const pairedOut = processedAttendance.find(e => e.type === 'out' && Math.abs(e.timestamp - entry.timestamp) < 12 * 60 * 60 * 1000);
+                                if (pairedOut && (pairedOut as any).official_time_in) snapshotStart = toDate((pairedOut as any).official_time_in, entry.timestamp);
+                                isLateTime = isLate(entry.timestamp, snapshotStart ?? sched.pmIn);
+                            } else if (shift === 'ot') {
+                                const pairedOut = processedAttendance.find(e => e.type === 'out' && Math.abs(e.timestamp - entry.timestamp) < 12 * 60 * 60 * 1000);
+                                if (pairedOut && (pairedOut as any).official_time_in) snapshotStart = toDate((pairedOut as any).official_time_in, entry.timestamp);
+                                isLateTime = isLate(entry.timestamp, snapshotStart ?? sched.otStart);
+                            }
                         }
 
                         return (
@@ -1154,6 +1800,20 @@ interface StudentsViewProps {
     };
 
     const { days, overallTotal, overallValidated } = useMemo(() => {
+        type DayRow = {
+            date: Date;
+            s1: AttendanceEntry | null;
+            s2: AttendanceEntry | null;
+            s3: AttendanceEntry | null;
+            s4: AttendanceEntry | null;
+            s5: AttendanceEntry | null;
+            s6: AttendanceEntry | null;
+            dayTotalMs: number;
+            overtimeMs: number;
+            dayTotalMsScheduled: number;
+            schedule: any;
+        };
+        const result: { days: DayRow[]; overallTotal: number; overallValidated: number } = { days: [], overallTotal: 0, overallValidated: 0 };
         const studentLogs = filteredAttendance.filter(a => (a as any).idnumber === student.idnumber);
 
         const grouped = new Map<string, { date: Date; logs: AttendanceEntry[] }>();
@@ -1232,31 +1892,6 @@ interface StudentsViewProps {
 
                 const sortedLogs = [...dayLogs].sort((a, b) => a.timestamp - b.timestamp);
 
-                // 1. Identify Start Points (INs) using Shift Window Logic
-                let s1: AttendanceEntry | null = null;
-                let s3: AttendanceEntry | null = null;
-                let s5: AttendanceEntry | null = null;
-
-                const isInWindow = (ts: number, start: number | undefined, end: number | undefined) => {
-                     if (!start || !end) return false;
-                     return ts >= (start - 30 * 60000) && ts <= end;
-                };
-
-                sortedLogs.filter(l => (l.type || "").toLowerCase() === 'in' && isAvailable(l)).forEach(l => {
-                     // Try Morning
-                     if (!s1 && isInWindow(l.timestamp, schedule.amIn, schedule.amOut)) {
-                         s1 = l; markUsed(l); return;
-                     }
-                     // Try Afternoon
-                     if (!s3 && isInWindow(l.timestamp, schedule.pmIn, schedule.pmOut)) {
-                         s3 = l; markUsed(l); return;
-                     }
-                     // Try OT
-                     if (!s5 && isInWindow(l.timestamp, schedule.otStart, schedule.otEnd)) {
-                         s5 = l; markUsed(l); return;
-                     }
-                });
-
                 // Helper for virtual auto-out
                 const today = new Date();
                 today.setHours(0,0,0,0);
@@ -1278,49 +1913,57 @@ interface StudentsViewProps {
                      };
                 };
 
-                // 2. Identify End Points (OUTs)
-                
-                // s2 (AM OUT)
+                // Build sessions sequentially (pair IN with next OUT)
+                const sessions: { in: AttendanceEntry; out: AttendanceEntry | null }[] = [];
+                let currentIn: AttendanceEntry | null = null;
+                for (const l of sortedLogs) {
+                    if ((l.type || '').toLowerCase() === 'in') {
+                        currentIn = l;
+                    } else if ((l.type || '').toLowerCase() === 'out') {
+                        if (currentIn) {
+                            sessions.push({ in: currentIn, out: l });
+                            currentIn = null;
+                        }
+                    }
+                }
+                if (currentIn && isPastDate) {
+                    sessions.push({ in: currentIn, out: createVirtualOut(currentIn, 'am') });
+                }
+
+                // Assign slots by ledger slot or time-of-day
+                let s1: AttendanceEntry | null = null;
                 let s2: AttendanceEntry | null = null;
-                if (s1) {
-                    const searchEnd = s3 ? (s3 as AttendanceEntry).timestamp : (new Date(dayDate).setHours(23, 59, 59, 999));
-                    const candidates = sortedLogs.filter(l => (l.type || "").toLowerCase() === "out" && l.timestamp > (s1 as AttendanceEntry).timestamp && l.timestamp < searchEnd && isAvailable(l));
-                    const candidate = candidates.pop() || null; // Greedy: take latest valid OUT
-                    
-                    if (candidate) {
-                        s2 = candidate;
-                        markUsed(s2);
-                    } else if (isPastDate) {
-                        s2 = createVirtualOut(s1 as AttendanceEntry, 'am');
-                    }
-                }
-
-                // s4 (PM OUT)
+                let s3: AttendanceEntry | null = null;
                 let s4: AttendanceEntry | null = null;
-                if (s3) {
-                    const searchEnd = s5 ? (s5 as AttendanceEntry).timestamp : (new Date(dayDate).setHours(23, 59, 59, 999));
-                    const candidates = sortedLogs.filter(l => (l.type || "").toLowerCase() === "out" && l.timestamp > (s3 as AttendanceEntry).timestamp && l.timestamp < searchEnd && isAvailable(l));
-                    s4 = candidates.pop() || null;
-                    if (s4) {
-                        markUsed(s4);
-                    } else if (isPastDate) {
-                        s4 = createVirtualOut(s3 as AttendanceEntry, 'pm');
-                    }
-                }
-
-                // s6 (OT OUT)
+                let s5: AttendanceEntry | null = null;
                 let s6: AttendanceEntry | null = null;
-                if (s5) {
-                    const candidates = sortedLogs.filter(l => (l.type || "").toLowerCase() === "out" && l.timestamp > (s5 as AttendanceEntry).timestamp && isAvailable(l));
-                    s6 = candidates.pop() || null;
-                    if (s6) {
-                        markUsed(s6);
-                    } else if (isPastDate) {
-                        s6 = createVirtualOut(s5 as AttendanceEntry, 'ot');
-                    }
-                }
 
-                // 3. Calculate Hours (Golden Rule: Clamp to official schedule)
+                const classify = (inn: AttendanceEntry, out: AttendanceEntry | null): 'am' | 'pm' | 'ot' => {
+                    const slot = (out as any)?.slot || (inn as any)?.slot;
+                    if (slot === 'AM') return 'am';
+                    if (slot === 'PM') return 'pm';
+                    if (slot === 'OT') return 'ot';
+                    const hour = new Date(inn.timestamp).getHours();
+                    if (hour < 12) return 'am';
+                    if (hour < 18) return 'pm';
+                    return 'ot';
+                };
+
+                sessions.forEach(s => {
+                    const sh = classify(s.in, s.out);
+                    if (sh === 'am') {
+                        if (!s1) s1 = s.in;
+                        if (!s2) s2 = s.out || null;
+                    } else if (sh === 'pm') {
+                        if (!s3) s3 = s.in;
+                        if (!s4) s4 = s.out || null;
+                    } else {
+                        if (!s5) s5 = s.in;
+                        if (!s6) s6 = s.out || null;
+                    }
+                });
+
+                // Calculate Hours (Golden Rule: Clamp to official schedule)
                 let total = 0;
                 let totalValidated = 0;
                 let otTotal = 0;
@@ -1343,19 +1986,7 @@ interface StudentsViewProps {
                          return Number(vh) * 3600000;
                      }
 
-                     // Priority: Rendered Hours (Frozen History)
-                     if ((outLog as any).rendered_hours !== undefined && (outLog as any).rendered_hours !== null && Number((outLog as any).rendered_hours) >= 0) {
-                         if (requireApproved) {
-                             const inStatus = (inLog.status || "").toLowerCase();
-                             const outStatus = (outLog.status || "").toLowerCase();
-                             const inOk = inStatus === "approved" || inStatus === "validated" || inStatus === "official" || inStatus === "adjusted";
-                             const outOk = outStatus === "approved" || outStatus === "validated" || outStatus === "official" || outStatus === "adjusted";
-                             if (!inOk || !outOk) return 0;
-                         }
-                         if (shift === 'pm' && outLog.id === s2?.id) return 0;
-                         if (shift === 'ot' && (outLog.id === s2?.id || outLog.id === s4?.id)) return 0;
-                         return Number((outLog as any).rendered_hours) * 3600000;
-                     }
+                     // Do not use rendered_hours; rely on validated_hours or snapshot/clamp
 
                      // Priority: Use Snapshot Rules if available (Ledger Logic)
                      if (outLog.official_time_in && outLog.official_time_out) {
@@ -1395,10 +2026,32 @@ interface StudentsViewProps {
                 total += calc(s3, s4, 'pm', false);
                 total += calc(s5, s6, 'ot', false);
 
-                // Validated (Approved only)
-                totalValidated += calc(s1, s2, 'am', true);
-                totalValidated += calc(s3, s4, 'pm', true);
-                totalValidated += calc(s5, s6, 'ot', true);
+                // Validated (Approved-only): count validated_hours only when both IN and OUT are approved/validated/official/adjusted
+                const isApprovedPair = (inn: AttendanceEntry | null, out: AttendanceEntry | null) => {
+                    if (!inn || !out) return false;
+                    const inStatus = (inn.status || "").toLowerCase();
+                    const outStatus = (out.status || "").toLowerCase();
+                    const inOk = inStatus === "approved" || inStatus === "validated" || inStatus === "official" || inStatus === "adjusted" || !!inn.validated_by;
+                    const outOk = outStatus === "approved" || outStatus === "validated" || outStatus === "official" || outStatus === "adjusted" || !!out.validated_by;
+                    return inOk && outOk;
+                };
+                let ledgerValidatedMs = 0;
+                if (isApprovedPair(s1, s2)) {
+                    const v = (s2 as any)?.validated_hours;
+                    const num = v !== undefined && v !== null ? Number(v) : NaN;
+                    if (!isNaN(num)) ledgerValidatedMs += num * 3600000;
+                }
+                if (isApprovedPair(s3, s4)) {
+                    const v = (s4 as any)?.validated_hours;
+                    const num = v !== undefined && v !== null ? Number(v) : NaN;
+                    if (!isNaN(num)) ledgerValidatedMs += num * 3600000;
+                }
+                if (isApprovedPair(s5, s6)) {
+                    const v = (s6 as any)?.validated_hours;
+                    const num = v !== undefined && v !== null ? Number(v) : NaN;
+                    if (!isNaN(num)) ledgerValidatedMs += num * 3600000;
+                }
+                totalValidated += ledgerValidatedMs;
 
                 // OT Only
                 otTotal += calc(s5, s6, 'ot', false);
@@ -1415,11 +2068,56 @@ interface StudentsViewProps {
                 totalMsAll += dayTotalMs;
                 totalValidatedMsAll += totalValidated;
 
-                return { date: day.date, s1, s2, s3, s4, s5, s6, dayTotalMs, overtimeMs, dayTotalMsScheduled: dayTotalMs, schedule };
+                return { date: day.date, s1, s2, s3, s4, s5, s6, dayTotalMs, overtimeMs, dayTotalMsScheduled: dayTotalMs, schedule } as DayRow;
             });
 
-        return { days: processedDays, overallTotal: totalMsAll, overallValidated: totalValidatedMsAll };
+        result.days = processedDays;
+        result.overallTotal = totalMsAll;
+        result.overallValidated = totalValidatedMsAll;
+        return result;
     }, [student, filteredAttendance, now, globalSchedule, supervisorSchedule, overtimeShifts, overrides]);
+
+    const ledgerAgg = useMemo(() => {
+        const logs = filteredAttendance.filter(a => (a as any).idnumber === student.idnumber).sort((a, b) => a.timestamp - b.timestamp);
+        let totalMs = 0;
+        let validatedMs = 0;
+        let currentIn: AttendanceEntry | null = null;
+        for (const log of logs) {
+            if (log.type === "in") {
+                currentIn = log;
+            } else if (log.type === "out") {
+                if (!currentIn) continue;
+                const v = (log as any).validated_hours;
+                if (v !== undefined && v !== null && Number(v) >= 0) {
+                    const ms = Number(v) * 3600000;
+                    totalMs += ms;
+                    const s = (log.status || "").toLowerCase();
+                    const isApproved = s === "approved" || s === "validated" || s === "official" || s === "adjusted" || !!log.validated_by;
+                    if (isApproved) validatedMs += ms;
+                } else if (log.official_time_in && log.official_time_out) {
+                    try {
+                        const base = new Date(currentIn.timestamp);
+                        const parse = (t: string) => {
+                            const [h, m, s] = t.split(":").map(Number);
+                            const d = new Date(base);
+                            d.setHours(h, m, s || 0, 0);
+                            return d;
+                        };
+                        const offIn = parse(log.official_time_in);
+                        const offOut = parse(log.official_time_out);
+                        if (offOut.getTime() < offIn.getTime()) offOut.setDate(offOut.getDate() + 1);
+                        const ms = calculateHoursWithinOfficialTime(new Date(currentIn.timestamp), new Date(log.timestamp), offIn, offOut);
+                        totalMs += ms;
+                        const s = (log.status || "").toLowerCase();
+                        const isApproved = s === "approved" || s === "validated" || s === "official" || s === "adjusted" || !!log.validated_by;
+                        if (isApproved) validatedMs += ms;
+                    } catch {}
+                }
+                currentIn = null;
+            }
+        }
+        return { totalMs, validatedMs };
+    }, [filteredAttendance, student.idnumber]);
 
     const [showEvalRestriction, setShowEvalRestriction] = useState(false);
     const [detailEvaluation, setDetailEvaluation] = useState<EvaluationDetail | null>(null);
@@ -1556,15 +2254,22 @@ interface StudentsViewProps {
                 pmStatus = getStatus(day.s5, day.s6);
             }
             
+            const amOutPref = (day.s2 && (day.s2 as any).slot === 'AM') ? day.s2 : null;
+            const pmOutPref = (day.s4 && (day.s4 as any).slot === 'PM') ? day.s4 : ((day.s2 && (day.s2 as any).slot === 'PM') ? day.s2 : day.s4);
+            const amInPref = amOutPref ? day.s1 : null;
+            const pmInPref = pmOutPref ? (day.s3 || day.s1) : null;
+            const otOutPref = (day.s6 && (day.s6 as any).slot === 'OT') ? day.s6 : day.s6;
+            const otInPref = otOutPref ? day.s5 : null;
+            
             return [
                 day.date.toLocaleDateString(), // DATE
-                fmt(day.s1),                   // MORNING IN
-                fmtOut(day.s2),                // MORNING OUT
+                fmt(amInPref || day.s1),       // MORNING IN
+                fmtOut(amOutPref || day.s2),   // MORNING OUT
                 amStatus,                      // STATUS (AM)
-                fmt(day.s3),                   // AFTERNOON IN
-                fmtOut(day.s4),                // AFTERNOON OUT
-                fmt(day.s5),                   // OVERTIME IN
-                fmtOut(day.s6),                // OVERTIME OUT
+                fmt(pmInPref || day.s3),       // AFTERNOON IN
+                fmtOut(pmOutPref || day.s4),   // AFTERNOON OUT
+                fmt(otInPref || day.s5),       // OVERTIME IN
+                fmtOut(otOutPref || day.s6),   // OVERTIME OUT
                 pmStatus,                      // STATUS (PM/OT)
                 formatHours(day.dayTotalMs)    // TOTAL HOURS
             ];
@@ -1662,7 +2367,7 @@ interface StudentsViewProps {
                 <div className="bg-blue-50 p-4 rounded-2xl border border-blue-100 flex items-center justify-between shadow-sm">
                     <div>
                         <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">Total Hours</p>
-                        <p className="text-2xl font-bold text-blue-900">{formatHours(overallTotal)}</p>
+                        <p className="text-2xl font-bold text-blue-900">{formatHours(ledgerAgg.totalMs)}</p>
                         <p className="text-[11px] text-gray-600 mt-1">Pending + Validated</p>
                     </div>
                     <div className="p-2 bg-blue-100 rounded-xl">
@@ -1673,7 +2378,7 @@ interface StudentsViewProps {
                 <div className="bg-green-50 p-4 rounded-2xl border border-green-100 flex items-center justify-between shadow-sm">
                     <div>
                         <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-1">Total Validated</p>
-                        <p className="text-2xl font-bold text-green-900">{formatHours(overallValidated)}</p>
+                        <p className="text-2xl font-bold text-green-900">{formatHours(ledgerAgg.validatedMs)}</p>
                         <p className="text-[11px] text-gray-600 mt-1">Target: 486 hours</p>
                     </div>
                     <div className="p-2 bg-green-100 rounded-xl">
@@ -1813,21 +2518,19 @@ interface StudentsViewProps {
                                         const pairOut = (idx === 0 || idx === 1) ? day.s2 : (idx === 2 || idx === 3) ? day.s4 : day.s6;
                                         const isSessionAutoTimeOut = pairOut?.validated_by === "SYSTEM_AUTO_CLOSE" || pairOut?.validated_by === "AUTO TIME OUT";
 
-                                        // Late Logic
+                                        // Late Logic (Ledger-only): flag late only when official_time_in snapshot exists
                                         let isLateTime = false;
-                                        if (slot && slot.type === 'in' && (day as any).schedule) {
-                                            const sched = (day as any).schedule;
-                                            // Index 0 is Morning IN
-                                            if (idx === 0) {
-                                                isLateTime = isLate(slot.timestamp, sched.amIn);
-                                            } 
-                                            // Index 2 is Afternoon IN
-                                            else if (idx === 2) {
-                                                isLateTime = isLate(slot.timestamp, sched.pmIn);
-                                            }
-                                            // Index 4 is Overtime IN
-                                            else if (idx === 4) {
-                                                isLateTime = isLate(slot.timestamp, sched.otStart);
+                                        if (slot && slot.type === 'in') {
+                                            const toDate = (t: string, baseTs: number) => {
+                                                const d = new Date(baseTs);
+                                                const parts = t.split(":").map(Number);
+                                                d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                                                return d.getTime();
+                                            };
+                                            const pairedOut = (idx === 0 || idx === 1) ? day.s2 : (idx === 2 || idx === 3) ? day.s4 : day.s6;
+                                            if (pairedOut && (pairedOut as any).official_time_in) {
+                                                const snapshotStart = toDate((pairedOut as any).official_time_in, slot.timestamp);
+                                                isLateTime = isLate(slot.timestamp, snapshotStart);
                                             }
                                         }
 
@@ -1853,6 +2556,11 @@ interface StudentsViewProps {
                                                             <div className="text-[7px] font-bold text-transparent leading-none mt-0.5 invisible text-center">LATE</div>
                                                         )}
                                                     </div>
+                                                    {slot.photoDataUrl ? (
+                                                        <div className="w-8 h-8 rounded-lg overflow-hidden bg-gray-100 border border-gray-200">
+                                                            <img src={slot.photoDataUrl} alt="Log" className="w-full h-full object-cover" />
+                                                        </div>
+                                                    ) : null}
                                                     <span
                                                         className={`text-[11px] font-semibold flex items-center justify-center gap-1 ${
                                                             (slot.status === "Approved" || slot.status === "VALIDATED" || slot.status === "OFFICIAL" || slot.status === "ADJUSTED")
@@ -2019,6 +2727,7 @@ interface StudentsViewProps {
     requiredHoursMap,
     lastFetchStatus,
     supervisors,
+    myIdnumber,
   }: {
     students: User[];
     attendance: AttendanceEntry[];
@@ -2037,6 +2746,7 @@ interface StudentsViewProps {
     requiredHoursMap: Record<string, number>;
     lastFetchStatus: string;
     supervisors?: User[];
+    myIdnumber?: string;
   }) => {
 
     // 1. Calculate available weeks dynamically based on attendance data
@@ -2147,18 +2857,7 @@ interface StudentsViewProps {
         return Array.from(new Set(relevantStudents.map(s => s.section).filter((s): s is string => !!s))).sort();
     }, [students, filterCourse]);
 
-    // Default to first course/section if none selected
-    useEffect(() => {
-        if (!filterCourse && uniqueCourses.length > 0) {
-            setFilterCourse(uniqueCourses[0] || "");
-        }
-    }, [uniqueCourses, filterCourse]);
-
-    useEffect(() => {
-        if (!filterSection && availableSections.length > 0) {
-            setFilterSection(availableSections[0] || "");
-        }
-    }, [availableSections, filterSection]);
+    // Do not auto-select course/section; keep filters empty by default
 
     const filteredStudents = useMemo(() => {
         return students.filter(s => {
@@ -2694,6 +3393,9 @@ interface StudentsViewProps {
 
     const filteredAttendance = useMemo(() => {
         let result = attendance;
+        if (selected?.idnumber) {
+            result = result.filter(a => a.idnumber === selected.idnumber);
+        }
         if (attendanceDateFilter) {
             result = result.filter(a => new Date(a.timestamp).toLocaleDateString() === new Date(attendanceDateFilter).toLocaleDateString());
         }
@@ -2705,8 +3407,8 @@ interface StudentsViewProps {
                 return typeStr.includes(q) || dateStr.includes(q);
             });
         }
-        return result.filter(a => a.status === "Approved");
-    }, [attendance, attendanceDateFilter, attendanceSearchTerm]);
+        return result;
+    }, [attendance, selected, attendanceDateFilter, attendanceSearchTerm]);
 
     const filteredReports = useMemo(() => {
         let result = reports;
@@ -2822,8 +3524,8 @@ interface StudentsViewProps {
         `${s.firstname} ${s.lastname} ${s.idnumber}`.toLowerCase().includes(searchTerm.toLowerCase()) &&
         (!filterCourse || s.course === filterCourse) &&
         (!filterSection || s.section === filterSection) &&
-        (!filterCompany || s.company === filterCompany) &&
-        (!filterStatus || status === filterStatus)
+        (!filterCompany || filterCompany === "ALL" || s.company === filterCompany) &&
+        (!filterStatus || filterStatus === "ALL" || status === filterStatus)
       );
     });
 
@@ -2880,7 +3582,7 @@ interface StudentsViewProps {
                       onChange={e => setFilterCompany(e.target.value)}
                       className="w-full p-2 rounded-xl border border-gray-300 text-sm bg-white text-black focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm"
                   >
-                      <option value="">Company</option>
+                      <option value="ALL">All Companies</option>
                       {uniqueCompanies.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                   <select 
@@ -2888,7 +3590,7 @@ interface StudentsViewProps {
                       onChange={e => setFilterStatus(e.target.value)}
                       className="w-full p-2 rounded-xl border border-gray-300 text-sm bg-white text-black focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm"
                   >
-                      <option value="">Status</option>
+                      <option value="ALL">All Status</option>
                       {uniqueStatuses.map(s => <option key={s} value={s}>{s}</option>)}
                   </select>
               </div>
@@ -3156,16 +3858,36 @@ interface StudentsViewProps {
                         };
                         const sched = buildSchedule(new Date(entry.timestamp), config);
                         const shift = determineShift(entry.timestamp, sched);
-                        if (shift === 'am') isLateTime = isLate(entry.timestamp, sched.amIn);
-                        else if (shift === 'pm') isLateTime = isLate(entry.timestamp, sched.pmIn);
-                        else if (shift === 'ot') isLateTime = isLate(entry.timestamp, sched.otStart);
+                        const toDate = (t: string, baseTs: number) => {
+                            const d = new Date(baseTs);
+                            const parts = t.split(":").map(Number);
+                            d.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+                            return d.getTime();
+                        };
+                        let snapshotStart: number | undefined = undefined;
+                        if (shift === 'am') {
+                            const pairedOut = filteredAttendance.find(e => e.type === 'out' && Math.abs(e.timestamp - entry.timestamp) < 12 * 60 * 60 * 1000);
+                            if (pairedOut && (pairedOut as any).official_time_in) snapshotStart = toDate((pairedOut as any).official_time_in, entry.timestamp);
+                            isLateTime = isLate(entry.timestamp, snapshotStart ?? sched.amIn);
+                        } else if (shift === 'pm') {
+                            const pairedOut = filteredAttendance.find(e => e.type === 'out' && Math.abs(e.timestamp - entry.timestamp) < 12 * 60 * 60 * 1000);
+                            if (pairedOut && (pairedOut as any).official_time_in) snapshotStart = toDate((pairedOut as any).official_time_in, entry.timestamp);
+                            isLateTime = isLate(entry.timestamp, snapshotStart ?? sched.pmIn);
+                        } else if (shift === 'ot') {
+                            const pairedOut = filteredAttendance.find(e => e.type === 'out' && Math.abs(e.timestamp - entry.timestamp) < 12 * 60 * 60 * 1000);
+                            if (pairedOut && (pairedOut as any).official_time_in) snapshotStart = toDate((pairedOut as any).official_time_in, entry.timestamp);
+                            isLateTime = isLate(entry.timestamp, snapshotStart ?? sched.otStart);
+                        }
                     }
 
                     return (
-                    <button 
+                    <div 
                         key={`${entry.timestamp}-${idx}`} 
+                        className="w-full p-2 rounded-xl bg-gray-50 border border-gray-100 hover:border-orange-200 hover:bg-orange-50/50 transition-all"
+                    >
+                    <button 
                         onClick={() => setSelectedAttendanceEntry(entry)}
-                        className="w-full flex items-center gap-2 p-2 rounded-xl bg-gray-50 border border-gray-100 hover:border-orange-200 hover:bg-orange-50/50 transition-all text-left group"
+                        className="w-full flex items-center gap-2 text-left group"
                     >
                       {!isAutoTimeOut && (
                           <div className="h-8 w-8 rounded-md bg-gray-200 overflow-hidden flex-shrink-0 relative">
@@ -3199,6 +3921,63 @@ interface StudentsViewProps {
                         {isAutoTimeOut && <span className="text-[10px] font-bold text-red-500 mt-1 block">AUTO TIME OUT</span>}
                       </div>
                     </button>
+                    <div className="mt-2 flex items-center gap-2 justify-end">
+                      {entry.status === "Pending" && (
+                        <>
+                          <button
+                            onClick={async () => {
+                              const validatorId = myIdnumber || localStorage.getItem("idnumber") || "";
+                              if (!validatorId || !entry.id) return;
+                              try {
+                                const res = await fetch("/api/attendance", {
+                                  method: "PATCH",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ id: entry.id, approve: true, validated_by: validatorId })
+                                });
+                                if (!res.ok) {
+                                  const data = await res.json().catch(() => ({}));
+                                  throw new Error(data.error || "Failed to approve");
+                                }
+                              } catch (e: any) {
+                                alert(e.message || "Failed to approve");
+                              }
+                            }}
+                            className="px-3 py-1 text-xs font-semibold rounded-md bg-green-600 text-white hover:bg-green-700 transition-colors"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            onClick={async () => {
+                              const validatorId = myIdnumber || localStorage.getItem("idnumber") || "";
+                              if (!validatorId || !entry.id) return;
+                              try {
+                                const res = await fetch("/api/attendance", {
+                                  method: "PATCH",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ id: entry.id, reject: true, validated_by: validatorId })
+                                });
+                                if (!res.ok) {
+                                  const data = await res.json().catch(() => ({}));
+                                  throw new Error(data.error || "Failed to reject");
+                                }
+                              } catch (e: any) {
+                                alert(e.message || "Failed to reject");
+                              }
+                            }}
+                            className="px-3 py-1 text-xs font-semibold rounded-md bg-red-600 text-white hover:bg-red-700 transition-colors"
+                          >
+                            Reject
+                          </button>
+                        </>
+                      )}
+                      {entry.status === "Approved" && (
+                        <span className="text-[10px] font-semibold text-green-700 bg-green-100 px-2 py-1 rounded-md">Validated</span>
+                      )}
+                      {entry.status === "Rejected" && (
+                        <span className="text-[10px] font-semibold text-red-700 bg-red-100 px-2 py-1 rounded-md">Rejected</span>
+                      )}
+                    </div>
+                    </div>
                   )})
                 )}
               </div>
@@ -3454,6 +4233,7 @@ export default function InstructorPage() {
   const [allStudentSchedules, setAllStudentSchedules] = useState<Record<string, any>>({});
   const [allOverrides, setAllOverrides] = useState<Record<string, Record<string, any>>>({});
   const [allOvertimeShifts, setAllOvertimeShifts] = useState<any[]>([]);
+  const [approvalViewingStudent, setApprovalViewingStudent] = useState<User | null>(null);
 
   const userSupervisorMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -3908,7 +4688,9 @@ export default function InstructorPage() {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         console.log('[Instructor] App foregrounded, refreshing data...');
-        setRefreshTrigger(prev => prev + 1);
+        if (activeTab !== 'approval') {
+          setRefreshTrigger(prev => prev + 1);
+        }
         fetchBadgeCounts();
       }
     };
@@ -4089,7 +4871,9 @@ export default function InstructorPage() {
               is_overtime: e.is_overtime,
               official_time_in: e.official_time_in,
               official_time_out: e.official_time_out,
-              rendered_hours: e.rendered_hours
+              rendered_hours: e.rendered_hours,
+              validated_hours: (e as any).validated_hours ?? null,
+              slot: (e as any).slot
             };
           }) as AttendanceEntry[];
           setAttendance(mapped);
@@ -4413,7 +5197,7 @@ export default function InstructorPage() {
 
   // --- View Components ---
 
-  const AccountApprovalView = () => {
+  const AccountApprovalView = ({ allowApproval = true }: { allowApproval?: boolean }) => {
     const [searchTerm, setSearchTerm] = useState("");
     const [filterCourse, setFilterCourse] = useState("");
     const [filterSection, setFilterSection] = useState("");
@@ -4444,46 +5228,150 @@ export default function InstructorPage() {
       return { allowedCourses: ac, allowedSections: as };
     }, [myProfile, availableCourses, availableSections]);
 
-    const filteredStudents = useMemo(() => {
+    // Preserve last non-empty assignment snapshot to avoid UI flicker when profile/metadata refreshes
+    const [assignmentSnapshot, setAssignmentSnapshot] = useState<{ courseNames: string[]; sectionNames: string[]; sectionIds: number[]; courseId: number | null } | null>(null);
+    useEffect(() => {
+      const normalize = (s: string) => s.toLowerCase().trim();
+      const courseNames = (myProfile?.course || "").split(",").map(normalize).filter(Boolean);
+      const sectionNames = (myProfile?.section || "").split(",").map(normalize).filter(Boolean);
+      const sectionIds = Array.isArray(myProfile?.sectionIds) ? (myProfile?.sectionIds as number[]) : [];
+      const courseStr = (myProfile?.course || "").trim().toLowerCase();
+      const courseId = courseStr 
+        ? (availableCourses.find(c => {
+              const n = c.name.toLowerCase();
+              const k = (c.name_key || "").toLowerCase();
+              return n === courseStr || k === courseStr;
+           })?.id ?? null)
+        : null;
+      const hasAny = courseNames.length > 0 || sectionNames.length > 0 || sectionIds.length > 0 || !!courseId;
+      if (hasAny) {
+        setAssignmentSnapshot({ courseNames, sectionNames, sectionIds, courseId });
+      }
+    }, [myProfile, availableCourses]);
+
+    type RequestItem = {
+      id: number;
+      full_name: string;
+      email: string;
+      school_id: string;
+      course?: string;
+      section?: string;
+      course_id?: number | null;
+      section_id?: number | null;
+      status: "pending" | "approved" | "rejected";
+    };
+    const [requests, setRequests] = useState<RequestItem[]>([]);
+    const [approvalsLoading, setApprovalsLoading] = useState(false);
+    const [approvalsInit, setApprovalsInit] = useState(true);
+    useEffect(() => {
+      const t = setTimeout(() => setApprovalsInit(false), 1500);
+      return () => { try { clearTimeout(t); } catch {} };
+    }, []);
+    const fetchedOnceRef = useRef<Record<string, boolean>>({});
+    const hasFetchedApprovalsRef = useRef(false);
+    useEffect(() => {
+      const idKey = myProfile?.idnumber ? String(myProfile.idnumber) : null;
+      if (!idKey) return;
+      let isMounted = true;
+      if (fetchedOnceRef.current[idKey]) return;
+      fetchedOnceRef.current[idKey] = true;
+      const fetchRequests = async () => {
+        setApprovalsInit(true);
+        if (!hasFetchedApprovalsRef.current) setApprovalsLoading(true);
+        const timeout = setTimeout(() => {
+          if (isMounted) {
+            setApprovalsLoading(false);
+            setApprovalsInit(false);
+          }
+        }, 3000);
+        try {
+          const res = await fetch("/api/student-approval-requests?limit=2000&status=pending");
+          const json = await res.json();
+          if (isMounted && res.ok && Array.isArray(json.requests)) {
+            const seen = new Set<number>();
+            const unique = (json.requests as RequestItem[]).filter(r => {
+              const id = Number(r.id);
+              if (seen.has(id)) return false;
+              seen.add(id);
+              return true;
+            });
+            setRequests(unique);
+            hasFetchedApprovalsRef.current = true;
+          }
+        } finally {
+          try { clearTimeout(timeout); } catch {}
+          if (isMounted) {
+            setApprovalsLoading(false);
+            setApprovalsInit(false);
+          }
+        }
+      };
+      fetchRequests();
+      return () => { isMounted = false; };
+    }, [myProfile?.idnumber]);
+
+    const filteredRequests = useMemo(() => {
         const normalize = (s: string) => s.toLowerCase().trim();
         
         // Use raw profile data for strict permission check (robust against metadata mismatches)
         const myCourseNames = (myProfile?.course || "").split(",").map(normalize).filter(Boolean);
         const mySectionNames = (myProfile?.section || "").split(",").map(normalize).filter(Boolean);
 
-        // If instructor has no assignments, show nothing (Security Default)
-        if (myCourseNames.length === 0 && mySectionNames.length === 0) return [];
+        // Also consider ID-based assignments
+        const allowedSectionIds = Array.isArray(myProfile?.sectionIds) ? (myProfile?.sectionIds as number[]) : [];
+        const myCourseStrTop = (myProfile?.course || "").trim().toLowerCase();
+        const allowedCourseIdTop = myCourseStrTop 
+          ? (availableCourses.find(c => {
+                const n = c.name.toLowerCase();
+                const k = (c.name_key || "").toLowerCase();
+                return n === myCourseStrTop || k === myCourseStrTop;
+             })?.id ?? null)
+          : null;
+        const recognizedCourseNames = myCourseNames.filter(n => {
+          return availableCourses.some(c => {
+            const cn = c.name.toLowerCase();
+            const ck = (c.name_key || "").toLowerCase();
+            return n === cn || n === ck;
+          });
+        });
+        const recognizedSectionNames = mySectionNames.filter(n => {
+          return availableSections.some(s => s.name.toLowerCase() === n);
+        });
+        const hasRecognizedAssignments = recognizedCourseNames.length > 0 || recognizedSectionNames.length > 0 || allowedSectionIds.length > 0 || !!allowedCourseIdTop;
+        const hasAnyAssignmentsTop = !!assignmentSnapshot || hasRecognizedAssignments;
+        if (!hasAnyAssignmentsTop) return requests;
 
-        return students.filter(s => {
+        const list = requests.filter(s => {
             // Search filter
             const search = normalize(searchTerm);
-            const name = normalize(`${s.firstname || ""} ${s.lastname || ""}`);
-            const id = normalize(s.idnumber);
+            const name = normalize(s.full_name || "");
+            const id = normalize(s.school_id || "");
             const matchesSearch = !search || name.includes(search) || id.includes(search);
 
             // Normalize Student Data
             const sCourses = (s.course || "").split(",").map(normalize).filter(Boolean);
             const sSections = (s.section || "").split(",").map(normalize).filter(Boolean);
 
-            // STRICT PERMISSION CHECK: Match against Instructor's raw assignments
-            // If instructor has courses, student MUST match at least one
-            const isCourseAllowed = myCourseNames.length === 0 || sCourses.some(sc => myCourseNames.includes(sc));
-            
-            // If instructor has sections, student MUST match at least one
-            const isSectionAllowed = mySectionNames.length === 0 || sSections.some(ss => mySectionNames.includes(ss));
+            // STRICT PERMISSION CHECK: Prefer ID-based match (section/course), fallback to name match
+            const allowedSectionIds = assignmentSnapshot ? assignmentSnapshot.sectionIds : (Array.isArray(myProfile?.sectionIds) ? (myProfile?.sectionIds as number[]) : []);
+            const myCourseStr = assignmentSnapshot ? "" : (myProfile?.course || "").trim().toLowerCase();
+            const allowedCourseId = assignmentSnapshot ? assignmentSnapshot.courseId : (myCourseStr 
+              ? (availableCourses.find(c => {
+                    const n = c.name.toLowerCase();
+                    const k = (c.name_key || "").toLowerCase();
+                    return n === myCourseStr || k === myCourseStr;
+                 })?.id ?? null)
+              : null);
 
-            // If instructor has specific assignments, enforce them.
-            // But if one is empty (e.g. has Course but no Section), what is the rule?
-            // "Show ONLY students matching... assigned Course AND Section"
-            // If Section is assigned, enforce it. If not, maybe allow all? 
-            // Based on "Strict Filtering" memory: "If an instructor has no assigned courses or sections, the student list is empty".
-            // But here we check `length === 0` above.
-            
-            // If myCourseNames is NOT empty, isCourseAllowed must be true.
-            // If mySectionNames is NOT empty, isSectionAllowed must be true.
-            
-            if (myCourseNames.length > 0 && !isCourseAllowed) return false;
-            if (mySectionNames.length > 0 && !isSectionAllowed) return false;
+            const effCourseNames = assignmentSnapshot ? assignmentSnapshot.courseNames : recognizedCourseNames;
+            const effSectionNames = assignmentSnapshot ? assignmentSnapshot.sectionNames : recognizedSectionNames;
+            const courseMatches = sCourses.some(sc => effCourseNames.includes(sc));
+            const sectionMatches = sSections.some(ss => effSectionNames.includes(ss));
+            const idSectionMatch = allowedSectionIds.length > 0 && typeof s.section_id === "number" && allowedSectionIds.includes(Number(s.section_id));
+            const idCourseMatch = !!allowedCourseId && typeof s.course_id === "number" && Number(s.course_id) === Number(allowedCourseId);
+            const hasAssignments = !!assignmentSnapshot || (allowedSectionIds.length > 0) || !!allowedCourseId || (effCourseNames.length + effSectionNames.length) > 0;
+            const isAllowed = !hasAssignments ? false : (idSectionMatch || idCourseMatch || courseMatches || sectionMatches);
+            if (!isAllowed) return false;
             
             // If both are empty, we already returned [] above.
 
@@ -4492,12 +5380,29 @@ export default function InstructorPage() {
             const matchesSectionFilter = !filterSection || sSections.some(ss => ss.includes(normalize(filterSection)));
 
             // Status filter
-            const sStatus = s.signup_status || 'APPROVED';
+            const sStatus = String(s.status || "pending").toUpperCase();
             const matchesStatus = filterStatus === "ALL" || sStatus === filterStatus;
 
             return matchesSearch && matchesCourseFilter && matchesSectionFilter && matchesStatus;
         });
-    }, [students, searchTerm, filterCourse, filterSection, filterStatus, myProfile]);
+        return list.sort((a, b) => {
+            const aLast = (a.full_name || "").trim().split(" ").slice(-1)[0].toLowerCase();
+            const bLast = (b.full_name || "").trim().split(" ").slice(-1)[0].toLowerCase();
+            if (aLast !== bLast) return aLast.localeCompare(bLast);
+            const aFirst = (a.full_name || "").trim().split(" ")[0].toLowerCase();
+            const bFirst = (b.full_name || "").trim().split(" ")[0].toLowerCase();
+            return aFirst.localeCompare(bFirst);
+        });
+    }, [requests, searchTerm, filterCourse, filterSection, filterStatus, myProfile, availableCourses]);
+
+    useEffect(() => {
+      try {
+        const len = filteredRequests.length;
+        const total = requests.length;
+        const profile = myProfile ? { idnumber: myProfile.idnumber, course: myProfile.course, section: myProfile.section, sectionIds: myProfile.sectionIds } : null;
+        console.log("[Approvals] counts:", { filtered: len, total, profile });
+      } catch {}
+    }, [filteredRequests, requests, myProfile]);
 
     // Clear selection when filters change
     useEffect(() => {
@@ -4515,12 +5420,11 @@ export default function InstructorPage() {
     };
 
     const toggleAll = () => {
-        // Only select pending students
-        const pendingStudents = filteredStudents.filter(s => (s.signup_status || 'APPROVED') !== 'APPROVED');
-        if (selectedIds.size === pendingStudents.length && pendingStudents.length > 0) {
+        const pending = filteredRequests.filter(s => String(s.status).toUpperCase() === 'PENDING');
+        if (selectedIds.size === pending.length && pending.length > 0) {
             setSelectedIds(new Set());
         } else {
-            setSelectedIds(new Set(pendingStudents.map(s => s.id)));
+            setSelectedIds(new Set(pending.map(s => s.id)));
         }
     };
 
@@ -4532,26 +5436,31 @@ export default function InstructorPage() {
             else setIsBulkApproving(true);
 
             await Promise.all(ids.map(id => 
-                fetch(`/api/users/${id}`, {
-                    method: "PUT",
+                fetch(`/api/student-approval-requests/${id}/${action}`, {
+                    method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ 
-                      signup_status: action === 'approve' ? "APPROVED" : "REJECTED",
                       actorId: myProfile.idnumber,
                       actorRole: myProfile.role,
-                      reason: `Instructor ${action}`,
-                      rejectionNote: action === 'reject' ? (note || "") : undefined
+                      actorName: `${myProfile.firstname || ""} ${myProfile.lastname || ""}`.trim(),
+                      note: action === 'reject' ? (note || "") : undefined
                     })
                 }).then(async res => {
                     if (!res.ok) {
                         const err = await res.json().catch(() => ({}));
-                        throw new Error(err.error || `Failed to ${action} ${id}`);
+                        throw new Error(err.error || `Failed to ${action} request ${id}`);
                     }
                     return res;
                 })
             ));
             
-            setRefreshTrigger(prev => prev + 1);
+            try {
+              const res = await fetch("/api/student-approval-requests?limit=2000&status=pending");
+              const json = await res.json();
+              if (res.ok && Array.isArray(json.requests)) {
+                setRequests(json.requests);
+              }
+            } catch {}
             setSelectedIds(new Set());
         } catch (e: any) {
             alert(e.message || `Failed to ${action} one or more students`);
@@ -4581,7 +5490,7 @@ export default function InstructorPage() {
                 className="px-4 py-2.5 rounded-xl border border-gray-300 bg-gray-50 focus:bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all shadow-sm min-w-[140px]"
             >
                 <option value="">All Courses</option>
-                {allowedCourses.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                {allowedCourses.slice().sort((a, b) => a.name.localeCompare(b.name)).map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
             </select>
             <select 
                 value={filterSection}
@@ -4597,7 +5506,7 @@ export default function InstructorPage() {
                         return c ? s.course_id === c.id : true;
                     })
                     .map(s => s.name)
-                )).map(name => {
+                )).sort((a, b) => a.localeCompare(b)).map(name => {
                     const s = allowedSections.find(sec => sec.name === name);
                     return <option key={s?.id || name} value={name}>{name}</option>;
                 })}
@@ -4615,7 +5524,7 @@ export default function InstructorPage() {
             
             {/* Bulk Action Buttons */}
             {selectedIds.size > 0 && (
-                <div className="flex items-center gap-2 animate-in fade-in zoom-in duration-200">
+                <div className="flex items-center gap-2">
                     <button 
                         onClick={() => setConfirmAction({ type: 'bulk', action: 'approve' })}
                         disabled={isBulkApproving}
@@ -4636,6 +5545,11 @@ export default function InstructorPage() {
 
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex-1">
             {/* Desktop Table */}
+            {!allowApproval && (
+              <div className="px-6 py-3 bg-yellow-50 text-yellow-800 text-sm border-b border-yellow-200">
+                Approval actions are currently disabled for your account. You can view requests but cannot approve or reject.
+              </div>
+            )}
             <div className="overflow-x-auto h-full hidden md:block">
                 <table className="w-full text-sm text-left">
                     <thead className="bg-gray-50 text-gray-500 font-medium border-b border-gray-100 sticky top-0 z-10">
@@ -4646,21 +5560,26 @@ export default function InstructorPage() {
                                     className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
                                     onChange={toggleAll}
                                     checked={
-                                        filteredStudents.some(s => (s.signup_status || 'APPROVED') !== 'APPROVED') &&
-                                        selectedIds.size === filteredStudents.filter(s => (s.signup_status || 'APPROVED') !== 'APPROVED').length &&
-                                        filteredStudents.filter(s => (s.signup_status || 'APPROVED') !== 'APPROVED').length > 0
+                                        filteredRequests.some(s => String(s.status).toUpperCase() === 'PENDING') &&
+                                        selectedIds.size === filteredRequests.filter(s => String(s.status).toUpperCase() === 'PENDING').length &&
+                                        filteredRequests.filter(s => String(s.status).toUpperCase() === 'PENDING').length > 0
                                     }
+                                    disabled={!allowApproval}
                                 />
                             </th>
                             <th className="px-6 py-3">Student</th>
                             <th className="px-6 py-3">ID Number</th>
+                            <th className="px-6 py-3">Email</th>
                             <th className="px-6 py-3">Course & Section</th>
-                            <th className="px-6 py-3">Status</th>
                             <th className="px-6 py-3">Action</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                        {filteredStudents.length === 0 ? (
+                        {(approvalsInit && filteredRequests.length === 0) ? (
+                            <tr>
+                                <td colSpan={6} className="px-6 py-8 text-center text-gray-500">Loading approval requests...</td>
+                            </tr>
+                        ) : filteredRequests.length === 0 ? (
                             <tr>
                                 <td colSpan={6} className="px-6 py-8 text-center text-gray-500">
                                     {allowedCourses.length === 0 && allowedSections.length === 0 
@@ -4669,8 +5588,8 @@ export default function InstructorPage() {
                                 </td>
                             </tr>
                         ) : (
-                            filteredStudents.map(s => {
-                                const isPending = (s.signup_status || 'APPROVED') !== 'APPROVED';
+                            filteredRequests.map(s => {
+                                const isPending = String(s.status).toUpperCase() === 'PENDING';
                                 return (
                                     <tr key={s.id} className={`hover:bg-gray-50/50 ${selectedIds.has(s.id) ? 'bg-orange-50/30' : ''}`}>
                                         <td className="px-6 py-3">
@@ -4680,45 +5599,46 @@ export default function InstructorPage() {
                                                     checked={selectedIds.has(s.id)}
                                                     onChange={() => toggleSelection(s.id)}
                                                     className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                                                    disabled={!allowApproval}
                                                 />
                                             )}
                                         </td>
                                         <td className="px-6 py-3 font-medium text-gray-900">
                                             <button 
-                                                onClick={() => setViewingStudent(s)}
+                                                onClick={() => setViewingStudent({
+                                                  id: s.id,
+                                                  idnumber: s.school_id,
+                                                  role: "student",
+                                                  firstname: s.full_name.split(" ")[0],
+                                                  lastname: s.full_name.split(" ").slice(-1)[0],
+                                                  email: s.email,
+                                                  course: s.course,
+                                                  section: s.section,
+                                                  signup_status: "PENDING",
+                                                })}
                                                 className="hover:text-orange-600 hover:underline text-left font-bold"
                                             >
-                                                {s.firstname} {s.lastname}
+                                                {s.full_name.trim().split(" ").slice(-1)[0] || ""}{", "}{s.full_name.trim().split(" ")[0] || ""}
                                             </button>
                                         </td>
-                                        <td className="px-6 py-3 text-gray-600">{s.idnumber}</td>
+                                        <td className="px-6 py-3 text-gray-600">{s.school_id}</td>
+                                        <td className="px-6 py-3 text-gray-600">{s.email}</td>
                                         <td className="px-6 py-3 text-gray-600">
                                             {formatCourseSection(s.course, s.section)}
-                                        </td>
-                                        <td className="px-6 py-3">
-                                            <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium border ${
-                                                !isPending
-                                                ? 'bg-green-50 text-green-700 border-green-200' 
-                                                : s.signup_status === 'REJECTED'
-                                                ? 'bg-red-50 text-red-700 border-red-200'
-                                                : 'bg-yellow-50 text-yellow-700 border-yellow-200'
-                                            }`}>
-                                                {s.signup_status || 'APPROVED'}
-                                            </span>
                                         </td>
                                         <td className="px-6 py-3">
                                             {isPending && (
                                                 <div className="flex gap-2">
                                                     <button 
                                                         onClick={() => setConfirmAction({ type: 'single', id: s.id, action: 'approve' })}
-                                                        disabled={actionLoading === s.id}
+                                                        disabled={!allowApproval || actionLoading === s.id}
                                                         className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
                                                     >
                                                         {actionLoading === s.id ? '...' : 'Approve'}
                                                     </button>
                                                     <button 
                                                         onClick={() => setConfirmAction({ type: 'single', id: s.id, action: 'reject' })}
-                                                        disabled={actionLoading === s.id}
+                                                        disabled={!allowApproval || actionLoading === s.id}
                                                         className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
                                                     >
                                                         {actionLoading === s.id ? '...' : 'Reject'}
@@ -4736,7 +5656,9 @@ export default function InstructorPage() {
 
             {/* Mobile Cards */}
             <div className="md:hidden">
-                {filteredStudents.length === 0 ? (
+                {(approvalsInit && filteredRequests.length === 0) ? (
+                    <div className="px-4 py-8 text-center text-gray-500 text-sm">Loading approval requests...</div>
+                ) : filteredRequests.length === 0 ? (
                     <div className="px-4 py-8 text-center text-gray-500 text-sm">
                         {allowedCourses.length === 0 && allowedSections.length === 0 
                             ? "No students found. You are not assigned to any courses or sections in your profile." 
@@ -4744,8 +5666,8 @@ export default function InstructorPage() {
                     </div>
                 ) : (
                     <div className="divide-y divide-gray-100">
-                        {filteredStudents.map(s => {
-                            const isPending = (s.signup_status || 'APPROVED') !== 'APPROVED';
+                        {filteredRequests.map(s => {
+                            const isPending = String(s.status).toUpperCase() === 'PENDING';
                             const isSelected = selectedIds.has(s.id);
                             return (
                                 <div 
@@ -4755,28 +5677,32 @@ export default function InstructorPage() {
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="flex-1">
                                             <button 
-                                                onClick={() => setViewingStudent(s)}
+                                                onClick={() => setViewingStudent({
+                                                  id: s.id,
+                                                  idnumber: s.school_id,
+                                                  role: "student",
+                                                  firstname: s.full_name.split(" ")[0],
+                                                  lastname: s.full_name.split(" ").slice(-1)[0],
+                                  email: s.email,
+                                                  course: s.course,
+                                                  section: s.section,
+                                                  signup_status: "PENDING",
+                                                })}
                                                 className="text-sm font-bold text-gray-900 hover:text-orange-600 hover:underline text-left"
                                             >
-                                                {s.firstname} {s.lastname}
+                                                {s.full_name.trim().split(" ").slice(-1)[0] || ""}{", "}{s.full_name.trim().split(" ")[0] || ""}
                                             </button>
                                             <div className="text-xs text-gray-600 mt-0.5">
-                                                {s.idnumber}
+                                                {s.school_id}
                                             </div>
+                            <div className="text-xs text-gray-600 mt-0.5">
+                                {s.email}
+                            </div>
                                             <div className="text-xs text-gray-500 mt-0.5">
                                                 {formatCourseSection(s.course, s.section)}
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-3">
-                                            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border ${
-                                                !isPending
-                                                ? 'bg-green-50 text-green-700 border-green-200' 
-                                                : s.signup_status === 'REJECTED'
-                                                ? 'bg-red-50 text-red-700 border-red-200'
-                                                : 'bg-yellow-50 text-yellow-700 border-yellow-200'
-                                            }`}>
-                                                {s.signup_status || 'APPROVED'}
-                                            </span>
                                             {isPending && (
                                                 <input 
                                                     type="checkbox" 
@@ -4784,6 +5710,7 @@ export default function InstructorPage() {
                                                     onChange={() => toggleSelection(s.id)}
                                                     className="rounded border-gray-300 text-orange-600 focus:ring-orange-500"
                                                     aria-label="Select for bulk action"
+                                                    disabled={!allowApproval}
                                                 />
                                             )}
                                         </div>
@@ -4792,14 +5719,14 @@ export default function InstructorPage() {
                                         <div className="mt-3 flex items-center gap-2">
                                             <button 
                                                 onClick={() => setConfirmAction({ type: 'single', id: s.id, action: 'approve' })}
-                                                disabled={actionLoading === s.id}
+                                                disabled={!allowApproval || actionLoading === s.id}
                                                 className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
                                             >
                                                 {actionLoading === s.id ? '...' : 'Approve'}
                                             </button>
                                             <button 
                                                 onClick={() => setConfirmAction({ type: 'single', id: s.id, action: 'reject' })}
-                                                disabled={actionLoading === s.id}
+                                                disabled={!allowApproval || actionLoading === s.id}
                                                 className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors disabled:opacity-50"
                                             >
                                                 {actionLoading === s.id ? '...' : 'Reject'}
@@ -5066,7 +5993,8 @@ export default function InstructorPage() {
   // --- Render Layout ---
 
   const menuItems: { id: TabId; label: string; icon: React.ComponentType<{ size?: number; className?: string }> }[] = [
-    { id: "attendance", label: "Attendance Monitoring", icon: ClipboardCheck },
+    { id: "validate", label: "Validate Attendance", icon: ClipboardCheck },
+    { id: "attendance", label: "Account Monitoring", icon: ClipboardCheck },
     { id: "reports", label: "Reports", icon: FileText },
     { id: "approval", label: "Account approval", icon: UserCheck },
     { id: "profile", label: "Profile", icon: UserIcon },
@@ -5181,9 +6109,26 @@ export default function InstructorPage() {
 
         {/* View Area */}
         <main className="flex-1 overflow-auto p-4 lg:p-8">
-          {activeTab === "attendance" && <AttendanceMonitoringView students={students} attendance={attendance} onNavigateToApproval={() => setActiveTab("approval")} attendanceSummary={attendanceSummary} evaluationStatuses={evaluationStatuses} toggleEvaluation={toggleEvaluation} overtimeShifts={overtimeShifts} studentSchedules={allStudentSchedules} overridesData={allOverrides} scheduleConfigs={scheduleConfigs} totalSummary={totalSummary} requiredHoursMap={requiredHoursMap} lastFetchStatus={lastFetchStatus} supervisors={supervisors} />}
+          {activeTab === "attendance" && <AttendanceMonitoringView students={students} attendance={attendance} onNavigateToApproval={() => setActiveTab("approval")} attendanceSummary={attendanceSummary} evaluationStatuses={evaluationStatuses} toggleEvaluation={toggleEvaluation} overtimeShifts={overtimeShifts} studentSchedules={allStudentSchedules} overridesData={allOverrides} scheduleConfigs={scheduleConfigs} totalSummary={totalSummary} requiredHoursMap={requiredHoursMap} lastFetchStatus={lastFetchStatus} supervisors={supervisors} myIdnumber={myProfile?.idnumber || ""} />}
+          {activeTab === "validate" && <ValidateAttendanceInstructorView students={students} attendance={attendance} scheduleConfigs={scheduleConfigs} overtimeShifts={overtimeShifts} studentSchedules={allStudentSchedules} overridesData={allOverrides} myIdnumber={myProfile?.idnumber || ""} assignedCourses={(myProfile?.course || "").split(",").map(s => s.trim()).filter(Boolean)} assignedSections={(myProfile?.section || "").split(",").map(s => s.trim()).filter(Boolean)} />}
           {activeTab === "reports" && <ReportsView students={students} myIdnumber={myProfile?.idnumber || ""} />}
-          {activeTab === "approval" && (allowApproval ? <AccountApprovalView /> : <ApprovalRestrictedView />)}
+          {activeTab === "approval" && (
+            <>
+              <ApprovalsView 
+                users={students}
+                onView={setApprovalViewingStudent}
+                onRefresh={() => {}}
+                profileCourse={myProfile?.course}
+                profileSection={myProfile?.section}
+                profileSectionIds={Array.isArray(myProfile?.sectionIds) ? (myProfile?.sectionIds as number[]) : []}
+              />
+              {approvalViewingStudent && (
+                <ViewUserDetails 
+                  user={approvalViewingStudent}
+                  onClose={() => setApprovalViewingStudent(null)} users={[]}                />
+              )}
+            </>
+          )}
           {activeTab === "profile" && <ProfileView />}
         </main>
       </div>

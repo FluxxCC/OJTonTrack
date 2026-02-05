@@ -441,6 +441,65 @@ function SupervisorContent() {
     fetchSupervisorData();
   }, [myIdnumber]);
 
+  // Realtime: show toast on new notifications for this supervisor
+  useEffect(() => {
+    if (!supabase || !me?.id) return;
+    const channel = supabase
+      .channel('supervisor-notifications')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'notifications' },
+        (payload: RealtimePostgresChangesPayload<any>) => {
+          const row = payload.new as any;
+          if (row && Number(row.recipient_id) === Number(me.id) && String(row.recipient_role || '').toLowerCase() === 'supervisor') {
+            const title = String(row.title || 'Notification');
+            const message = String(row.message || '');
+            pushToast(title, message);
+          }
+        }
+      )
+      .subscribe();
+    return () => {
+      try { supabase?.removeChannel(channel); } catch {}
+    };
+  }, [me?.id, supabase]);
+
+  // Polling fallback for notifications (server-admin API)
+  useEffect(() => {
+    if (!me?.id) return;
+    let cancelled = false;
+    const seen = new Set<string>();
+    const poll = async () => {
+      try {
+        const params = new URLSearchParams();
+        params.set("recipient_id", String(me.id));
+        params.set("recipient_role", "supervisor");
+        params.set("limit", "20");
+        const res = await fetch(`/api/notifications?${params.toString()}`, { cache: "no-store" });
+        if (!res.ok) return;
+        const json = await res.json().catch(() => ({}));
+        const list: any[] = Array.isArray(json.notifications) ? json.notifications : [];
+        for (const n of list) {
+          const key = `${n.id}-${n.created_at}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            if (!cancelled) {
+              const title = String(n.title || "Notification");
+              const message = String(n.message || "");
+              pushToast(title, message);
+            }
+          }
+        }
+      } catch {}
+    };
+    poll();
+    const i = setInterval(poll, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(i);
+    };
+  }, [me?.id]);
+
   // Visibility Change Listener
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -474,7 +533,7 @@ function SupervisorContent() {
 
   // Menu Items
   const menuItems = [
-    { id: "dashboard", label: "Account Monitoring", icon: LayoutDashboard },
+    { id: "dashboard", label: "Validate Attendance", icon: LayoutDashboard },
     { id: "evaluation", label: "Evaluation", icon: ClipboardCheck },
     { id: "schedule", label: "Set Official Time", icon: CalendarClock },
     { id: "profile", label: "Profile", icon: UserIcon },

@@ -154,6 +154,35 @@ export async function PUT(req: Request) {
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
+    try {
+      let studentQuery = admin.from("users_students").select("id, idnumber").eq("signup_status", "APPROVED");
+      if (data.school_year_id) {
+        studentQuery = studentQuery.eq("school_year_id", data.school_year_id);
+      }
+      if (data.courses_id && Array.isArray(data.courses_id) && data.courses_id.length > 0) {
+        studentQuery = studentQuery.in("course_id", data.courses_id);
+      }
+      const { data: students } = await studentQuery;
+      if (students && students.length > 0) {
+        const ids = students.map((s: any) => s.idnumber).filter(Boolean);
+        await sendBatchPushNotification(ids, {
+          title: `Event Updated: ${data.title}`,
+          body: description || `Check the portal for updates to ${data.title}.`,
+          url: "/portal/student",
+          tag: `event-${data.id}`
+        });
+        const notifications = students.map((s: any) => ({
+          recipient_id: s.id,
+          recipient_role: 'student',
+          title: `Event Updated: ${data.title}`,
+          message: description || `Check the portal for updates to ${data.title}.`,
+          link: '/portal/student?tab=attendance',
+          type: 'event'
+        }));
+        await admin.from('notifications').insert(notifications);
+      }
+    } catch {}
+
     return NextResponse.json({ event: data });
   } catch (e) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });

@@ -214,6 +214,13 @@ export function formatDisplayTime(raw: string | null | undefined): string {
 }
 
 export function timeStringToMinutes(raw: string | null | undefined): number {
+  if (!raw) return 0;
+  const lower = raw.toLowerCase();
+  const hasSuffix = lower.includes("am") || lower.includes("pm");
+  if (hasSuffix) {
+    const { h, m } = parseTime(raw);
+    return (h || 0) * 60 + (m || 0);
+  }
   const t = normalizeTimeString(raw);
   if (!t) return 0;
   const [h, m] = t.split(":").map(Number);
