@@ -1290,6 +1290,7 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
       } catch {}
 
       const payload: Record<string, unknown> = {
+        role: String(user.role || "").toLowerCase() || "student",
         idnumber: form.idnumber.trim(),
         firstname: form.firstname || undefined,
         lastname: form.lastname || undefined,
@@ -1321,7 +1322,7 @@ export function EditUserForm({ user, onSuccess, onClose, availableCourses, avail
       if (form.sectionIds && form.sectionIds.length > 0) payload.sectionIds = form.sectionIds;
       if (form.supervisorid) payload.supervisorid = form.supervisorid;
 
-      const res = await fetch(`/api/users/${user.id}`, {
+      const res = await fetch(`/api/users/${user.id}?role=${encodeURIComponent(String(user.role || "student").toLowerCase())}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

@@ -22,6 +22,14 @@ function configureCloudinary() {
   return true;
 }
 
+function sanitizeSegment(s: string) {
+  return String(s || "UNKNOWN")
+    .replace(/[\/\\]/g, "-")
+    .replace(/\s+/g, "_")
+    .replace(/[^a-zA-Z0-9_\-]/g, "")
+    .trim();
+}
+
 type ReportFile = { name?: string; type?: string; url?: string } | null;
 type ReportFiles = ReportFile[] | ReportFile | undefined;
 type ReportRow = {
@@ -82,21 +90,21 @@ export async function GET(req: Request) {
       // Look up student ID first (robust, ignoring spaces/hyphens)
       const normalize = (s: string) => String(s || "").toLowerCase().replace(/[\s\-]/g, "");
       let studentIdResolved: number | null = null;
-      const { data: exact } = await admin.from("users_students").select("id, idnumber").eq("idnumber", idnumber).maybeSingle();
+      const { data: exact } = await admin.from("users_students").select("id, idnumber, course_id, section_id").eq("idnumber", idnumber).maybeSingle();
       if (exact?.id) {
         studentIdResolved = exact.id;
       } else {
-        const { data: ci } = await admin.from("users_students").select("id, idnumber").ilike("idnumber", idnumber).maybeSingle();
+        const { data: ci } = await admin.from("users_students").select("id, idnumber, course_id, section_id").ilike("idnumber", idnumber).maybeSingle();
         if (ci?.id) {
           studentIdResolved = ci.id;
         } else {
           const upper = idnumber.toUpperCase();
           const lower = idnumber.toLowerCase();
-          const { data: up } = await admin.from("users_students").select("id, idnumber").eq("idnumber", upper).maybeSingle();
+          const { data: up } = await admin.from("users_students").select("id, idnumber, course_id, section_id").eq("idnumber", upper).maybeSingle();
           if (up?.id) {
             studentIdResolved = up.id;
           } else {
-            const { data: low } = await admin.from("users_students").select("id, idnumber").eq("idnumber", lower).maybeSingle();
+            const { data: low } = await admin.from("users_students").select("id, idnumber, course_id, section_id").eq("idnumber", lower).maybeSingle();
             if (low?.id) {
               studentIdResolved = low.id;
             } else {
@@ -440,11 +448,23 @@ export async function POST(req: Request) {
     if (fileData && fileName) {
         configureCloudinary();
         try {
+            let courseName = "UNKNOWN";
+            let sectionName = "UNKNOWN";
+            try {
+                const { data: c } = await admin.from("courses").select("name").eq("id", (student as any).course_id).maybeSingle();
+                if (c?.name) courseName = String(c.name);
+                const { data: s } = await admin.from("sections").select("name").eq("id", (student as any).section_id).maybeSingle();
+                if (s?.name) sectionName = String(s.name);
+            } catch {}
+            const sanCourse = sanitizeSegment(courseName);
+            const sanSection = sanitizeSegment(sectionName);
+            const sanId = sanitizeSegment(normalizedId || (student as any).idnumber);
+            const safeName = sanitizeSegment(String(fileName).toLowerCase());
+            const baseId = `${sanCourse}/${sanSection}/${sanId}/REPORTS/${(student as any).id}_${safeName}_${Date.now()}`;
             const uploadRes = await cloudinary.uploader.upload(fileData, {
-                folder: "reports_docs",
-                resource_type: "auto",
-                filename_override: fileName,
-                use_filename: true
+                public_id: baseId,
+                resource_type: fileType && String(fileType).startsWith("image/") ? "image" : "raw",
+                overwrite: false
             });
             uploadedFiles.push({
                 name: fileName,
@@ -473,11 +493,23 @@ export async function POST(req: Request) {
         for (const p of photos) {
             if (p.data) {
                 try {
+                    let courseName = "UNKNOWN";
+                    let sectionName = "UNKNOWN";
+                    try {
+                        const { data: c } = await admin.from("courses").select("name").eq("id", (student as any).course_id).maybeSingle();
+                        if (c?.name) courseName = String(c.name);
+                        const { data: s } = await admin.from("sections").select("name").eq("id", (student as any).section_id).maybeSingle();
+                        if (s?.name) sectionName = String(s.name);
+                    } catch {}
+                    const sanCourse = sanitizeSegment(courseName);
+                    const sanSection = sanitizeSegment(sectionName);
+                    const sanId = sanitizeSegment(normalizedId || (student as any).idnumber);
+                    const safeName = sanitizeSegment(String(p.name).toLowerCase());
+                    const baseId = `${sanCourse}/${sanSection}/${sanId}/PHOTO_EVIDENCE/${(student as any).id}_${safeName}_${Date.now()}`;
                     const uploadRes = await cloudinary.uploader.upload(p.data, {
-                        folder: "reports_photos",
+                        public_id: baseId,
                         resource_type: "image",
-                        filename_override: p.name,
-                        use_filename: true
+                        overwrite: false
                     });
                     uploadedFiles.push({
                         name: p.name,

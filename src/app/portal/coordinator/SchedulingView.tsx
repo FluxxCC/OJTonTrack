@@ -112,6 +112,9 @@ export function SchedulingView({ courses }: { courses: {id: number, name: string
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [savingBusy, setSavingBusy] = useState(false);
   
   // Form State
   const [title, setTitle] = useState("");
@@ -198,6 +201,7 @@ export function SchedulingView({ courses }: { courses: {id: number, name: string
     if (!title || !date) return;
 
     try {
+      setSavingBusy(true);
       const payload = {
         title,
         description,
@@ -237,17 +241,28 @@ export function SchedulingView({ courses }: { courses: {id: number, name: string
       loadEvents();
     } catch (e: any) {
       alert("Error saving event: " + e.message);
+    } finally {
+      setSavingBusy(false);
     }
   };
 
-  const handleDelete = async (id: number) => {
-    if (!confirm("Are you sure you want to delete this event?")) return;
+  const openDeleteConfirm = (id: number) => {
+    setConfirmDeleteId(id);
+  };
+
+  const confirmDelete = async () => {
+    if (!confirmDeleteId) return;
     try {
-      const res = await fetch(`/api/events?id=${id}`, { method: "DELETE" });
+      setDeleteBusy(true);
+      const res = await fetch(`/api/events?id=${confirmDeleteId}`, { method: "DELETE", cache: "no-store" });
       if (!res.ok) throw new Error("Failed to delete");
-      loadEvents();
+      setConfirmDeleteId(null);
+      await loadEvents();
     } catch (e) {
       alert("Error deleting event");
+      setConfirmDeleteId(null);
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -289,7 +304,7 @@ export function SchedulingView({ courses }: { courses: {id: number, name: string
                   <Edit2 size={16} />
                 </button>
                 <button 
-                  onClick={() => handleDelete(event.id)}
+                  onClick={() => openDeleteConfirm(event.id)}
                   className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg"
                   title="Delete"
                 >
@@ -511,18 +526,51 @@ export function SchedulingView({ courses }: { courses: {id: number, name: string
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-5 py-2.5 text-gray-600 text-sm font-bold hover:bg-gray-100 rounded-xl transition-colors"
+                disabled={savingBusy}
+                className={`px-5 py-2.5 text-gray-600 text-sm font-bold rounded-xl transition-colors ${savingBusy ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-100'}`}
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 bg-[#F97316] text-white text-sm font-bold rounded-xl hover:bg-orange-600 transition-colors shadow-lg shadow-orange-200"
+                disabled={savingBusy}
+                className={`px-5 py-2.5 text-white text-sm font-bold rounded-xl transition-colors shadow-lg shadow-orange-200 ${savingBusy ? 'bg-orange-500 opacity-70 cursor-not-allowed' : 'bg-[#F97316] hover:bg-orange-600'}`}
                 >
-                  {editingId ? "Update Event" : "Save Event"}
+                {savingBusy ? "Saving..." : (editingId ? "Update Event" : "Save Event")}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      
+      {/* Delete Confirm Modal */}
+      {confirmDeleteId !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 animate-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold text-gray-900">Delete Event</h3>
+              <button onClick={() => setConfirmDeleteId(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={20} />
+              </button>
+            </div>
+            <p className="text-sm text-gray-600 mb-6">Are you sure you want to delete this event?</p>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                onClick={() => setConfirmDeleteId(null)}
+                disabled={deleteBusy}
+                className={`w-full rounded-xl bg-gray-100 py-2.5 text-gray-700 font-bold transition-colors ${deleteBusy ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-200'}`}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={deleteBusy}
+                className={`w-full rounded-xl py-2.5 text-white font-bold transition-colors shadow-lg shadow-red-200 ${deleteBusy ? 'bg-red-500 opacity-70 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'}`}
+              >
+                {deleteBusy ? "Deleting..." : "Delete"}
+              </button>
+            </div>
           </div>
         </div>
       )}

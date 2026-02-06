@@ -121,7 +121,8 @@ export default function SuperAdminPage() {
   const saveEdit = async (id: number, updates: any) => {
     setError(null);
     try {
-      const res = await fetch(`/api/users/${id}`, {
+      const roleParam = String((updates && updates.role) || '').toLowerCase() || 'student';
+      const res = await fetch(`/api/users/${id}?role=${encodeURIComponent(roleParam)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),

@@ -200,7 +200,8 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   if (!id) return NextResponse.json({ error: "Invalid id" }, { status: 400 });
 
   const { searchParams } = new URL(req.url);
-  const role = searchParams.get('role');
+  const roleRaw = searchParams.get('role');
+  const role = roleRaw ? String(roleRaw).toLowerCase() : null;
   
   let tableName = "users_students";
   if (role) {
@@ -209,6 +210,11 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
     else if (role === 'supervisor') tableName = "users_supervisors";
     else if (role === 'instructor') tableName = "users_instructors";
     else if (role === 'admin' || role === 'superadmin') tableName = "users_super_admins";
+  }
+  
+  const { data: existingRow } = await admin.from(tableName).select("id").eq("id", id).maybeSingle();
+  if (!existingRow) {
+    return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
   
   // First delete related records if necessary (though ON DELETE CASCADE should handle this if foreign keys are set up correctly)
@@ -227,6 +233,7 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
         await admin.from('validated_hours').delete().eq('student_id', id);
         await admin.from('overtime_shifts').delete().eq('student_id', id);
         await admin.from('student_shifts').delete().eq('student_id', id);
+        await admin.from('evaluation_status').delete().eq('student_id', id);
         await admin.from('reports').delete().eq('student_id', id);
 
         // Clean up non-FK tables keyed by idnumber
@@ -249,8 +256,36 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   } else if (tableName === 'users_supervisors') {
       // Detach students from this supervisor to avoid FK constraint errors
       await admin.from('users_students').update({ supervisor_id: null }).eq('supervisor_id', id);
-      // Remove any shifts owned by this supervisor
-      await admin.from('shifts').delete().eq('supervisor_id', id);
+      try {
+        const { data: shiftRows } = await admin
+          .from('shifts')
+          .select('id')
+          .eq('supervisor_id', id);
+        const shiftIds = (shiftRows || []).map((r: any) => r.id).filter((x: any) => x != null);
+        if (shiftIds.length > 0) {
+          try {
+            await admin.from('student_shifts').delete().in('shift_id', shiftIds);
+          } catch {}
+          try {
+            await admin.from('overtime_shifts').delete().in('shift_id', shiftIds);
+          } catch {}
+          try {
+            await admin.from('attendance').delete().in('shift_id', shiftIds);
+          } catch {}
+          try {
+            await admin.from('validated_hours').delete().in('shift_id', shiftIds);
+          } catch {}
+        }
+        await admin.from('shifts').delete().eq('supervisor_id', id);
+      } catch {}
+      // Remove overtime shifts created by this supervisor (creator FK)
+      try {
+        await admin.from('overtime_shifts').delete().eq('created_by_id', id).eq('created_by_role', 'supervisor');
+      } catch {}
+      // Remove notifications targeted to this supervisor (recipient FK, if any)
+      try {
+        await admin.from('notifications').delete().eq('recipient_id', id).eq('recipient_role', 'supervisor');
+      } catch {}
       // Clean up push subscriptions tied to this supervisor's idnumber (if available)
       try {
         const { data: supRow } = await admin.from('users_supervisors').select('idnumber').eq('id', id).maybeSingle();
@@ -263,6 +298,11 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
 
   const { error } = await admin.from(tableName).delete().eq("id", id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  
+  const { data: stillThere } = await admin.from(tableName).select("id").eq("id", id).maybeSingle();
+  if (stillThere) {
+    return NextResponse.json({ error: "Deletion failed due to constraints or mismatched role" }, { status: 500 });
+  }
 
   return NextResponse.json({ success: true });
 }

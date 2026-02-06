@@ -77,6 +77,7 @@ export default function CoordinatorPage() {
   const [viewingUser, setViewingUser] = useState<User | null>(null);
   const [deletingUser, setDeletingUser] = useState<User | null>(null);
   const [coordinatorName, setCoordinatorName] = useState("");
+  const [deletingBusy, setDeletingBusy] = useState(false);
 
   // Check screen size
   useEffect(() => {
@@ -99,8 +100,8 @@ export default function CoordinatorPage() {
       // Fetch users for each role separately to ensure we get everyone
       // The API defaults to 'student' if no role is provided, so we must be explicit
       const roles = ["student", "instructor", "supervisor", "coordinator"];
-      const requests = roles.map(role => 
-        fetch(`/api/users?limit=2000&role=${role}`).then(res => res.json())
+      const requests = roles.map(role =>
+        fetch(`/api/users?limit=2000&role=${role}`, { cache: "no-store" }).then(res => res.json())
       );
 
       const results = await Promise.all(requests);
@@ -514,7 +515,8 @@ export default function CoordinatorPage() {
             <div className="grid grid-cols-2 gap-3">
               <button
                 onClick={() => setDeletingUser(null)}
-                className="w-full rounded-xl bg-gray-100 py-3 text-gray-700 font-bold hover:bg-gray-200 transition-colors"
+                disabled={deletingBusy}
+                className={`w-full rounded-xl bg-gray-100 py-3 text-gray-700 font-bold transition-colors ${deletingBusy ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-200'}`}
               >
                 Cancel
               </button>
@@ -522,19 +524,25 @@ export default function CoordinatorPage() {
                 onClick={async () => {
                   if (!deletingUser) return;
                   try {
-                    const roleParam = deletingUser.role ? `?role=${encodeURIComponent(String(deletingUser.role))}` : "";
-                    const res = await fetch(`/api/users/${deletingUser.id}${roleParam}`, { method: "DELETE" });
+                    setDeletingBusy(true);
+                    const roleParam = deletingUser.role ? `?role=${encodeURIComponent(String(deletingUser.role || '').toLowerCase())}` : "";
+                    const res = await fetch(`/api/users/${deletingUser.id}${roleParam}`, { method: "DELETE", cache: "no-store" });
                     const json = await res.json();
                     if (!res.ok) throw new Error(json?.error || "Failed to delete user");
                     setDeletingUser(null);
                     await fetchUsers();
-                  } catch {
+                  } catch (e) {
+                    const msg = e instanceof Error ? e.message : "Delete failed";
+                    alert(msg);
                     setDeletingUser(null);
+                  } finally {
+                    setDeletingBusy(false);
                   }
                 }}
-                className="w-full rounded-xl bg-red-600 py-3 text-white font-bold hover:bg-red-700 transition-colors shadow-lg shadow-red-200"
+                disabled={deletingBusy}
+                className={`w-full rounded-xl py-3 text-white font-bold transition-colors shadow-lg shadow-red-200 ${deletingBusy ? 'bg-red-500 opacity-70 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'}`}
               >
-                Delete
+                {deletingBusy ? "Deleting..." : "Delete"}
               </button>
             </div>
           </div>

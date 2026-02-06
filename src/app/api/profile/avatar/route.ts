@@ -18,6 +18,14 @@ function configureCloudinary() {
   return true;
 }
 
+function sanitizeSegment(s: string) {
+  return String(s || "UNKNOWN")
+    .replace(/[\/\\]/g, "-")
+    .replace(/\s+/g, "_")
+    .replace(/[^a-zA-Z0-9_\-]/g, "")
+    .trim();
+}
+
 export async function POST(req: Request) {
   try {
     const admin = getSupabaseAdmin();
@@ -40,15 +48,37 @@ export async function POST(req: Request) {
     
     let avatarUrl = "";
     try {
-        console.log("Uploading avatar to Cloudinary...");
+        let publicId = `AVATAR/${sanitizeSegment(idnumber)}/${Date.now()}`;
+        try {
+            const admin = getSupabaseAdmin();
+            if (admin) {
+                const { data: stu } = await admin
+                    .from("users_students")
+                    .select("course_id, section_id")
+                    .eq("idnumber", idnumber)
+                    .maybeSingle();
+                if (stu) {
+                    let courseName = "UNKNOWN";
+                    let sectionName = "UNKNOWN";
+                    try {
+                        const { data: c } = await admin.from("courses").select("name").eq("id", stu.course_id).maybeSingle();
+                        if (c?.name) courseName = String(c.name);
+                        const { data: s } = await admin.from("sections").select("name").eq("id", stu.section_id).maybeSingle();
+                        if (s?.name) sectionName = String(s.name);
+                    } catch {}
+                    const sanCourse = sanitizeSegment(courseName);
+                    const sanSection = sanitizeSegment(sectionName);
+                    const sanId = sanitizeSegment(idnumber);
+                    publicId = `${sanCourse}/${sanSection}/${sanId}/AVATAR/${Date.now()}`;
+                }
+            }
+        } catch {}
         const uploadRes = await cloudinary.uploader.upload(fileData, {
-            folder: "ojt_avatars",
+            public_id: publicId,
             resource_type: "image",
-            public_id: `avatar_${idnumber}_${Date.now()}`,
             transformation: [{ width: 400, height: 400, crop: "fill", gravity: "face" }]
         });
         avatarUrl = uploadRes.secure_url;
-        console.log("Avatar uploaded:", avatarUrl);
     } catch (err) {
         console.error("Cloudinary upload failed:", err);
         return NextResponse.json({ error: "Failed to upload file" }, { status: 500 });

@@ -19,6 +19,8 @@ function configureCloudinary() {
   });
 }
 
+// Removed folder-style public_id building for faster uploads
+
 export async function GET(req: Request) {
   try {
     const admin = getSupabaseAdmin();
@@ -523,8 +525,10 @@ export async function POST(req: Request) {
     if (photoDataUrl) {
       try {
         configureCloudinary();
+        const iso = new Date(ts).toISOString().replace(/[:.]/g, "-");
+        const publicId = `ATTENDANCE_${user.id}_${type}_${iso}`;
         const uploadRes = await cloudinary.uploader.upload(photoDataUrl, {
-          folder: "ojtontrack/attendance",
+          public_id: publicId,
           overwrite: false,
           resource_type: "image",
         });
