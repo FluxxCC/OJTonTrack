@@ -1054,17 +1054,22 @@ export async function PUT(req: Request) {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
     
-    // Log the action
+    // Log the action to system_audit_logs (used by System Logs view)
     if (adminId) {
-        await admin.from('system_logs').insert({
-            actor_idnumber: adminId,
-            actor_role: adminRole || 'superadmin',
-            action: 'UPDATE_ATTENDANCE',
-            target_table: 'attendance',
-            target_id: id,
-            reason: `Updated attendance record. Status: ${status}`,
-            after_data: updates
-        }).select().maybeSingle(); // fire and forget-ish
+        try {
+          await admin.from('system_audit_logs').insert({
+              actor_idnumber: adminId,
+              actor_role: adminRole || 'superadmin',
+              action: 'UPDATE_ATTENDANCE',
+              target_table: 'attendance',
+              target_id: id,
+              reason: `Updated attendance record`,
+              before_data: fullRecord,
+              after_data: updates
+          });
+        } catch (logErr) {
+          console.error('[Attendance PUT] Failed to write audit log:', logErr);
+        }
     }
 
     return NextResponse.json({ success: true });

@@ -11,7 +11,8 @@ import {
   LogOut,
   ChevronRight,
   BookOpen,
-  Calendar
+  Calendar,
+  UserCheck
 } from "lucide-react";
 import { 
   UserManagementView, 
@@ -22,6 +23,7 @@ import {
   Course, 
   Section 
 } from "./ui";
+import { ApprovalsView } from "../coordinator/ui";
 import { AcademicCatalogView } from "./AcademicCatalogView";
 import { SchedulingView } from "../coordinator/SchedulingView";
 
@@ -38,7 +40,7 @@ export default function SuperAdminPage() {
 
   // Layout state
   const [isSidebarOpen, setSidebarOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"view-account" | "new-account" | "time-entry" | "system-logs" | "academic-catalog" | "scheduling">("view-account");
+  const [activeTab, setActiveTab] = useState<"view-account" | "new-account" | "time-entry" | "system-logs" | "academic-catalog" | "scheduling" | "approval">("view-account");
   const [isMobile, setIsMobile] = useState(false);
 
   // Mobile check
@@ -162,6 +164,7 @@ export default function SuperAdminPage() {
   const menuItems = [
     { id: "new-account", label: "New Account", icon: UserPlus },
     { id: "view-account", label: "View Account", icon: LayoutDashboard },
+    { id: "approval", label: "Account Approval", icon: UserCheck },
     { id: "time-entry", label: "Time Entry", icon: Clock },
     { id: "system-logs", label: "System Logs", icon: ShieldCheck },
     { id: "academic-catalog", label: "Academic Catalog", icon: BookOpen },
@@ -289,6 +292,18 @@ export default function SuperAdminPage() {
                   availableCourses={availableCourses}
                   availableSections={availableSections}
                 />
+             )}
+
+             {activeTab === 'approval' && (
+               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
+                 <div className="p-4 sm:p-6">
+                   <ApprovalsView 
+                     users={users}
+                     onView={() => {}}
+                     onRefresh={load}
+                   />
+                 </div>
+               </div>
              )}
 
              {activeTab === 'time-entry' && <TimeEntryView />}

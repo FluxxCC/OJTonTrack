@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useMemo, useEffect } from "react";
 import { MultiSelect } from "@/app/portal/superadmin/ui";
-import { Search, Users, Clock } from "lucide-react";
+import { Search, Users, Clock, Eye, EyeOff } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import { calculateSessionDuration, buildSchedule, formatHours } from "@/lib/attendance";
 
@@ -192,6 +192,9 @@ export function CoordinatorProfileView() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -232,7 +235,8 @@ export function CoordinatorProfileView() {
         body: JSON.stringify({ 
           idnumber: myProfile.idnumber, 
           currentPassword, 
-          newPassword 
+          newPassword,
+          role: "coordinator"
         }),
       });
       const json = await res.json();
@@ -328,30 +332,63 @@ export function CoordinatorProfileView() {
             <div className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">Current Password</label>
-                <input
-                  type="password"
-                  value={currentPassword}
-                  onChange={e => setCurrentPassword(e.target.value)}
-                  className="w-full rounded-xl border border-gray-300 bg-white text-black placeholder:text-gray-600 focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all shadow-sm px-4 py-2.5 text-sm"
-                />
+                <div className="relative">
+                  <input
+                    type={showCurrentPassword ? "text" : "password"}
+                    value={currentPassword}
+                    onChange={e => setCurrentPassword(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 bg-white text-black placeholder:text-gray-700 placeholder:opacity-90 focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all shadow-sm px-4 py-2.5 text-sm pr-10"
+                    placeholder="Enter current password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrentPassword(v => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700 p-1 rounded-lg hover:bg-gray-100"
+                    aria-label="Toggle password visibility"
+                  >
+                    {showCurrentPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
               </div>
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">New Password</label>
-                <input
-                  type="password"
-                  value={newPassword}
-                  onChange={e => setNewPassword(e.target.value)}
-                  className="w-full rounded-xl border border-gray-300 bg-white text-black placeholder:text-gray-600 focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all shadow-sm px-4 py-2.5 text-sm"
-                />
+                <div className="relative">
+                  <input
+                    type={showNewPassword ? "text" : "password"}
+                    value={newPassword}
+                    onChange={e => setNewPassword(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 bg-white text-black placeholder:text-gray-700 placeholder:opacity-90 focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all shadow-sm px-4 py-2.5 text-sm pr-10"
+                    placeholder="Enter new password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword(v => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700 p-1 rounded-lg hover:bg-gray-100"
+                    aria-label="Toggle password visibility"
+                  >
+                    {showNewPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
               </div>
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">Confirm New Password</label>
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={e => setConfirmPassword(e.target.value)}
-                  className="w-full rounded-xl border border-gray-300 bg-white text-black placeholder:text-gray-600 focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all shadow-sm px-4 py-2.5 text-sm"
-                />
+                <div className="relative">
+                  <input
+                    type={showConfirmPassword ? "text" : "password"}
+                    value={confirmPassword}
+                    onChange={e => setConfirmPassword(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 bg-white text-black placeholder:text-gray-700 placeholder:opacity-90 focus:border-[#F97316] focus:ring-4 focus:ring-orange-500/10 outline-none transition-all shadow-sm px-4 py-2.5 text-sm pr-10"
+                    placeholder="Re-enter new password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword(v => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700 p-1 rounded-lg hover:bg-gray-100"
+                    aria-label="Toggle password visibility"
+                  >
+                    {showConfirmPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
               </div>
             </div>
             <div>
@@ -1604,7 +1641,61 @@ export function ViewUserDetails({ user, users, onClose }: { user: User; users: U
   }, [users, user.supervisorid]);
 
   const [attendanceStats, setAttendanceStats] = useState<{total: number, validated: number} | null>(null);
+  const [selectedCourse, setSelectedCourse] = useState<string>(user.course || "");
+  const [selectedSection, setSelectedSection] = useState<string>(user.section || "");
+  const [selectedStatus, setSelectedStatus] = useState<string>("ALL");
+  const [allStudents, setAllStudents] = useState<User[]>([]);
+  const [availableCourses, setAvailableCourses] = useState<Course[]>([]);
+  const [availableSections, setAvailableSections] = useState<Section[]>([]);
+  const courseOptions = useMemo(() => {
+    return availableCourses
+      .map((c) => (c.name || "").replace(/\s+/g, " ").trim())
+      .filter((n) => !!n)
+      .sort((a, b) => a.localeCompare(b));
+  }, [availableCourses]);
+  const sectionOptions = useMemo(() => {
+    const norm = (x?: string) => (x || "").replace(/\s+/g, " ").trim();
+    const map = new Map<string, string>();
+    let catalogSections = availableSections;
+    if (selectedCourse) {
+      const courseObj = availableCourses.find((c) => norm(c.name) === norm(selectedCourse));
+      catalogSections = catalogSections.filter((s) => {
+        return courseObj ? Number(s.course_id) === Number(courseObj.id) : false;
+      });
+    }
+    catalogSections.forEach((s) => {
+      const name = norm(s.name);
+      if (!name) return;
+      const key = name.toLowerCase();
+      if (!map.has(key)) map.set(key, name);
+    });
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
+  }, [availableSections, availableCourses, selectedCourse]);
+  useEffect(() => {
+    setSelectedSection("");
+  }, [selectedCourse]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const metaRes = await fetch("/api/metadata");
+        const meta = await metaRes.json();
+        if (!cancelled) {
+          if (meta.courses) setAvailableCourses(meta.courses);
+          if (meta.sections) setAvailableSections(meta.sections);
+        }
+        const res = await fetch("/api/users?role=student&limit=2000&approvedOnly=true");
+        const json = await res.json();
+        if (!cancelled && Array.isArray(json.users)) {
+          setAllStudents(json.users);
+        }
+      } catch {
+        if (!cancelled) setAllStudents([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   useEffect(() => {
     if (user.role !== 'student') return;
 
@@ -1696,6 +1787,47 @@ export function ViewUserDetails({ user, users, onClose }: { user: User; users: U
     <div className="p-4 sm:p-5">
       <h2 className="text-lg font-bold text-[#1F2937] mb-4">User Details</h2>
       
+      {user.role === "student" && (
+        <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden mb-4">
+          <div className="flex flex-wrap items-center gap-2 px-2 py-2 border-b border-gray-100 bg-gray-50">
+            <div className="text-[10px] font-bold text-gray-800">Account Monitoring</div>
+            <div className="flex gap-2 flex-1">
+              <select 
+                value={selectedCourse}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSelectedCourse(val);
+                  if (!val) setSelectedSection("");
+                }}
+                className="flex-1 min-w-0 px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+              >
+                <option value="">All Courses</option>
+                {courseOptions.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <select 
+                value={selectedSection}
+                onChange={(e) => setSelectedSection(e.target.value)}
+                disabled={!selectedCourse}
+                className="flex-1 min-w-0 px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm disabled:opacity-50"
+              >
+                <option value="">{!selectedCourse ? "Select course first" : "All Sections"}</option>
+                {sectionOptions.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <select
+                value={selectedStatus}
+                onChange={(e) => setSelectedStatus(e.target.value)}
+                className="px-2 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[80px]"
+              >
+                <option value="ALL">Status</option>
+                <option value="PENDING">Pending</option>
+                <option value="APPROVED">Approved</option>
+                <option value="REJECTED">Rejected</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="space-y-4">
         <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl border border-gray-100">
           <div className="h-10 w-10 rounded-full bg-white text-[#F97316] border border-orange-100 flex items-center justify-center font-bold text-lg shadow-sm">
@@ -2312,10 +2444,7 @@ export function UsersView({
     
     // First get all users for this role
     const roleUsers = users.filter(u => u.role?.toLowerCase() === targetRole);
-    
-    const userCourses = Array.from(new Set(roleUsers.map(u => u.course).filter(Boolean))).sort() as string[];
-    const userSections = Array.from(new Set(roleUsers.map(u => u.section).filter(Boolean))).sort() as string[];
-    
+
     const filterFn = (u: User) => 
       (courseFilter === "" || u.course === courseFilter) &&
       (sectionFilter === "" || u.section === sectionFilter) &&
@@ -2338,6 +2467,26 @@ export function UsersView({
       // Sort others alphabetically too
       active.sort((a, b) => (a.lastname || "").localeCompare(b.lastname || ""));
     }
+
+    // Build course/section options from ACTIVE users only (only show with data)
+    const norm = (x?: string) => (x || "").replace(/\s+/g, " ").trim();
+    const courseMap = new Map<string, string>();
+    active.forEach(u => {
+      const n = norm(u.course);
+      if (!n) return;
+      const key = n.toLowerCase();
+      if (!courseMap.has(key)) courseMap.set(key, n);
+    });
+    const sectionMap = new Map<string, string>();
+    const sectionSource = courseFilter ? active.filter(u => norm(u.course) === courseFilter) : active;
+    sectionSource.forEach(u => {
+      const n = norm(u.section);
+      if (!n) return;
+      const key = n.toLowerCase();
+      if (!sectionMap.has(key)) sectionMap.set(key, n);
+    });
+    const userCourses = Array.from(courseMap.values()).sort((a, b) => a.localeCompare(b));
+    const userSections = Array.from(sectionMap.values()).sort((a, b) => a.localeCompare(b));
 
     return { 
       activeUsers: active, 
@@ -2381,7 +2530,7 @@ export function UsersView({
                 setCourseFilter(e.target.value);
                 if (e.target.value === "") setSectionFilter("");
               }}
-              className="px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[90px]"
+              className="flex-1 min-w-0 px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
             >
               <option value="">All Courses</option>
               {courses.map(course => (
@@ -2392,7 +2541,7 @@ export function UsersView({
             <select
               value={sectionFilter}
               onChange={(e) => setSectionFilter(e.target.value)}
-              className="px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[70px]"
+              className="flex-1 min-w-0 px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
             >
               <option value="">All Sections</option>
               {sections.map(section => (

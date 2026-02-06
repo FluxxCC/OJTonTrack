@@ -10,7 +10,7 @@ export async function POST(req: Request) {
     }
 
     const body = await req.json();
-    let { idnumber, currentPassword, newPassword } = body;
+    let { idnumber, currentPassword, newPassword, role, table } = body;
 
     if (!idnumber || !currentPassword || !newPassword) {
       return NextResponse.json({ error: "All fields are required" }, { status: 400 });
@@ -19,19 +19,43 @@ export async function POST(req: Request) {
     // Normalize idnumber
     idnumber = String(idnumber).trim();
 
-    // Verify current password across tables
-    // Use correct table names
-    const tables = ["users_students", "users_coordinators", "users_supervisors", "users_instructors", "users_super_admins"];
-    let user = null;
+    // Resolve target table (prefer explicit role/table to avoid cross-role collisions)
+    const roleKey = String(role || "").toLowerCase().trim();
+    const tableOverride = String(table || "").trim();
+    const roleToTable: Record<string, string> = {
+      student: "users_students",
+      coordinator: "users_coordinators",
+      supervisor: "users_supervisors",
+      instructor: "users_instructors",
+      superadmin: "users_super_admins",
+      admin: "users_super_admins",
+    };
+    let user: { id: number; password: string } | null = null;
     let userTable = "";
 
-    for (const t of tables) {
+    if (tableOverride) {
+      userTable = tableOverride;
+      const { data } = await admin.from(userTable).select("id, password").eq("idnumber", idnumber).maybeSingle();
+      if (data) {
+        user = data as any;
+      }
+    } else if (roleKey && roleToTable[roleKey]) {
+      userTable = roleToTable[roleKey];
+      const { data } = await admin.from(userTable).select("id, password").eq("idnumber", idnumber).maybeSingle();
+      if (data) {
+        user = data as any;
+      }
+    } else {
+      // Fallback: search across tables (legacy behavior)
+      const tables = ["users_students", "users_coordinators", "users_supervisors", "users_instructors", "users_super_admins"];
+      for (const t of tables) {
         const { data } = await admin.from(t).select("id, password").eq("idnumber", idnumber).maybeSingle();
         if (data) {
-            user = data;
-            userTable = t;
-            break;
+          user = data as any;
+          userTable = t;
+          break;
         }
+      }
     }
     
     // Check if user exists

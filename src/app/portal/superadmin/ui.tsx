@@ -368,15 +368,35 @@ export function TimeEntryView() {
   const [availableSections, setAvailableSections] = useState<Section[]>([]);
   const [studentSchedules, setStudentSchedules] = useState<Record<string, any>>({});
 
+  useEffect(() => {
+    setSectionFilter("");
+  }, [courseFilter]);
+
   const courseOptions = useMemo(() => {
-    const names = availableCourses.map(c => c.name).filter(Boolean);
-    return Array.from(new Set(names)).sort((a, b) => a.localeCompare(b));
+    return availableCourses
+      .map((c) => (c.name || "").replace(/\s+/g, " ").trim())
+      .filter((n) => !!n)
+      .sort((a, b) => a.localeCompare(b));
   }, [availableCourses]);
 
   const sectionOptions = useMemo(() => {
-    const names = availableSections.map(s => s.name).filter(Boolean);
-    return Array.from(new Set(names)).sort((a, b) => a.localeCompare(b));
-  }, [availableSections]);
+    const norm = (x?: string) => (x || "").replace(/\s+/g, " ").trim();
+    const map = new Map<string, string>();
+    let catalogSections = availableSections;
+    if (courseFilter) {
+      const courseObj = availableCourses.find((c) => norm(c.name) === norm(courseFilter));
+      catalogSections = catalogSections.filter((s) => {
+        return courseObj ? Number(s.course_id) === Number(courseObj.id) : false;
+      });
+    }
+    catalogSections.forEach((s) => {
+      const name = norm(s.name);
+      if (!name) return;
+      const key = name.toLowerCase();
+      if (!map.has(key)) map.set(key, name);
+    });
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
+  }, [availableSections, availableCourses, courseFilter]);
 
   // Fetch student schedules
   useEffect(() => {
@@ -408,9 +428,26 @@ export function TimeEntryView() {
       params.set("page", String(page));
       params.set("limit", String(limit));
       params.set("role", "student");
+      params.set("approvedOnly", "true");
       if (searchQuery.trim()) params.set("search", searchQuery.trim());
-      if (courseFilter) params.set("course", courseFilter);
-      if (sectionFilter) params.set("section", sectionFilter);
+      if (courseFilter) {
+        const c = availableCourses.find(c => (c.name || "").replace(/\s+/g, " ").trim() === (courseFilter || "").replace(/\s+/g, " ").trim());
+        if (c) {
+          params.set("courseId", String(c.id));
+          params.set("course", (c.name || "").replace(/\s+/g, " ").trim());
+        } else {
+          params.set("course", (courseFilter || "").replace(/\s+/g, " ").trim());
+        }
+      }
+      if (sectionFilter) {
+        const s = availableSections.find(s => (s.name || "").replace(/\s+/g, " ").trim() === (sectionFilter || "").replace(/\s+/g, " ").trim());
+        if (s) {
+          params.set("sectionId", String(s.id));
+          params.set("section", (s.name || "").replace(/\s+/g, " ").trim());
+        } else {
+          params.set("section", (sectionFilter || "").replace(/\s+/g, " ").trim());
+        }
+      }
 
       const res = await fetch(`/api/users?${params.toString()}`);
       const data = await res.json();
@@ -424,7 +461,7 @@ export function TimeEntryView() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, searchQuery, courseFilter, sectionFilter]);
+  }, [page, limit, searchQuery, courseFilter, sectionFilter, availableCourses, availableSections]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -947,14 +984,7 @@ export function TimeEntryView() {
   if (!selectedStudent) {
     return (
       <div className="space-y-6 animate-in fade-in duration-500">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-[#1F2937]">Time Entry Management</h1>
-             <p className="text-sm text-gray-500">
-               Select a student to view and edit detailed attendance logs.
-             </p>
-          </div>
-        </div>
+        <div className="flex items-center justify-between"></div>
 
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 space-y-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -963,18 +993,18 @@ export function TimeEntryView() {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Filter by name, ID number, course or section..."
-                className="w-full rounded-xl border border-gray-300 px-4 py-2.5 pl-9 text-sm text-gray-900 placeholder:text-gray-500 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none transition-all"
+                placeholder="Search..."
+                className="w-full pl-9 pr-8 py-1.5 bg-white border border-gray-300 rounded-lg text-xs placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
               />
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
             </div>
-            <div className="flex flex-wrap gap-2 items-center">
+            <div className="mt-2 flex flex-wrap sm:flex-nowrap gap-2">
               <select
                 value={courseFilter}
                 onChange={(e) => setCourseFilter(e.target.value)}
-                className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none"
+                className="flex-1 min-w-0 px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
               >
-                <option value="" hidden>All courses</option>
+                <option value="">All Courses</option>
                 {courseOptions.map((name) => (
                   <option key={name} value={name}>
                     {name}
@@ -984,9 +1014,9 @@ export function TimeEntryView() {
               <select
                 value={sectionFilter}
                 onChange={(e) => setSectionFilter(e.target.value)}
-                className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 focus:border-[#F97316] focus:ring-1 focus:ring-[#F97316] outline-none"
+                className="flex-1 min-w-0 px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
               >
-                <option value="" hidden>All sections</option>
+                <option value="">All Sections</option>
                 {sectionOptions.map((name) => (
                   <option key={name} value={name}>
                     {name}
@@ -1539,10 +1569,7 @@ export function SystemLogsView() {
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex items-center justify-between">
-         <div>
-            <h1 className="text-2xl font-bold text-[#1F2937]">System Logs</h1>
-            <p className="text-sm text-gray-500">Audit trail of admin actions</p>
-         </div>
+         <div></div>
          <button onClick={fetchLogs} className="p-2 text-gray-500 hover:text-[#F97316] hover:bg-orange-50 rounded-lg transition-colors">
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg>
          </button>
@@ -2061,11 +2088,6 @@ export function EditUserForm({
 
         payload.course = courseObj ? courseObj.id : form.course;
         payload.section = sectionObj ? sectionObj.id : form.section;
-
-        // Deployment info for students
-        if (form.company) payload.company = form.company;
-        if (form.location) payload.location = form.location;
-        if (form.supervisorid) payload.supervisorid = form.supervisorid;
       }
       
       if (user.role === "supervisor") {
@@ -2178,39 +2200,6 @@ export function EditUserForm({
                 </div>
               </div>
             </label>
-            
-            <div className="md:col-span-2 border-t border-gray-100 pt-4 mt-2">
-               <label className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 block">Deployment Info</label>
-               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                   <label className="grid gap-1.5">
-                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Company</span>
-                      <input
-                        value={form.company}
-                        onChange={(e) => setForm({ ...form, company: e.target.value })}
-                        className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
-                        placeholder="Company Name"
-                      />
-                   </label>
-                   <label className="grid gap-1.5">
-                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Location</span>
-                      <input
-                        value={form.location}
-                        onChange={(e) => setForm({ ...form, location: e.target.value })}
-                        className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all"
-                        placeholder="City / Address"
-                      />
-                   </label>
-                   <label className="grid gap-1.5 md:col-span-2">
-                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Supervisor ID</span>
-                      <input
-                        value={form.supervisorid}
-                        onChange={(e) => setForm({ ...form, supervisorid: e.target.value })}
-                        className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-500 focus:border-[#F97316] focus:ring-2 focus:ring-[#F97316]/20 outline-none transition-all font-mono"
-                        placeholder="Supervisor's ID Number"
-                      />
-                   </label>
-               </div>
-            </div>
           </>
         )}
 
@@ -2320,6 +2309,36 @@ export function UserManagementView({
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [deletingUser, setDeletingUser] = useState<User | null>(null);
 
+  useEffect(() => {
+    setSectionFilter("");
+  }, [courseFilter]);
+
+  const courseOptions = useMemo(() => {
+    return availableCourses
+      .map((c) => (c.name || "").replace(/\s+/g, " ").trim())
+      .filter((n) => !!n)
+      .sort((a, b) => a.localeCompare(b));
+  }, [availableCourses]);
+
+  const sectionOptions = useMemo(() => {
+    const norm = (x?: string) => (x || "").replace(/\s+/g, " ").trim();
+    const map = new Map<string, string>();
+    let catalogSections = availableSections;
+    if (courseFilter) {
+      const courseObj = availableCourses.find((c) => norm(c.name) === norm(courseFilter));
+      catalogSections = catalogSections.filter((s) => {
+        return courseObj ? Number(s.course_id) === Number(courseObj.id) : false;
+      });
+    }
+    catalogSections.forEach((s) => {
+      const name = norm(s.name);
+      if (!name) return;
+      const key = name.toLowerCase();
+      if (!map.has(key)) map.set(key, name);
+    });
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
+  }, [availableSections, availableCourses, courseFilter]);
+
   const fetchUsers = useCallback(async () => {
     setLoading(true);
     try {
@@ -2328,8 +2347,16 @@ export function UserManagementView({
       params.set("limit", String(limit));
       params.set("role", filter);
       if (query.trim()) params.set("search", query.trim());
-      if (courseFilter) params.set("course", courseFilter);
-      if (sectionFilter) params.set("section", sectionFilter);
+      if (courseFilter) {
+        const c = availableCourses.find(c => (c.name || "").replace(/\s+/g, " ").trim() === (courseFilter || "").replace(/\s+/g, " ").trim());
+        if (c) params.set("courseId", String(c.id));
+        else params.set("course", courseFilter);
+      }
+      if (sectionFilter) {
+        const s = availableSections.find(s => (s.name || "").replace(/\s+/g, " ").trim() === (sectionFilter || "").replace(/\s+/g, " ").trim());
+        if (s) params.set("sectionId", String(s.id));
+        else params.set("section", sectionFilter);
+      }
       if (filter === "student") params.set("approvedOnly", "true");
 
       const res = await fetch(`/api/users?${params.toString()}`);
@@ -2344,7 +2371,7 @@ export function UserManagementView({
     } finally {
       setLoading(false);
     }
-  }, [page, limit, filter, query, courseFilter, sectionFilter]);
+  }, [page, limit, filter, query, courseFilter, sectionFilter, availableCourses, availableSections]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -2369,6 +2396,52 @@ export function UserManagementView({
     setEditingUser(null);
   };
 
+  const handleApproveUser = async (user: User) => {
+    if (!confirm(`Approve ${user.firstname} ${user.lastname}?`)) return;
+    try {
+      const actorId = typeof window !== "undefined" ? localStorage.getItem("idnumber") || "SYSTEM" : "SYSTEM";
+      const res = await fetch(`/api/users/${user.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          signup_status: "APPROVED",
+          actorId,
+          actorRole: "superadmin",
+          reason: "Superadmin approval"
+        })
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Failed to approve user");
+      fetchUsers();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Approve failed");
+    }
+  };
+
+  const handleRejectUser = async (user: User) => {
+    const note = typeof window !== "undefined" ? prompt("Enter rejection note (optional):", "") || "" : "";
+    if (!confirm(`Reject ${user.firstname} ${user.lastname}?`)) return;
+    try {
+      const actorId = typeof window !== "undefined" ? localStorage.getItem("idnumber") || "SYSTEM" : "SYSTEM";
+      const res = await fetch(`/api/users/${user.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          signup_status: "REJECTED",
+          actorId,
+          actorRole: "superadmin",
+          reason: "Superadmin reject",
+          rejectionNote: note
+        })
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Failed to reject user");
+      fetchUsers();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Reject failed");
+    }
+  };
+
   const handleDelete = async () => {
     if (deletingUser) {
       await onDelete(deletingUser.id, deletingUser.role);
@@ -2377,13 +2450,21 @@ export function UserManagementView({
     }
   };
 
+  const displayedUsers = useMemo(() => {
+    const norm = (x?: string) => (x || "").replace(/\s+/g, " ").trim();
+    let list = users;
+    if (courseFilter) {
+      list = list.filter(u => norm(u.course) === norm(courseFilter));
+    }
+    if (sectionFilter) {
+      list = list.filter(u => norm(u.section) === norm(sectionFilter));
+    }
+    return list;
+  }, [users, courseFilter, sectionFilter, filter]);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-        <div>
-           <h1 className="text-xl font-bold text-[#1F2937]">Manage Users</h1>
-           <p className="text-xs text-gray-500">View and manage system users</p>
-        </div>
         <button 
           onClick={() => setShowAdd(true)}
           className="flex items-center justify-center gap-2 bg-[#F97316] text-white px-4 py-2 rounded-xl hover:bg-[#EA580C] transition-colors font-semibold shadow-sm active:scale-95 text-sm"
@@ -2417,36 +2498,37 @@ export function UserManagementView({
 
         <div className="p-3 bg-gray-50 border-b border-gray-200 flex flex-col md:flex-row gap-3">
            <div className="relative flex-1">
-              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                 <Search className="text-gray-400" size={18} />
-              </div>
-              <input
+             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <Search className="text-gray-400" size={18} />
+             </div>
+             <input
                  type="text"
                  value={query}
                  onChange={(e) => setQuery(e.target.value)}
-                 className="block w-full rounded-xl border-gray-200 pl-10 pr-3 py-2.5 text-sm placeholder-gray-500 focus:border-[#F97316] focus:ring-[#F97316] focus:ring-opacity-50 transition-all shadow-sm"
-                 placeholder="Search by name, ID number..."
+                className="w-full pl-10 pr-8 py-1.5 bg-white border border-gray-300 rounded-lg text-xs placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
+                placeholder="Search..."
               />
            </div>
            
-           {(filter === "student" || filter === "instructor" || availableCourses.length > 0) && (
-             <div className="flex gap-2">
+          {(filter === "student" || filter === "instructor" || availableCourses.length > 0) && (
+             <div className="mt-2 flex flex-wrap sm:flex-nowrap gap-2">
                 <select
                   value={courseFilter}
                   onChange={(e) => setCourseFilter(e.target.value)}
-                  className="px-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[140px] shadow-sm"
+                  className="flex-1 min-w-0 px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
                 >
                   <option value="">All Courses</option>
-                  {availableCourses.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                  {courseOptions.map(name => <option key={name} value={name}>{name}</option>)}
                 </select>
                 <select
                   value={sectionFilter}
                   onChange={(e) => setSectionFilter(e.target.value)}
-                  className="px-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] text-gray-700 min-w-[140px] shadow-sm"
+                  className="flex-1 min-w-0 px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#F97316]/20 focus:border-[#F97316] shadow-sm"
                 >
                   <option value="">All Sections</option>
-                  {availableSections.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                  {sectionOptions.map(name => <option key={name} value={name}>{name}</option>)}
                 </select>
+
              </div>
            )}
         </div>
@@ -2455,18 +2537,25 @@ export function UserManagementView({
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">User</th>
+                <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">
+                  {filter === 'student' ? 'Student' : 'User'}
+                </th>
                 {filter === 'supervisor' ? (
                    <>
                       <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Company</th>
                       <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Location</th>
                    </>
                 ) : (
-                   <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">
-                     {filter === 'coordinator' ? 'Assigned Courses' : 
-                      filter === 'instructor' ? 'Assigned Sections' :
-                      'Details'}
-                   </th>
+                  filter === 'student' ? (
+                    <>
+                      <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Course</th>
+                      <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Section</th>
+                    </>
+                  ) : (
+                    <th scope="col" className="px-2 py-1 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">
+                      {filter === 'coordinator' ? 'Assigned Courses' : 'Assigned Sections'}
+                    </th>
+                  )
                 )}
                 <th scope="col" className="px-2 py-1 text-right text-xs font-bold text-gray-500 uppercase tracking-wider">Action</th>
               </tr>
@@ -2474,10 +2563,10 @@ export function UserManagementView({
             <tbody className="bg-white divide-y divide-gray-200">
               {loading ? (
                  <tr><td colSpan={filter === 'supervisor' ? 4 : 3} className="px-2 py-4 text-center text-gray-500">Loading users...</td></tr>
-              ) : users.length === 0 ? (
+              ) : displayedUsers.length === 0 ? (
                  <tr><td colSpan={filter === 'supervisor' ? 4 : 3} className="px-2 py-4 text-center text-gray-500">No users found matching your criteria</td></tr>
               ) : (
-                users.map((u) => {
+                displayedUsers.map((u) => {
                   return (
                     <tr key={u.id} className="hover:bg-gray-50 transition-colors">
                       <td className="px-2 py-1 whitespace-nowrap">
@@ -2503,22 +2592,44 @@ export function UserManagementView({
                             </td>
                          </>
                       ) : (
-                         <td className="px-2 py-1">
+                        filter === 'student' ? (
+                          <>
+                            <td className="px-2 py-1">
+                              <div className="text-xs font-bold text-gray-900">
+                                {u.course || <span className="text-gray-400 font-normal italic">--</span>}
+                              </div>
+                            </td>
+                            <td className="px-2 py-1">
+                              <div className="text-xs font-bold text-gray-900">
+                                {u.section || <span className="text-gray-400 font-normal italic">--</span>}
+                              </div>
+                            </td>
+                          </>
+                        ) : (
+                          <td className="px-2 py-1">
                             <div className="text-xs font-bold text-gray-900">
-                               {[u.course, u.section].filter(Boolean).join("-") || <span className="text-gray-400 font-normal italic">--</span>}
+                              {[u.course, u.section].filter(Boolean).join("-") || <span className="text-gray-400 font-normal italic">--</span>}
                             </div>
-                         </td>
+                          </td>
+                        )
                       )}
                       <td className="px-2 py-1 whitespace-nowrap text-right text-xs font-medium">
-                        <div className="flex justify-end gap-3">
-                           <button onClick={() => setEditingUser(u)} className="text-[#F97316] hover:text-[#EA580C] font-semibold transition-colors">Edit</button>
-                           <button 
+                        {filter === "student" && String(u.signup_status || "").toUpperCase() === "PENDING" ? (
+                          <div className="flex justify-end gap-3">
+                            <button onClick={() => handleApproveUser(u)} className="text-green-600 hover:text-green-800 font-semibold transition-colors">Approve</button>
+                            <button onClick={() => handleRejectUser(u)} className="text-red-600 hover:text-red-900 font-semibold transition-colors">Reject</button>
+                          </div>
+                        ) : (
+                          <div className="flex justify-end gap-3">
+                            <button onClick={() => setEditingUser(u)} className="text-[#F97316] hover:text-[#EA580C] font-semibold transition-colors">Edit</button>
+                            <button 
                               onClick={() => setDeletingUser(u)} 
                               className="text-red-600 hover:text-red-900 font-semibold transition-colors"
-                           >
+                            >
                               Delete
-                           </button>
-                        </div>
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );

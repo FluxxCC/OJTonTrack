@@ -140,6 +140,8 @@ export async function GET(req: Request) {
   const supervisorId = searchParams.get('supervisor_id');
   const course = searchParams.get('course'); 
   const section = searchParams.get('section'); 
+  const courseIdParam = searchParams.get('courseId');
+  const sectionIdParam = searchParams.get('sectionId');
   const idnumber = searchParams.get('idnumber');
   const approvedOnly = searchParams.get('approvedOnly') === 'true';
 
@@ -204,10 +206,14 @@ export async function GET(req: Request) {
   }
 
   if (tableName === "users_students") {
-    if (course) {
+    if (courseIdParam && !isNaN(Number(courseIdParam))) {
+       query = query.eq('course_id', Number(courseIdParam));
+    } else if (course) {
        query = query.eq('courses.name', course); 
     }
-    if (section) {
+    if (sectionIdParam && !isNaN(Number(sectionIdParam))) {
+       query = query.eq('section_id', Number(sectionIdParam));
+    } else if (section) {
        query = query.eq('sections.name', section);
     }
     if (supervisorId) {

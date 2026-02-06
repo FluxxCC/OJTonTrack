@@ -264,10 +264,7 @@ export function SchedulingView({ courses }: { courses: {id: number, name: string
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
       <div className="flex justify-between items-center">
-        <div>
-          <h2 className="text-xl font-bold text-gray-900">Scheduling</h2>
-          <p className="text-sm text-gray-500 mt-1">Manage institution-level calendar events and special dates.</p>
-        </div>
+        <div></div>
         <button 
           onClick={handleOpenAdd}
           className="flex items-center gap-2 px-4 py-2 bg-[#F97316] text-white text-sm font-bold rounded-xl hover:bg-orange-600 transition-colors shadow-sm"

@@ -79,7 +79,7 @@ function SupervisorContent() {
   const [students, setStudents] = useState<User[]>([]);
   const [supervisorInfo, setSupervisorInfo] = useState<{ company?: string; location?: string } | null>(null);
   const [me, setMe] = useState<User | null>(null);
-  const [loadingMe, setLoadingMe] = useState(true);
+  const [loadingMe, setLoadingMe] = useState(false);
   const [myIdnumber, setMyIdnumber] = useState("");
   const [evalStatuses, setEvalStatuses] = useState<Record<string, boolean>>({});
   const [completedIds, setCompletedIds] = useState<Set<string>>(new Set());
@@ -132,6 +132,7 @@ function SupervisorContent() {
   // User Info - Client Side Only to avoid Hydration Mismatch
   useEffect(() => {
     const initUser = async () => {
+        setLoadingMe(true);
         try {
             // 1. Try LocalStorage first
             const stored = localStorage.getItem("idnumber");
@@ -150,6 +151,12 @@ function SupervisorContent() {
                 }
             }
         } catch {}
+        finally {
+          // If we still don't have an idnumber, stop the spinner
+          if (!localStorage.getItem("idnumber")) {
+            setLoadingMe(false);
+          }
+        }
     };
     initUser();
   }, []);

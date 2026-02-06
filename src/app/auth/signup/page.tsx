@@ -62,17 +62,14 @@ export default function SignupPage() {
 
   const filteredSections = React.useMemo(() => {
     if (!formData.courseId) return [];
-
-    // Filter by course and allow only 4A, 4B, 4C, 4D
-    const allowed = sections.filter(s => 
-      String(s.course_id) === String(formData.courseId) &&
-      ["4A", "4B", "4C", "4D"].includes(s.name.toUpperCase())
-    );
-
-    // Remove duplicates by name
-    return Array.from(new Map(allowed.map(s => [s.name.toUpperCase(), s])).values())
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const byCourse = sections.filter(s => String(s.course_id) === String(formData.courseId));
+    const dedup = Array.from(new Map(byCourse.map(s => [String(s.name).toUpperCase().trim(), s])).values());
+    return dedup.sort((a, b) => a.name.localeCompare(b.name));
   }, [sections, formData.courseId]);
+
+  useEffect(() => {
+    setFormData(prev => ({ ...prev, sectionId: "" }));
+  }, [formData.courseId]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -742,4 +739,3 @@ function TermsModal({ onClose, onAccept, onDecline }: { onClose: () => void; onA
     </div>
   );
 }
-

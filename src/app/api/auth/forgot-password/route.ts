@@ -67,7 +67,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Your email is not verified. Please verify your email first." }, { status: 403 });
     }
 
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://ojtontrak.online";
+    const appUrl = "https://ojtontrak.online";
     const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
     const payload = {
       t: "reset_password",
