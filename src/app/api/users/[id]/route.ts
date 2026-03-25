@@ -58,27 +58,32 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
          if (f === 'course') updates['course_id'] = body[f];
          else if (f === 'section') updates['section_id'] = body[f];
          else if (f === 'supervisorid') {
-             const val = body[f];
-             // Check if it's a string that looks like an ID Number (not a pure number)
-             // or if we just want to be safe, always try to resolve if it's a string.
-             if (typeof val === 'string' && isNaN(Number(val))) {
+             const raw = body[f];
+             if (raw === null || raw === undefined) {
+               updates['supervisor_id'] = null;
+             } else if (typeof raw === 'number' && Number.isFinite(raw)) {
+               updates['supervisor_id'] = raw;
+             } else if (typeof raw === 'string') {
+               const val = raw.trim();
+               if (!val) {
+                 updates['supervisor_id'] = null;
+               } else {
                  const { data: sup } = await admin
-                    .from('users_supervisors')
-                    .select('id')
-                    .eq('idnumber', val)
-                    .maybeSingle();
-                 
+                   .from('users_supervisors')
+                   .select('id')
+                   .eq('idnumber', val)
+                   .maybeSingle();
+
                  if (sup) {
-                     updates['supervisor_id'] = sup.id;
+                   updates['supervisor_id'] = sup.id;
+                 } else if (!Number.isNaN(Number(val))) {
+                   updates['supervisor_id'] = Number(val);
                  } else {
-                     // If we can't find the supervisor by ID Number, we can't assign.
-                     // We could throw an error or just ignore. 
-                     // Ignoring might mean it doesn't update.
-                     console.warn(`Could not resolve supervisor ID number: ${val}`);
+                   return NextResponse.json({ error: `Supervisor not found: ${val}` }, { status: 400 });
                  }
+               }
              } else {
-                 // It's already a number or a numeric string
-                 updates['supervisor_id'] = val;
+               updates['supervisor_id'] = raw;
              }
          }
          else updates[f] = body[f];

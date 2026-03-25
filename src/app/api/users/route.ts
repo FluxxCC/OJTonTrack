@@ -74,7 +74,24 @@ export async function POST(req: Request) {
         
         newUser.course_id = finalCourseId;
         newUser.section_id = finalSectionId;
-        newUser.supervisor_id = supervisorid || null; // Expecting ID, convert empty string to null
+        let supervisorInternalId: number | null = null;
+        if (typeof supervisorid === "number" && Number.isFinite(supervisorid)) {
+          supervisorInternalId = supervisorid;
+        } else if (typeof supervisorid === "string") {
+          const val = supervisorid.trim();
+          if (val) {
+            const { data: sup } = await admin
+              .from("users_supervisors")
+              .select("id")
+              .eq("idnumber", val)
+              .maybeSingle();
+
+            if (sup) supervisorInternalId = sup.id;
+            else if (!Number.isNaN(Number(val))) supervisorInternalId = Number(val);
+            else return NextResponse.json({ error: `Supervisor not found: ${val}` }, { status: 400 });
+          }
+        }
+        newUser.supervisor_id = supervisorInternalId;
         newUser.signup_status = 'APPROVED'; // Admin created users are approved
     } else if (tableName === 'users_instructors') {
         // Only assign course_id if it's a valid number
@@ -217,22 +234,19 @@ export async function GET(req: Request) {
        query = query.eq('sections.name', section);
     }
     if (supervisorId) {
-      if (!isNaN(Number(supervisorId))) {
-        query = query.eq('supervisor_id', supervisorId);
+      const val = String(supervisorId).trim();
+      const { data: supData } = await admin
+        .from("users_supervisors")
+        .select("id")
+        .eq("idnumber", val)
+        .maybeSingle();
+
+      if (supData) {
+        query = query.eq("supervisor_id", supData.id);
+      } else if (!Number.isNaN(Number(val))) {
+        query = query.eq("supervisor_id", Number(val));
       } else {
-         // Resolve ID Number (e.g. "SUP101") to internal ID
-         const { data: supData } = await admin
-            .from("users_supervisors")
-            .select("id")
-            .eq("idnumber", supervisorId)
-            .maybeSingle();
-         
-         if (supData) {
-            query = query.eq('supervisor_id', supData.id);
-         } else {
-            // If supervisor not found, return no records
-            query = query.eq('id', -1);
-         }
+        query = query.eq("id", -1);
       }
     }
   }
